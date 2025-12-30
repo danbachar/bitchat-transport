@@ -1,0 +1,47 @@
+name: bitchat_transport
+description: BLE mesh transport layer for GSG protocol. Based on Bitchat protocol.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+  flutter: '>=3.10.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # BLE - Central mode (scanning, connecting to peripherals)
+  flutter_blue_plus: ^1.31.0
+  
+  # BLE - Peripheral mode (advertising, accepting connections)
+  ble_peripheral: ^2.4.0
+  
+  # Cryptography (Ed25519 signing, SHA-256 hashing)
+  cryptography: ^2.7.0
+  
+  # Protobuf serialization
+  protobuf: ^3.1.0
+  
+  # Permissions handling
+  permission_handler: ^11.0.0
+  
+  # UUID generation
+  uuid: ^4.2.0
+  
+  # Collection utilities (for bloom filter, queues)
+  collection: ^1.18.0
+  
+  # Logging
+  logger: ^2.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+  protoc_plugin: ^21.1.0
+  build_runner: ^2.4.0
+  mockito: ^5.4.0
+
+flutter:
+  # No assets needed for transport layer
