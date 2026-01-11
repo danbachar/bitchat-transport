@@ -74,6 +74,8 @@ export 'src/transport/transport.dart';
 export 'src/models/identity.dart';
 export 'src/models/peer.dart';
 export 'src/models/packet.dart';
+export 'src/models/block.dart';
+export 'src/models/friendship.dart';
 
 // BLE (for advanced usage)
 export 'src/ble/permission_handler.dart' show PermissionHandler, PermissionResult;

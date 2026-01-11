@@ -6,6 +6,9 @@ import 'package:logger/logger.dart';
 import '../transport/transport_service.dart';
 import '../ble/ble_central_service.dart';
 import '../ble/ble_peripheral_service.dart';
+import '../mesh/router.dart' show BitchatRouter;
+import '../mesh/mesh_router.dart';
+import '../models/identity.dart';
 
 /// Default display info for BLE transport
 const _defaultBleDisplayInfo = TransportDisplayInfo(
@@ -16,17 +19,17 @@ const _defaultBleDisplayInfo = TransportDisplayInfo(
 );
 
 /// BLE-based implementation of the transport service.
-/// 
+///
 /// Combines Central (scanner) and Peripheral (advertiser) roles to create
 /// a mesh-capable BLE transport layer. Devices can both discover and be
 /// discovered by other mesh participants.
-/// 
+///
 /// ## BLE Mesh Architecture
-/// 
+///
 /// Each device runs both modes simultaneously:
 /// - **Peripheral mode**: Advertises presence, accepts incoming connections
 /// - **Central mode**: Scans for peers, initiates outgoing connections
-/// 
+///
 /// This dual-role approach maximizes connectivity in the mesh.
 class BleTransportService extends TransportService with TransportServiceMixin {
   final Logger _log = Logger();
@@ -37,11 +40,17 @@ class BleTransportService extends TransportService with TransportServiceMixin {
   /// Local device name for advertising
   final String? localName;
 
+  /// Our identity (required for the router)
+  final BitchatIdentity identity;
+
   /// Central service (scanner/connector)
   late final BleCentralService _central;
 
   /// Peripheral service (advertiser)
   late final BlePeripheralService _peripheral;
+
+  /// Mesh router for packet handling
+  late final MeshRouter _router;
 
   /// Current transport state
   TransportState _state = TransportState.uninitialized;
@@ -52,15 +61,44 @@ class BleTransportService extends TransportService with TransportServiceMixin {
   /// Stream controllers
   final _stateController = StreamController<TransportState>.broadcast();
   final _dataController = StreamController<TransportDataEvent>.broadcast();
-  final _connectionController = StreamController<TransportConnectionEvent>.broadcast();
-  final _discoveryController = StreamController<TransportDiscoveryEvent>.broadcast();
+  final _connectionController =
+      StreamController<TransportConnectionEvent>.broadcast();
+  final _discoveryController =
+      StreamController<TransportDiscoveryEvent>.broadcast();
 
   BleTransportService({
     required this.serviceUuid,
+    required this.identity,
     this.localName,
   }) {
     _central = BleCentralService(serviceUuid: serviceUuid);
     _peripheral = BlePeripheralService(serviceUuid: serviceUuid);
+    _router = MeshRouter(identity: identity);
+    _setupRouterCallbacks();
+  }
+
+  void _setupRouterCallbacks() {
+    _router.onSendPacket = _sendPacketToTransport;
+    _router.onBroadcast = _broadcastToTransport;
+  }
+
+  Future<bool> _sendPacketToTransport(
+      Uint8List recipientPubkey, Uint8List data) async {
+    final peerId = getPeerIdForPubkey(recipientPubkey);
+    if (peerId == null) {
+      _log.w('No peer ID found for pubkey');
+      return false;
+    }
+    return sendToPeer(peerId, data);
+  }
+
+  Future<void> _broadcastToTransport(Uint8List data,
+      {Uint8List? excludePeer}) async {
+    String? excludePeerId;
+    if (excludePeer != null) {
+      excludePeerId = getPeerIdForPubkey(excludePeer);
+    }
+    await broadcast(data, excludePeerId: excludePeerId);
   }
 
   // ===== TransportService Implementation =====
@@ -73,6 +111,9 @@ class BleTransportService extends TransportService with TransportServiceMixin {
 
   @override
   TransportState get state => _state;
+
+  @override
+  BitchatRouter get router => _router;
 
   @override
   Stream<TransportState> get stateStream => _stateController.stream;
@@ -214,10 +255,12 @@ class BleTransportService extends TransportService with TransportServiceMixin {
   }
 
   @override
-  String? getPeerIdForPubkey(Uint8List pubkey) => getPeerIdForPubkeyImpl(pubkey);
+  String? getPeerIdForPubkey(Uint8List pubkey) =>
+      getPeerIdForPubkeyImpl(pubkey);
 
   @override
-  Uint8List? getPubkeyForPeerId(String peerId) => getPubkeyForPeerIdImpl(peerId);
+  Uint8List? getPubkeyForPeerId(String peerId) =>
+      getPubkeyForPeerIdImpl(peerId);
 
   @override
   Future<void> dispose() async {
@@ -226,6 +269,8 @@ class BleTransportService extends TransportService with TransportServiceMixin {
     await stop();
     await _central.dispose();
     await _peripheral.dispose();
+
+    _router.dispose();
 
     clearPubkeyAssociations();
     _peers.clear();
@@ -299,7 +344,8 @@ class BleTransportService extends TransportService with TransportServiceMixin {
       {required bool isCentral}) {
     if (connected) {
       _getOrCreatePeer(deviceId);
-      _log.i('Peer connected: $deviceId (via ${isCentral ? "central" : "peripheral"})');
+      _log.i(
+          'Peer connected: $deviceId (via ${isCentral ? "central" : "peripheral"})');
     } else {
       removePeerPubkeyAssociation(deviceId);
       _log.i('Peer disconnected: $deviceId');
@@ -341,10 +387,10 @@ class BleTransportService extends TransportService with TransportServiceMixin {
 
   bool _isConnected(String peerId) {
     // Check both central and peripheral connections
-    final centralConnected = _central.connectedPeers
-        .any((p) => p.deviceId == peerId);
+    final centralConnected =
+        _central.connectedPeers.any((p) => p.deviceId == peerId);
     final peripheralConnected = _peripheral.connectedCount > 0;
-    // Note: peripheral doesn't expose device IDs easily, 
+    // Note: peripheral doesn't expose device IDs easily,
     // so we rely on the connection event tracking
     return centralConnected || peripheralConnected;
   }

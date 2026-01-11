@@ -31,11 +31,12 @@ Future<BitchatIdentity> _initIdentity() async {
     final seed = await keyPair.extractPrivateKeyBytes(); // 32-byte seed
     final publicKey = await keyPair.extractPublicKey();
     final publicKeyBytes = publicKey.bytes;
-    
+
     // Ed25519 private key format: seed (32 bytes) + public key (32 bytes) = 64 bytes
     final privateKey64 = Uint8List.fromList([...seed, ...publicKeyBytes]);
 
-    String nickname = 'User_${publicKeyBytes.sublist(0, 4).map((b) => b.toRadixString(16).padLeft(2, '0')).join()}';
+    String nickname =
+        'User_${publicKeyBytes.sublist(0, 4).map((b) => b.toRadixString(16).padLeft(2, '0')).join()}';
 
     var id = await BitchatIdentity.create(
       keyPair: keyPair,
@@ -48,7 +49,8 @@ Future<BitchatIdentity> _initIdentity() async {
     print('Identity found in secure storage.');
   }
 
-  final BitchatIdentity identity = BitchatIdentity.fromMap(jsonDecode(identityValue));
+  final BitchatIdentity identity =
+      BitchatIdentity.fromMap(jsonDecode(identityValue));
 
   print('Private Key Bytes (Seed): ${identity.privateKey.length} bytes');
   print('Public Key Bytes: ${identity.publicKey.length} bytes');
@@ -58,7 +60,7 @@ Future<BitchatIdentity> _initIdentity() async {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
+
   // Initialize notifications
   const AndroidInitializationSettings initializationSettingsAndroid =
       AndroidInitializationSettings('@mipmap/ic_launcher');
@@ -68,12 +70,11 @@ void main() async {
     requestBadgePermission: true,
     requestSoundPermission: true,
   );
-  const InitializationSettings initializationSettings =
-      InitializationSettings(
+  const InitializationSettings initializationSettings = InitializationSettings(
     android: initializationSettingsAndroid,
     iOS: initializationSettingsDarwin,
   );
-  
+
   await flutterLocalNotificationsPlugin.initialize(
     initializationSettings,
     onDidReceiveNotificationResponse: (NotificationResponse response) {
@@ -83,10 +84,10 @@ void main() async {
       }
     },
   );
-  
+
   // Request notification permission (Android 13+)
   await Permission.notification.request();
-  
+
   runApp(const MainApp());
 }
 
@@ -110,22 +111,29 @@ class BitchatHome extends StatefulWidget {
   State<BitchatHome> createState() => _BitchatHomeState();
 }
 
-class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin {
+class _BitchatHomeState extends State<BitchatHome>
+    with TickerProviderStateMixin {
   BitchatIdentity? _identity;
   Bitchat? _bitchat;
   String _status = 'Initializing...';
   final Map<String, Peer> _peers = {};
   Timer? _refreshTimer;
+  Timer? _friendAnnounceTimer;
   final MessageStore _messageStore = MessageStore();
+  final FriendshipStore _friendshipStore = FriendshipStore();
   int _currentIndex = 1; // Start on "Around" tab (center)
-  
+
   // Track nickname changes for animation
   final Map<String, _NicknameChange> _nicknameChanges = {};
+
+  // LibP2P address (placeholder - will be set when libp2p is configured)
+  String? _myLibp2pAddress;
 
   @override
   void initState() {
     super.initState();
     _messageStore.addListener(_onMessagesChanged);
+    _friendshipStore.addListener(_onFriendshipsChanged);
     _initialize();
     // Refresh UI every second to update "seconds ago" display
     _refreshTimer = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -136,21 +144,25 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
       }
     });
   }
-  
+
   void _onMessagesChanged() {
     setState(() {});
   }
-  
+
+  void _onFriendshipsChanged() {
+    setState(() {});
+  }
+
   void _checkPendingChat() {
     if (_pendingChatPeerHex != null && _bitchat != null && _identity != null) {
       final peerHex = _pendingChatPeerHex!;
       _pendingChatPeerHex = null;
-      
+
       // Find the peer
-      final peer = _peers.values.where((p) => 
-        ChatMessage.pubkeyToHex(p.publicKey) == peerHex
-      ).firstOrNull;
-      
+      final peer = _peers.values
+          .where((p) => ChatMessage.pubkeyToHex(p.publicKey) == peerHex)
+          .firstOrNull;
+
       if (peer != null) {
         _openChat(peer);
       }
@@ -160,7 +172,9 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
   @override
   void dispose() {
     _messageStore.removeListener(_onMessagesChanged);
+    _friendshipStore.removeListener(_onFriendshipsChanged);
     _refreshTimer?.cancel();
+    _friendAnnounceTimer?.cancel();
     _bitchat?.dispose();
     super.dispose();
   }
@@ -168,7 +182,14 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
   Future<void> _initialize() async {
     try {
       await _messageStore.initialize();
+      await _friendshipStore.initialize();
       final identity = await _initIdentity();
+
+      // Generate a placeholder libp2p address based on identity
+      // In a real implementation, this would come from the libp2p transport
+      _myLibp2pAddress =
+          '/ip4/0.0.0.0/tcp/0/p2p/${ChatMessage.pubkeyToHex(identity.publicKey).substring(0, 32)}';
+
       final bitchat = Bitchat(identity: identity);
 
       bitchat.onMessageReceived = (senderPubkey, payload) {
@@ -185,13 +206,14 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
 
       bitchat.onPeerUpdated = (peer) {
         print('Peer updated: ${peer.displayName}');
-        
+
         // Check if nickname changed
         final oldPeer = _peers[peer.id];
         if (oldPeer != null && oldPeer.nickname != peer.nickname) {
-          _showNicknameChangeAnimation(oldPeer.nickname, peer.nickname, peer.id);
+          _showNicknameChangeAnimation(
+              oldPeer.nickname, peer.nickname, peer.id);
         }
-        
+
         setState(() {
           _peers[peer.id] = peer;
         });
@@ -221,19 +243,104 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
       setState(() {
         _status = 'Running';
       });
+
+      // Start periodic friend announce timer
+      _startFriendAnnounceTimer();
     } catch (e) {
       setState(() {
         _status = 'Error: $e';
       });
     }
   }
-  
-  Future<void> _handleIncomingMessage(Uint8List senderPubkey, Uint8List payload) async {
+
+  /// Start periodic announcements to friends
+  void _startFriendAnnounceTimer() {
+    _friendAnnounceTimer?.cancel();
+    // Announce to friends every 10 seconds
+    _friendAnnounceTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      _announceToFriends();
+    });
+    // Also send an initial announce
+    _announceToFriends();
+  }
+
+  /// Send FriendAnnounce block to all friends
+  Future<void> _announceToFriends() async {
+    if (_bitchat == null || _identity == null || _myLibp2pAddress == null)
+      return;
+
+    final friends = _friendshipStore.friends;
+    if (friends.isEmpty) return;
+
+    final block = FriendAnnounceBlock(
+      libp2pAddress: _myLibp2pAddress!,
+      nickname: _identity!.nickname,
+      isOnline: true,
+    );
+    final data = block.serialize();
+
+    for (final friend in friends) {
+      final pubkey = ChatMessage.hexToPubkey(friend.peerPubkeyHex);
+      // Try to send via BLE if peer is nearby
+      final peer = _peers.values
+          .where((p) =>
+              ChatMessage.pubkeyToHex(p.publicKey) == friend.peerPubkeyHex)
+          .firstOrNull;
+
+      if (peer != null &&
+          peer.connectionState == PeerConnectionState.connected) {
+        await _bitchat!.send(pubkey, data);
+      }
+      // TODO: Also send via libp2p if friend has libp2p address
+    }
+  }
+
+  Future<void> _handleIncomingMessage(
+      Uint8List senderPubkey, Uint8List payload) async {
     final senderHex = ChatMessage.pubkeyToHex(senderPubkey);
     final myHex = ChatMessage.pubkeyToHex(_identity!.publicKey);
-    final content = String.fromCharCodes(payload);
-    
-    // Save message
+
+    // Try to parse as a block
+    final block = Block.tryDeserialize(payload);
+
+    if (block != null) {
+      await _handleBlock(block, senderHex, myHex);
+    } else {
+      // Legacy plain text message
+      final content = String.fromCharCodes(payload);
+      await _handleTextMessage(senderHex, myHex, content);
+    }
+  }
+
+  Future<void> _handleBlock(Block block, String senderHex, String myHex) async {
+    // Find sender name
+    final peer = _peers.values
+        .where((p) => ChatMessage.pubkeyToHex(p.publicKey) == senderHex)
+        .firstOrNull;
+    final senderName = peer?.displayName ?? 'Unknown';
+
+    switch (block.type) {
+      case BlockType.say:
+        final sayBlock = block as SayBlock;
+        await _handleTextMessage(senderHex, myHex, sayBlock.content);
+
+      case BlockType.friendshipOffer:
+        final offerBlock = block as FriendshipOfferBlock;
+        await _handleFriendshipOffer(senderHex, myHex, offerBlock, senderName);
+
+      case BlockType.friendshipAccept:
+        final acceptBlock = block as FriendshipAcceptBlock;
+        await _handleFriendshipAccept(
+            senderHex, myHex, acceptBlock, senderName);
+
+      case BlockType.friendAnnounce:
+        final announceBlock = block as FriendAnnounceBlock;
+        await _handleFriendAnnounce(senderHex, announceBlock);
+    }
+  }
+
+  Future<void> _handleTextMessage(
+      String senderHex, String myHex, String content) async {
     final chatMessage = ChatMessage(
       senderPubkeyHex: senderHex,
       recipientPubkeyHex: myHex,
@@ -242,15 +349,130 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
       isOutgoing: false,
     );
     await _messageStore.saveMessage(chatMessage);
-    
+
     // Find sender name
-    final peer = _peers.values.where((p) => 
-      ChatMessage.pubkeyToHex(p.publicKey) == senderHex
-    ).firstOrNull;
+    final peer = _peers.values
+        .where((p) => ChatMessage.pubkeyToHex(p.publicKey) == senderHex)
+        .firstOrNull;
     final senderName = peer?.displayName ?? 'Unknown';
-    
+
     // Show notification
-    const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
+    await _showMessageNotification(senderHex, senderName, content);
+  }
+
+  Future<void> _handleFriendshipOffer(
+    String senderHex,
+    String myHex,
+    FriendshipOfferBlock block,
+    String senderName,
+  ) async {
+    // Record the friend request
+    final friendship = await _friendshipStore.receiveFriendRequest(
+      peerPubkeyHex: senderHex,
+      libp2pAddress: block.libp2pAddress,
+      nickname: senderName,
+      message: block.message,
+    );
+
+    // Save as a chat message
+    final chatMessage = ChatMessage.friendRequestReceived(
+      senderPubkeyHex: senderHex,
+      recipientPubkeyHex: myHex,
+      libp2pAddress: block.libp2pAddress,
+      message: block.message,
+    );
+    await _messageStore.saveMessage(chatMessage);
+
+    // Show snackbar notification
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              const Icon(Icons.person_add, color: Colors.white),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text('$senderName wants to be friends!'),
+              ),
+            ],
+          ),
+          duration: const Duration(seconds: 4),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: const Color(0xFF1B3D2F),
+          action: SnackBarAction(
+            label: 'View',
+            textColor: const Color(0xFFE8A33C),
+            onPressed: () {
+              setState(() => _currentIndex = 0); // Go to Chats tab
+            },
+          ),
+        ),
+      );
+    }
+
+    // Show notification if friendship is new
+    if (friendship.status == FriendshipStatus.received) {
+      await _showFriendRequestNotification(senderHex, senderName);
+    }
+  }
+
+  Future<void> _handleFriendshipAccept(
+    String senderHex,
+    String myHex,
+    FriendshipAcceptBlock block,
+    String senderName,
+  ) async {
+    // Update friendship status
+    await _friendshipStore.processFriendshipAccept(
+      peerPubkeyHex: senderHex,
+      libp2pAddress: block.libp2pAddress,
+      nickname: senderName,
+    );
+
+    // Save as a chat message
+    final chatMessage = ChatMessage.friendRequestAccepted(
+      senderPubkeyHex: senderHex,
+      recipientPubkeyHex: myHex,
+      libp2pAddress: block.libp2pAddress,
+    );
+    await _messageStore.saveMessage(chatMessage);
+
+    // Show snackbar
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              const Icon(Icons.check_circle, color: Colors.green),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text('$senderName accepted your friend request!'),
+              ),
+            ],
+          ),
+          duration: const Duration(seconds: 3),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: const Color(0xFF1B3D2F),
+        ),
+      );
+    }
+  }
+
+  Future<void> _handleFriendAnnounce(
+      String senderHex, FriendAnnounceBlock block) async {
+    // Update friend's online status
+    await _friendshipStore.updateOnlineStatus(
+      peerPubkeyHex: senderHex,
+      isOnline: block.isOnline,
+      libp2pAddress: block.libp2pAddress,
+      nickname: block.nickname,
+    );
+  }
+
+  Future<void> _showMessageNotification(
+      String senderHex, String senderName, String content) async {
+    const AndroidNotificationDetails androidDetails =
+        AndroidNotificationDetails(
       'bitchat_messages',
       'Messages',
       channelDescription: 'Bitchat message notifications',
@@ -266,7 +488,7 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
       android: androidDetails,
       iOS: iosDetails,
     );
-    
+
     await flutterLocalNotificationsPlugin.show(
       senderHex.hashCode,
       'Message from $senderName',
@@ -275,7 +497,36 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
       payload: senderHex,
     );
   }
-  
+
+  Future<void> _showFriendRequestNotification(
+      String senderHex, String senderName) async {
+    const AndroidNotificationDetails androidDetails =
+        AndroidNotificationDetails(
+      'bitchat_friend_requests',
+      'Friend Requests',
+      channelDescription: 'Bitchat friend request notifications',
+      importance: Importance.high,
+      priority: Priority.high,
+    );
+    const DarwinNotificationDetails iosDetails = DarwinNotificationDetails(
+      presentAlert: true,
+      presentBadge: true,
+      presentSound: true,
+    );
+    const NotificationDetails notificationDetails = NotificationDetails(
+      android: androidDetails,
+      iOS: iosDetails,
+    );
+
+    await flutterLocalNotificationsPlugin.show(
+      'friend_$senderHex'.hashCode,
+      'Friend Request from $senderName',
+      '$senderName wants to be friends with you',
+      notificationDetails,
+      payload: senderHex,
+    );
+  }
+
   void _openChat(Peer peer) {
     Navigator.of(context).push(
       MaterialPageRoute(
@@ -284,9 +535,111 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
           bitchat: _bitchat!,
           myPubkey: _identity!.publicKey,
           messageStore: _messageStore,
+          friendshipStore: _friendshipStore,
+          onSendFriendRequest: () => _sendFriendRequest(peer),
+          onAcceptFriendRequest: () => _acceptFriendRequest(peer),
+          myLibp2pAddress: _myLibp2pAddress,
         ),
       ),
     );
+  }
+
+  Future<void> _sendFriendRequest(Peer peer) async {
+    if (_bitchat == null || _identity == null || _myLibp2pAddress == null)
+      return;
+
+    final peerHex = ChatMessage.pubkeyToHex(peer.publicKey);
+    final myHex = ChatMessage.pubkeyToHex(_identity!.publicKey);
+
+    // Create and record the friend request
+    await _friendshipStore.createFriendRequest(
+      peerPubkeyHex: peerHex,
+      nickname: peer.displayName,
+    );
+
+    // Create the friendship offer block
+    final block = FriendshipOfferBlock(
+      libp2pAddress: _myLibp2pAddress!,
+      message: 'Hey, let\'s be friends!',
+    );
+
+    // Send via Bitchat
+    await _bitchat!.send(peer.publicKey, block.serialize());
+
+    // Save as a chat message
+    final chatMessage = ChatMessage.friendRequestSent(
+      senderPubkeyHex: myHex,
+      recipientPubkeyHex: peerHex,
+      libp2pAddress: _myLibp2pAddress!,
+    );
+    await _messageStore.saveMessage(chatMessage);
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Friend request sent to ${peer.displayName}'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+
+  Future<void> _acceptFriendRequest(Peer peer) async {
+    if (_bitchat == null || _identity == null || _myLibp2pAddress == null)
+      return;
+
+    final peerHex = ChatMessage.pubkeyToHex(peer.publicKey);
+    final myHex = ChatMessage.pubkeyToHex(_identity!.publicKey);
+
+    // Accept the friend request
+    await _friendshipStore.acceptFriendRequest(
+      peerPubkeyHex: peerHex,
+      myLibp2pAddress: _myLibp2pAddress!,
+    );
+
+    // Create the friendship accept block
+    final block = FriendshipAcceptBlock(
+      libp2pAddress: _myLibp2pAddress!,
+    );
+
+    // Send via Bitchat
+    await _bitchat!.send(peer.publicKey, block.serialize());
+
+    // Save as a chat message
+    final chatMessage = ChatMessage.friendRequestAcceptedByUs(
+      senderPubkeyHex: myHex,
+      recipientPubkeyHex: peerHex,
+    );
+    await _messageStore.saveMessage(chatMessage);
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              const Icon(Icons.check_circle, color: Colors.green),
+              const SizedBox(width: 8),
+              Expanded(
+                  child: Text('You are now friends with ${peer.displayName}!')),
+            ],
+          ),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+
+  Future<void> _declineFriendRequest(String peerHex) async {
+    await _friendshipStore.declineFriendRequest(peerHex);
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Friend request declined'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
   }
 
   String _formatSecondsAgo(DateTime time) {
@@ -367,18 +720,15 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
     bool isCenter = false,
   }) {
     final isSelected = _currentIndex == index;
-    
+
     // Use orange highlight for selected item
-    final Color bgColor = isSelected 
-        ? const Color(0xFFE8A33C) 
-        : Colors.transparent;
-    final Color iconColor = isSelected 
-        ? (isCenter ? Colors.black : Colors.black) 
-        : Colors.white54;
-    final Color textColor = isSelected 
-        ? (isCenter ? Colors.black : Colors.black) 
-        : Colors.white54;
-    
+    final Color bgColor =
+        isSelected ? const Color(0xFFE8A33C) : Colors.transparent;
+    final Color iconColor =
+        isSelected ? (isCenter ? Colors.black : Colors.black) : Colors.white54;
+    final Color textColor =
+        isSelected ? (isCenter ? Colors.black : Colors.black) : Colors.white54;
+
     return GestureDetector(
       onTap: () => setState(() => _currentIndex = index),
       child: AnimatedContainer(
@@ -390,13 +740,15 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
         decoration: BoxDecoration(
           color: bgColor,
           borderRadius: BorderRadius.circular(20),
-          boxShadow: isSelected ? [
-            BoxShadow(
-              color: const Color(0xFFE8A33C).withOpacity(0.4),
-              blurRadius: 8,
-              offset: const Offset(0, 2),
-            ),
-          ] : null,
+          boxShadow: isSelected
+              ? [
+                  BoxShadow(
+                    color: const Color(0xFFE8A33C).withOpacity(0.4),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2),
+                  ),
+                ]
+              : null,
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -419,7 +771,8 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
                         color: Colors.red,
                         shape: BoxShape.circle,
                       ),
-                      constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+                      constraints:
+                          const BoxConstraints(minWidth: 16, minHeight: 16),
                       child: Text(
                         badge > 99 ? '99+' : badge.toString(),
                         style: const TextStyle(
@@ -460,7 +813,8 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
   // ===== CHATS TAB =====
   Widget _buildChatsTab() {
     final chatsWithMessages = _getChatsWithMessages();
-    
+    final pendingRequests = _friendshipStore.pendingIncoming;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -471,13 +825,49 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
             style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
           ),
         ),
+        // Pending friend requests section
+        if (pendingRequests.isNotEmpty) ...[
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Row(
+              children: [
+                const Icon(Icons.person_add,
+                    size: 18, color: Color(0xFFE8A33C)),
+                const SizedBox(width: 8),
+                Text(
+                  'Friend Requests (${pendingRequests.length})',
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFFE8A33C),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+          SizedBox(
+            height: 100,
+            child: ListView.builder(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              itemCount: pendingRequests.length,
+              itemBuilder: (context, index) {
+                final request = pendingRequests[index];
+                return _buildFriendRequestCard(request);
+              },
+            ),
+          ),
+          const Divider(height: 24),
+        ],
         Expanded(
           child: chatsWithMessages.isEmpty
               ? const Center(
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Icon(Icons.chat_bubble_outline, size: 64, color: Colors.grey),
+                      Icon(Icons.chat_bubble_outline,
+                          size: 64, color: Colors.grey),
                       SizedBox(height: 16),
                       Text(
                         'No chats yet',
@@ -504,22 +894,107 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
     );
   }
 
+  Widget _buildFriendRequestCard(Friendship request) {
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 4),
+      color: const Color(0xFF1B3D2F),
+      child: Container(
+        width: 160,
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                CircleAvatar(
+                  radius: 16,
+                  backgroundColor: Colors.blueGrey,
+                  child: Text(
+                    request.displayName.isNotEmpty
+                        ? request.displayName[0].toUpperCase()
+                        : '?',
+                    style: const TextStyle(color: Colors.white, fontSize: 14),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    request.displayName,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ],
+            ),
+            const Spacer(),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                TextButton(
+                  onPressed: () => _declineFriendRequest(request.peerPubkeyHex),
+                  style: TextButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    minimumSize: Size.zero,
+                  ),
+                  child: const Text('Decline',
+                      style: TextStyle(color: Colors.grey)),
+                ),
+                ElevatedButton(
+                  onPressed: () async {
+                    // Find peer to accept
+                    final pubkey =
+                        ChatMessage.hexToPubkey(request.peerPubkeyHex);
+                    var peer = _peers.values
+                        .where((p) =>
+                            ChatMessage.pubkeyToHex(p.publicKey) ==
+                            request.peerPubkeyHex)
+                        .firstOrNull;
+
+                    if (peer == null) {
+                      // Create a temporary peer for accepting
+                      peer = Peer(
+                        publicKey: pubkey,
+                        nickname: request.nickname ?? '',
+                        connectionState: PeerConnectionState.disconnected,
+                        transport: PeerTransport.bleDirect,
+                        rssi: -100,
+                      );
+                    }
+                    await _acceptFriendRequest(peer);
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFFE8A33C),
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    minimumSize: Size.zero,
+                  ),
+                  child: const Text('Accept',
+                      style: TextStyle(color: Colors.black)),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   List<_ChatPreview> _getChatsWithMessages() {
     final chats = <_ChatPreview>[];
-    final myHex = _identity != null ? ChatMessage.pubkeyToHex(_identity!.publicKey) : '';
-    
+    final myHex =
+        _identity != null ? ChatMessage.pubkeyToHex(_identity!.publicKey) : '';
+
     // Get all conversation partners from message store
     final conversations = _messageStore.getConversations(myHex);
-    
+
     for (final peerHex in conversations) {
       final messages = _messageStore.getMessages(peerHex);
       if (messages.isEmpty) continue;
-      
+
       final lastMessage = messages.last;
-      final peer = _peers.values.where((p) => 
-        ChatMessage.pubkeyToHex(p.publicKey) == peerHex
-      ).firstOrNull;
-      
+      final peer = _peers.values
+          .where((p) => ChatMessage.pubkeyToHex(p.publicKey) == peerHex)
+          .firstOrNull;
+
       chats.add(_ChatPreview(
         peerHex: peerHex,
         peer: peer,
@@ -527,16 +1002,19 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
         unreadCount: _messageStore.getUnreadCount(peerHex),
       ));
     }
-    
+
     // Sort by last message time (newest first)
-    chats.sort((a, b) => b.lastMessage.timestamp.compareTo(a.lastMessage.timestamp));
+    chats.sort(
+        (a, b) => b.lastMessage.timestamp.compareTo(a.lastMessage.timestamp));
     return chats;
   }
 
   Widget _buildChatListItem(_ChatPreview chat) {
-    final displayName = chat.peer?.displayName ?? 'Peer ${chat.peerHex.substring(0, 8)}...';
-    final isOnline = chat.peer != null && chat.peer!.connectionState == PeerConnectionState.connected;
-    
+    final displayName =
+        chat.peer?.displayName ?? 'Peer ${chat.peerHex.substring(0, 8)}...';
+    final isOnline = chat.peer != null &&
+        chat.peer!.connectionState == PeerConnectionState.connected;
+
     return ListTile(
       leading: Stack(
         children: [
@@ -586,7 +1064,8 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
         overflow: TextOverflow.ellipsis,
         style: TextStyle(
           color: chat.unreadCount > 0 ? Colors.white : Colors.grey,
-          fontWeight: chat.unreadCount > 0 ? FontWeight.w500 : FontWeight.normal,
+          fontWeight:
+              chat.unreadCount > 0 ? FontWeight.w500 : FontWeight.normal,
         ),
       ),
       trailing: Text(
@@ -604,7 +1083,7 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
   String _formatMessageTime(DateTime time) {
     final now = DateTime.now();
     final diff = now.difference(time);
-    
+
     if (diff.inMinutes < 1) return 'now';
     if (diff.inHours < 1) return '${diff.inMinutes}m';
     if (diff.inDays < 1) return '${diff.inHours}h';
@@ -614,6 +1093,8 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
 
   // ===== AROUND TAB =====
   Widget _buildAroundTab() {
+    final onlineFriends = _friendshipStore.onlineFriends;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -639,7 +1120,9 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
           margin: const EdgeInsets.symmetric(horizontal: 16),
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           decoration: BoxDecoration(
-            color: _status == 'Running' ? Colors.green.withOpacity(0.2) : Colors.orange.withOpacity(0.2),
+            color: _status == 'Running'
+                ? Colors.green.withOpacity(0.2)
+                : Colors.orange.withOpacity(0.2),
             borderRadius: BorderRadius.circular(8),
           ),
           child: Row(
@@ -659,13 +1142,69 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
               ),
               const Spacer(),
               Text(
-                '${_peers.length} nearby',
+                '${_peers.length} nearby • ${onlineFriends.length} friends online',
                 style: const TextStyle(fontSize: 13, color: Colors.grey),
               ),
             ],
           ),
         ),
         const SizedBox(height: 16),
+
+        // Online friends section
+        if (onlineFriends.isNotEmpty) ...[
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Row(
+              children: [
+                const Icon(Icons.wifi, size: 18, color: Colors.blue),
+                const SizedBox(width: 8),
+                Text(
+                  'Friends Online (${onlineFriends.length})',
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.blue,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+          SizedBox(
+            height: 80,
+            child: ListView.builder(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              itemCount: onlineFriends.length,
+              itemBuilder: (context, index) {
+                final friend = onlineFriends[index];
+                return _buildOnlineFriendChip(friend);
+              },
+            ),
+          ),
+          const Divider(height: 24),
+        ],
+
+        // Nearby peers section header
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(
+            children: [
+              const Icon(Icons.bluetooth, size: 18, color: Colors.blueGrey),
+              const SizedBox(width: 8),
+              Text(
+                'Nearby (${_peers.length})',
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.blueGrey,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 8),
+
         Expanded(
           child: _peers.isEmpty
               ? const Center(
@@ -692,7 +1231,8 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
                   itemBuilder: (context, index) {
                     // Sort peers by RSSI (strongest first)
                     final sortedPeers = _peers.values.toList()
-                      ..sort((a, b) => (b.rssi ?? -100).compareTo(a.rssi ?? -100));
+                      ..sort(
+                          (a, b) => (b.rssi ?? -100).compareTo(a.rssi ?? -100));
                     final peer = sortedPeers[index];
                     return _buildPeerListItem(peer);
                   },
@@ -702,10 +1242,84 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
     );
   }
 
+  Widget _buildOnlineFriendChip(Friendship friend) {
+    return GestureDetector(
+      onTap: () {
+        // Find or create peer for this friend
+        final pubkey = ChatMessage.hexToPubkey(friend.peerPubkeyHex);
+        var peer = _peers.values
+            .where((p) =>
+                ChatMessage.pubkeyToHex(p.publicKey) == friend.peerPubkeyHex)
+            .firstOrNull;
+
+        if (peer == null) {
+          peer = Peer(
+            publicKey: pubkey,
+            nickname: friend.nickname ?? '',
+            connectionState: PeerConnectionState.connected,
+            transport: PeerTransport.libp2p,
+            rssi: -100,
+          );
+        }
+        _openChat(peer);
+      },
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 4),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Colors.blue.withOpacity(0.1),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Colors.blue.withOpacity(0.3)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Stack(
+              children: [
+                CircleAvatar(
+                  radius: 20,
+                  backgroundColor: Colors.blueGrey,
+                  child: Text(
+                    friend.displayName.isNotEmpty
+                        ? friend.displayName[0].toUpperCase()
+                        : '?',
+                    style: const TextStyle(color: Colors.white),
+                  ),
+                ),
+                Positioned(
+                  right: 0,
+                  bottom: 0,
+                  child: Container(
+                    width: 12,
+                    height: 12,
+                    decoration: BoxDecoration(
+                      color: Colors.green,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.black, width: 2),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              friend.displayName,
+              style: const TextStyle(fontSize: 12),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildPeerListItem(Peer peer) {
     final peerHex = ChatMessage.pubkeyToHex(peer.publicKey);
     final unreadCount = _messageStore.getUnreadCount(peerHex);
-    
+    final friendship = _friendshipStore.getFriendship(peerHex);
+    final isFriend = friendship?.isAccepted ?? false;
+    final hasPendingRequest = _friendshipStore.hasPendingRequest(peerHex);
+
     // RSSI signal strength indicator
     IconData signalIcon;
     Color signalColor;
@@ -719,28 +1333,32 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
       signalIcon = Icons.signal_cellular_alt;
       signalColor = Colors.green;
     }
-    
+
     // Check if this peer has a recent nickname change
     final nicknameChange = _nicknameChanges[peer.id];
     final isChanging = nicknameChange != null;
-    
+
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 300),
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(12),
-          border: isChanging ? Border.all(color: const Color(0xFFE8A33C), width: 2) : null,
+          border: isChanging
+              ? Border.all(color: const Color(0xFFE8A33C), width: 2)
+              : null,
         ),
         child: ListTile(
           leading: Stack(
             children: [
               CircleAvatar(
-                backgroundColor: Colors.blueGrey,
+                backgroundColor: isFriend ? Colors.blue : Colors.blueGrey,
                 child: AnimatedSwitcher(
                   duration: const Duration(milliseconds: 300),
                   child: Text(
-                    peer.displayName.isNotEmpty ? peer.displayName[0].toUpperCase() : '?',
+                    peer.displayName.isNotEmpty
+                        ? peer.displayName[0].toUpperCase()
+                        : '?',
                     key: ValueKey(peer.displayName),
                     style: const TextStyle(color: Colors.white),
                   ),
@@ -756,12 +1374,30 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
                       color: Colors.red,
                       borderRadius: BorderRadius.circular(10),
                     ),
-                    constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+                    constraints:
+                        const BoxConstraints(minWidth: 16, minHeight: 16),
                     child: Text(
                       unreadCount > 99 ? '99+' : unreadCount.toString(),
-                      style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold),
                       textAlign: TextAlign.center,
                     ),
+                  ),
+                ),
+              if (isFriend)
+                Positioned(
+                  right: 0,
+                  bottom: 0,
+                  child: Container(
+                    padding: const EdgeInsets.all(2),
+                    decoration: const BoxDecoration(
+                      color: Colors.blue,
+                      shape: BoxShape.circle,
+                    ),
+                    child:
+                        const Icon(Icons.star, color: Colors.white, size: 10),
                   ),
                 ),
             ],
@@ -783,13 +1419,26 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
                       ),
                     );
                   },
-                  child: Text(
-                    peer.displayName,
+                  child: Row(
                     key: ValueKey(peer.displayName),
-                    style: TextStyle(
-                      color: isChanging ? const Color(0xFFE8A33C) : null,
-                      fontWeight: isChanging ? FontWeight.bold : FontWeight.normal,
-                    ),
+                    children: [
+                      Flexible(
+                        child: Text(
+                          peer.displayName,
+                          style: TextStyle(
+                            color: isChanging ? const Color(0xFFE8A33C) : null,
+                            fontWeight: isChanging
+                                ? FontWeight.bold
+                                : FontWeight.normal,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      if (isFriend) ...[
+                        const SizedBox(width: 4),
+                        const Icon(Icons.people, size: 14, color: Colors.blue),
+                      ],
+                    ],
                   ),
                 ),
               ),
@@ -815,6 +1464,20 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
                 ],
               ),
               const SizedBox(width: 8),
+              // Friend request / Chat button
+              if (!isFriend && !hasPendingRequest)
+                IconButton(
+                  icon: const Icon(Icons.person_add_outlined),
+                  color: const Color(0xFFE8A33C),
+                  tooltip: 'Send friend request',
+                  onPressed: () => _sendFriendRequest(peer),
+                )
+              else if (hasPendingRequest)
+                const Padding(
+                  padding: EdgeInsets.all(8.0),
+                  child:
+                      Icon(Icons.hourglass_empty, color: Colors.grey, size: 20),
+                ),
               IconButton(
                 icon: const Icon(Icons.chat_bubble_outline),
                 color: Colors.blue,
@@ -830,7 +1493,7 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
 
   void _showPeerLookupDialog() {
     final controller = TextEditingController();
-    
+
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -872,7 +1535,7 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
 
   void _lookupPeer(String hexPubkey) {
     if (hexPubkey.isEmpty || _bitchat == null) return;
-    
+
     try {
       // Convert hex to bytes
       final pubkeyBytes = Uint8List.fromList(
@@ -881,14 +1544,15 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
           (i) => int.parse(hexPubkey.substring(i * 2, i * 2 + 2), radix: 16),
         ),
       );
-      
+
       final isReachable = _bitchat!.isPeerReachable(pubkeyBytes);
       final peer = _bitchat!.getPeer(pubkeyBytes);
-      
+
       showDialog(
         context: context,
         builder: (context) => AlertDialog(
-          title: Text(isReachable ? '✅ Peer Reachable' : '❌ Peer Not Reachable'),
+          title:
+              Text(isReachable ? '✅ Peer Reachable' : '❌ Peer Not Reachable'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -897,7 +1561,8 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
                 Text('Nickname: ${peer.displayName}'),
                 Text('Status: ${peer.connectionState.name}'),
                 if (peer.rssi != null) Text('Signal: ${peer.rssi} dBm'),
-                if (peer.lastSeen != null) Text('Last seen: ${_formatSecondsAgo(peer.lastSeen!)}'),
+                if (peer.lastSeen != null)
+                  Text('Last seen: ${_formatSecondsAgo(peer.lastSeen!)}'),
               ] else
                 const Text('Peer not found in known peers list.'),
             ],
@@ -937,22 +1602,22 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
             style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 24),
-          
+
           // Avatar
           Center(
             child: CircleAvatar(
               radius: 50,
               backgroundColor: Colors.blueGrey,
               child: Text(
-                _identity?.nickname.isNotEmpty == true 
-                    ? _identity!.nickname[0].toUpperCase() 
+                _identity?.nickname.isNotEmpty == true
+                    ? _identity!.nickname[0].toUpperCase()
                     : '?',
                 style: const TextStyle(fontSize: 40, color: Colors.white),
               ),
             ),
           ),
           const SizedBox(height: 16),
-          
+
           // Nickname with edit button
           Center(
             child: Row(
@@ -960,7 +1625,8 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
               children: [
                 Text(
                   _identity?.nickname ?? 'Loading...',
-                  style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                  style: const TextStyle(
+                      fontSize: 24, fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(width: 8),
                 IconButton(
@@ -972,7 +1638,7 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
             ),
           ),
           const SizedBox(height: 32),
-          
+
           // Info cards
           _buildInfoCard(
             title: 'Fingerprint',
@@ -981,7 +1647,7 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
             onCopy: () => _copyToClipboard(_identity?.shortFingerprint ?? ''),
           ),
           const SizedBox(height: 12),
-          
+
           _buildInfoCard(
             title: 'Service UUID',
             value: _identity?.bleServiceUuid ?? '...',
@@ -989,20 +1655,20 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
             onCopy: () => _copyToClipboard(_identity?.bleServiceUuid ?? ''),
           ),
           const SizedBox(height: 12),
-          
+
           _buildInfoCard(
             title: 'Public Key',
-            value: _identity != null 
+            value: _identity != null
                 ? ChatMessage.pubkeyToHex(_identity!.publicKey)
                 : '...',
             icon: Icons.key,
-            onCopy: () => _copyToClipboard(
-              _identity != null ? ChatMessage.pubkeyToHex(_identity!.publicKey) : ''
-            ),
+            onCopy: () => _copyToClipboard(_identity != null
+                ? ChatMessage.pubkeyToHex(_identity!.publicKey)
+                : ''),
             maxLines: 2,
           ),
           const SizedBox(height: 12),
-          
+
           // Transport status
           Card(
             child: Padding(
@@ -1014,7 +1680,8 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
                     children: [
                       Icon(
                         _status == 'Running' ? Icons.check_circle : Icons.error,
-                        color: _status == 'Running' ? Colors.green : Colors.orange,
+                        color:
+                            _status == 'Running' ? Colors.green : Colors.orange,
                       ),
                       const SizedBox(width: 8),
                       const Text(
@@ -1093,9 +1760,9 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
 
   void _showEditNicknameDialog() {
     if (_identity == null) return;
-    
+
     final controller = TextEditingController(text: _identity!.nickname);
-    
+
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -1131,32 +1798,33 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
 
   Future<void> _updateNickname(String newNickname) async {
     if (_bitchat == null || _identity == null) return;
-    
+
     // Update nickname via Bitchat (broadcasts ANNOUNCE)
     await _bitchat!.updateNickname(newNickname);
-    
+
     // Persist to secure storage
     const storage = FlutterSecureStorage();
     await storage.write(
       key: 'identity',
       value: jsonEncode(_identity!.toJson()),
     );
-    
+
     setState(() {});
-    
+
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Nickname updated!')),
     );
   }
 
-  void _showNicknameChangeAnimation(String oldName, String newName, String peerId) {
+  void _showNicknameChangeAnimation(
+      String oldName, String newName, String peerId) {
     // Store the nickname change for UI animation
     _nicknameChanges[peerId] = _NicknameChange(
       oldName: oldName,
       newName: newName,
       timestamp: DateTime.now(),
     );
-    
+
     // Show a snackbar notification
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -1193,7 +1861,7 @@ class _BitchatHomeState extends State<BitchatHome> with TickerProviderStateMixin
         backgroundColor: const Color(0xFF1B3D2F),
       ),
     );
-    
+
     // Clear the animation after a delay
     Future.delayed(const Duration(seconds: 3), () {
       if (mounted) {

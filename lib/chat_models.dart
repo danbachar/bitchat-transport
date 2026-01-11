@@ -1,5 +1,22 @@
-import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
+
+/// Type of chat message content
+enum ChatMessageType {
+  /// Regular text message
+  text,
+
+  /// Friend request sent
+  friendRequestSent,
+
+  /// Friend request received
+  friendRequestReceived,
+
+  /// Friend request accepted by them
+  friendRequestAccepted,
+
+  /// Friend request accepted by us
+  friendRequestAcceptedByUs,
+}
 
 /// A chat message model for the demo app
 class ChatMessage {
@@ -8,14 +25,86 @@ class ChatMessage {
   final String content;
   final DateTime timestamp;
   final bool isOutgoing;
+  final ChatMessageType messageType;
+
+  /// For friendship messages: the libp2p address involved
+  final String? libp2pAddress;
 
   ChatMessage({
     required this.senderPubkeyHex,
     required this.recipientPubkeyHex,
     required this.content,
     required this.isOutgoing,
+    this.messageType = ChatMessageType.text,
+    this.libp2pAddress,
     DateTime? timestamp,
   }) : timestamp = timestamp ?? DateTime.now();
+
+  /// Whether this is a friendship-related message
+  bool get isFriendshipMessage => messageType != ChatMessageType.text;
+
+  /// Whether this is a pending friend request that can be accepted
+  bool get canAccept => messageType == ChatMessageType.friendRequestReceived;
+
+  /// Create a friend request sent message
+  factory ChatMessage.friendRequestSent({
+    required String senderPubkeyHex,
+    required String recipientPubkeyHex,
+    required String libp2pAddress,
+    String? message,
+  }) =>
+      ChatMessage(
+        senderPubkeyHex: senderPubkeyHex,
+        recipientPubkeyHex: recipientPubkeyHex,
+        content: message ?? 'Sent a friend request',
+        isOutgoing: true,
+        messageType: ChatMessageType.friendRequestSent,
+        libp2pAddress: libp2pAddress,
+      );
+
+  /// Create a friend request received message
+  factory ChatMessage.friendRequestReceived({
+    required String senderPubkeyHex,
+    required String recipientPubkeyHex,
+    required String libp2pAddress,
+    String? message,
+  }) =>
+      ChatMessage(
+        senderPubkeyHex: senderPubkeyHex,
+        recipientPubkeyHex: recipientPubkeyHex,
+        content: message ?? 'Wants to be friends',
+        isOutgoing: false,
+        messageType: ChatMessageType.friendRequestReceived,
+        libp2pAddress: libp2pAddress,
+      );
+
+  /// Create a friend request accepted message (they accepted ours)
+  factory ChatMessage.friendRequestAccepted({
+    required String senderPubkeyHex,
+    required String recipientPubkeyHex,
+    required String libp2pAddress,
+  }) =>
+      ChatMessage(
+        senderPubkeyHex: senderPubkeyHex,
+        recipientPubkeyHex: recipientPubkeyHex,
+        content: 'Accepted your friend request',
+        isOutgoing: false,
+        messageType: ChatMessageType.friendRequestAccepted,
+        libp2pAddress: libp2pAddress,
+      );
+
+  /// Create a friend request accepted by us message
+  factory ChatMessage.friendRequestAcceptedByUs({
+    required String senderPubkeyHex,
+    required String recipientPubkeyHex,
+  }) =>
+      ChatMessage(
+        senderPubkeyHex: senderPubkeyHex,
+        recipientPubkeyHex: recipientPubkeyHex,
+        content: 'You accepted the friend request',
+        isOutgoing: true,
+        messageType: ChatMessageType.friendRequestAcceptedByUs,
+      );
 
   /// Convert a public key to hex string
   static String pubkeyToHex(Uint8List pubkey) {
@@ -50,21 +139,21 @@ class MessageStore extends ChangeNotifier {
   /// Save a message to a conversation
   Future<void> saveMessage(ChatMessage message) async {
     // Determine the peer hex (the other party in the conversation)
-    final peerHex = message.isOutgoing 
-        ? message.recipientPubkeyHex 
+    final peerHex = message.isOutgoing
+        ? message.recipientPubkeyHex
         : message.senderPubkeyHex;
-    
+
     _conversations.putIfAbsent(peerHex, () => []);
     _conversations[peerHex]!.add(message);
-    
+
     // If it's an incoming message, increment unread count
     if (!message.isOutgoing) {
       _unreadCounts[peerHex] = (_unreadCounts[peerHex] ?? 0) + 1;
     }
-    
+
     // Notify listeners of changes
     notifyListeners();
-    
+
     // Future: Persist to local storage
   }
 

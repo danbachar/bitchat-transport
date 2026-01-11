@@ -24,6 +24,9 @@ enum PeerTransport {
   
   /// WebRTC P2P connection
   webrtc,
+  
+  /// LibP2P P2P connection
+  libp2p,
 }
 
 /// Extension to get display info for peer transport
@@ -35,6 +38,8 @@ extension PeerTransportDisplay on PeerTransport {
         return const Icon(Icons.bluetooth_connected, size: 16, color: Colors.blue);
       case PeerTransport.webrtc:
         return const Icon(Icons.public, size: 16, color: Colors.blue);
+      case PeerTransport.libp2p:
+        return const Icon(Icons.public, size: 16, color: Colors.green);
     }
   }
   
@@ -44,7 +49,9 @@ extension PeerTransportDisplay on PeerTransport {
       case PeerTransport.bleDirect:
         return 'Bluetooth';
       case PeerTransport.webrtc:
-        return 'Internet';
+        return 'WebRTC';
+      case PeerTransport.libp2p:
+        return 'LibP2P';
     }
   }
   
@@ -55,6 +62,8 @@ extension PeerTransportDisplay on PeerTransport {
         return PeerTransport.bleDirect;
       case TransportType.webrtc:
         return PeerTransport.webrtc;
+      case TransportType.libp2p:
+        return PeerTransport.libp2p;
     }
   }
 }

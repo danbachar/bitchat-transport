@@ -10,6 +10,10 @@ class ChatScreen extends StatefulWidget {
   final Peer peer;
   final Uint8List myPubkey;
   final MessageStore messageStore;
+  final FriendshipStore? friendshipStore;
+  final VoidCallback? onSendFriendRequest;
+  final VoidCallback? onAcceptFriendRequest;
+  final String? myLibp2pAddress;
 
   const ChatScreen({
     super.key,
@@ -17,6 +21,10 @@ class ChatScreen extends StatefulWidget {
     required this.peer,
     required this.myPubkey,
     required this.messageStore,
+    this.friendshipStore,
+    this.onSendFriendRequest,
+    this.onAcceptFriendRequest,
+    this.myLibp2pAddress,
   });
 
   @override
@@ -30,10 +38,17 @@ class _ChatScreenState extends State<ChatScreen> {
   String get _peerHex => ChatMessage.pubkeyToHex(widget.peer.publicKey);
   String get _myHex => ChatMessage.pubkeyToHex(widget.myPubkey);
 
+  Friendship? get _friendship =>
+      widget.friendshipStore?.getFriendship(_peerHex);
+  bool get _isFriend => _friendship?.isAccepted ?? false;
+  bool get _hasPendingIncoming => _friendship?.isPendingIncoming ?? false;
+  bool get _hasPendingOutgoing => _friendship?.isPendingOutgoing ?? false;
+
   @override
   void initState() {
     super.initState();
     widget.messageStore.addListener(_onMessagesChanged);
+    widget.friendshipStore?.addListener(_onFriendshipsChanged);
     // Mark messages as read when opening chat
     widget.messageStore.markAsRead(_peerHex);
   }
@@ -41,6 +56,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void dispose() {
     widget.messageStore.removeListener(_onMessagesChanged);
+    widget.friendshipStore?.removeListener(_onFriendshipsChanged);
     _messageController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -49,6 +65,10 @@ class _ChatScreenState extends State<ChatScreen> {
   void _onMessagesChanged() {
     setState(() {});
     _scrollToBottom();
+  }
+
+  void _onFriendshipsChanged() {
+    setState(() {});
   }
 
   void _sendMessage() async {
@@ -68,8 +88,9 @@ class _ChatScreenState extends State<ChatScreen> {
     // Store locally and in message store
     await widget.messageStore.saveMessage(message);
 
-    // Send via Bitchat
-    await widget.bitchat.send(widget.peer.publicKey, Uint8List.fromList(text.codeUnits));
+    // Send via Bitchat using SayBlock
+    final block = SayBlock(content: text);
+    await widget.bitchat.send(widget.peer.publicKey, block.serialize());
 
     _scrollToBottom();
   }
@@ -99,7 +120,7 @@ class _ChatScreenState extends State<ChatScreen> {
   void _forwardMessage(ChatMessage message) {
     // Show dialog to select a peer to forward to
     final peers = widget.bitchat.connectedPeers;
-    
+
     if (peers.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -109,7 +130,7 @@ class _ChatScreenState extends State<ChatScreen> {
       );
       return;
     }
-    
+
     showModalBottomSheet(
       context: context,
       backgroundColor: Theme.of(context).colorScheme.surface,
@@ -125,7 +146,7 @@ class _ChatScreenState extends State<ChatScreen> {
             peer.publicKey,
             Uint8List.fromList(message.content.codeUnits),
           );
-          
+
           // Also save to message store as outgoing
           final forwardedMessage = ChatMessage(
             senderPubkeyHex: _myHex,
@@ -134,7 +155,7 @@ class _ChatScreenState extends State<ChatScreen> {
             isOutgoing: true,
           );
           await widget.messageStore.saveMessage(forwardedMessage);
-          
+
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
@@ -190,30 +211,211 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.peer.nickname.isNotEmpty
-            ? widget.peer.nickname
-            : 'Peer ${_peerHex.substring(0, 8)}...'),
+        title: Row(
+          children: [
+            Expanded(
+              child: Text(
+                widget.peer.nickname.isNotEmpty
+                    ? widget.peer.nickname
+                    : 'Peer ${_peerHex.substring(0, 8)}...',
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            if (_isFriend)
+              const Padding(
+                padding: EdgeInsets.only(left: 4),
+                child: Icon(Icons.people, size: 18, color: Colors.blue),
+              ),
+          ],
+        ),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        actions: _buildAppBarActions(),
       ),
       body: Column(
         children: [
+          // Friend request banner if pending incoming
+          if (_hasPendingIncoming) _buildFriendRequestBanner(),
           Expanded(
             child: ListView.builder(
               controller: _scrollController,
               padding: const EdgeInsets.all(16),
               itemCount: widget.messageStore.getMessages(_peerHex).length,
               itemBuilder: (context, index) {
-                final message = widget.messageStore.getMessages(_peerHex)[index];
-                return _MessageBubble(
-                  message: message,
-                  onLongPress: (position) => _showMessageOptions(message, position),
-                );
+                final message =
+                    widget.messageStore.getMessages(_peerHex)[index];
+                return _buildMessageWidget(message);
               },
             ),
           ),
           _buildMessageInput(),
         ],
       ),
+    );
+  }
+
+  List<Widget> _buildAppBarActions() {
+    final actions = <Widget>[];
+
+    if (!_isFriend && !_hasPendingOutgoing && !_hasPendingIncoming) {
+      // Can send friend request
+      actions.add(
+        IconButton(
+          icon: const Icon(Icons.person_add),
+          tooltip: 'Send friend request',
+          onPressed: widget.onSendFriendRequest,
+        ),
+      );
+    } else if (_hasPendingOutgoing) {
+      // Waiting for response
+      actions.add(
+        const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 16),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.hourglass_empty, size: 16),
+              SizedBox(width: 4),
+              Text('Pending', style: TextStyle(fontSize: 12)),
+            ],
+          ),
+        ),
+      );
+    }
+
+    // Menu
+    actions.add(
+      PopupMenuButton<String>(
+        onSelected: (value) {
+          switch (value) {
+            case 'info':
+              _showPeerInfo();
+              break;
+          }
+        },
+        itemBuilder: (context) => [
+          const PopupMenuItem(
+            value: 'info',
+            child: Row(
+              children: [
+                Icon(Icons.info_outline),
+                SizedBox(width: 12),
+                Text('Peer Info'),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+
+    return actions;
+  }
+
+  Widget _buildFriendRequestBanner() {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      color: const Color(0xFF1B3D2F),
+      child: Row(
+        children: [
+          const Icon(Icons.person_add, color: Color(0xFFE8A33C)),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              '${widget.peer.displayName} wants to be friends!',
+              style: const TextStyle(fontWeight: FontWeight.w500),
+            ),
+          ),
+          TextButton(
+            onPressed: () {
+              // Decline
+              widget.friendshipStore?.declineFriendRequest(_peerHex);
+            },
+            child: const Text('Decline'),
+          ),
+          const SizedBox(width: 8),
+          ElevatedButton(
+            onPressed: widget.onAcceptFriendRequest,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFE8A33C),
+            ),
+            child: const Text('Accept', style: TextStyle(color: Colors.black)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMessageWidget(ChatMessage message) {
+    if (message.isFriendshipMessage) {
+      return _FriendshipMessageBubble(
+        message: message,
+        onAccept: message.canAccept ? widget.onAcceptFriendRequest : null,
+      );
+    }
+    return _MessageBubble(
+      message: message,
+      onLongPress: (position) => _showMessageOptions(message, position),
+    );
+  }
+
+  void _showPeerInfo() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(widget.peer.displayName),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildInfoRow('Public Key', _peerHex),
+            const SizedBox(height: 8),
+            _buildInfoRow('Status', widget.peer.connectionState.name),
+            if (_isFriend) ...[
+              const SizedBox(height: 8),
+              _buildInfoRow('Friendship', 'Friends ✓'),
+              if (_friendship?.libp2pAddress != null) ...[
+                const SizedBox(height: 8),
+                _buildInfoRow('LibP2P', _friendship!.libp2pAddress!),
+              ],
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: _peerHex));
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Public key copied')),
+              );
+            },
+            child: const Text('Copy Key'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInfoRow(String label, String value) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 80,
+          child: Text(
+            '$label:',
+            style: const TextStyle(color: Colors.grey),
+          ),
+        ),
+        Expanded(
+          child: Text(
+            value,
+            style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+          ),
+        ),
+      ],
     );
   }
 
@@ -238,7 +440,8 @@ class _ChatScreenState extends State<ChatScreen> {
               decoration: const InputDecoration(
                 hintText: 'Type a message...',
                 border: OutlineInputBorder(),
-                contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                contentPadding:
+                    EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               ),
               onSubmitted: (_) => _sendMessage(),
             ),
@@ -266,7 +469,8 @@ class _MessageBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Align(
-      alignment: message.isOutgoing ? Alignment.centerRight : Alignment.centerLeft,
+      alignment:
+          message.isOutgoing ? Alignment.centerRight : Alignment.centerLeft,
       child: GestureDetector(
         onLongPressStart: (details) {
           onLongPress?.call(details.globalPosition);
@@ -297,9 +501,12 @@ class _MessageBubble extends StatelessWidget {
                 _formatTime(message.timestamp),
                 style: TextStyle(
                   fontSize: 10,
-                  color: message.isOutgoing 
-                      ? Colors.white70 
-                      : Theme.of(context).colorScheme.onSurface.withOpacity(0.5),
+                  color: message.isOutgoing
+                      ? Colors.white70
+                      : Theme.of(context)
+                          .colorScheme
+                          .onSurface
+                          .withOpacity(0.5),
                 ),
               ),
             ],
@@ -364,8 +571,8 @@ class _ForwardSheet extends StatelessWidget {
               borderRadius: BorderRadius.circular(8),
             ),
             child: Text(
-              message.content.length > 100 
-                  ? '${message.content.substring(0, 100)}...' 
+              message.content.length > 100
+                  ? '${message.content.substring(0, 100)}...'
                   : message.content,
               style: TextStyle(
                 color: Theme.of(context).colorScheme.onSurface.withOpacity(0.7),
@@ -396,8 +603,8 @@ class _ForwardSheet extends StatelessWidget {
                   leading: CircleAvatar(
                     backgroundColor: Colors.blueGrey,
                     child: Text(
-                      peer.displayName.isNotEmpty 
-                          ? peer.displayName[0].toUpperCase() 
+                      peer.displayName.isNotEmpty
+                          ? peer.displayName[0].toUpperCase()
                           : '?',
                       style: const TextStyle(color: Colors.white),
                     ),
@@ -408,9 +615,10 @@ class _ForwardSheet extends StatelessWidget {
                         ? 'Online'
                         : 'Offline',
                     style: TextStyle(
-                      color: peer.connectionState == PeerConnectionState.connected
-                          ? Colors.green
-                          : Colors.grey,
+                      color:
+                          peer.connectionState == PeerConnectionState.connected
+                              ? Colors.green
+                              : Colors.grey,
                       fontSize: 12,
                     ),
                   ),
@@ -423,5 +631,144 @@ class _ForwardSheet extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+/// Special message bubble for friendship-related messages
+class _FriendshipMessageBubble extends StatelessWidget {
+  final ChatMessage message;
+  final VoidCallback? onAccept;
+
+  const _FriendshipMessageBubble({
+    required this.message,
+    this.onAccept,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isOutgoing = message.isOutgoing;
+
+    IconData icon;
+    Color iconColor;
+    String title;
+
+    switch (message.messageType) {
+      case ChatMessageType.friendRequestSent:
+        icon = Icons.person_add;
+        iconColor = const Color(0xFFE8A33C);
+        title = 'Friend Request Sent';
+        break;
+      case ChatMessageType.friendRequestReceived:
+        icon = Icons.person_add;
+        iconColor = const Color(0xFFE8A33C);
+        title = 'Friend Request';
+        break;
+      case ChatMessageType.friendRequestAccepted:
+        icon = Icons.check_circle;
+        iconColor = Colors.green;
+        title = 'Friend Request Accepted';
+        break;
+      case ChatMessageType.friendRequestAcceptedByUs:
+        icon = Icons.check_circle;
+        iconColor = Colors.green;
+        title = 'You Accepted';
+        break;
+      default:
+        icon = Icons.info;
+        iconColor = Colors.grey;
+        title = 'System Message';
+    }
+
+    return Align(
+      alignment: isOutgoing ? Alignment.centerRight : Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 8),
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.of(context).size.width * 0.75,
+        ),
+        decoration: BoxDecoration(
+          color: const Color(0xFF1B3D2F),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: iconColor.withOpacity(0.5)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Header
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: iconColor.withOpacity(0.1),
+                borderRadius:
+                    const BorderRadius.vertical(top: Radius.circular(15)),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(icon, color: iconColor, size: 20),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      title,
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: iconColor,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            // Content
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    message.content,
+                    style: const TextStyle(fontSize: 14),
+                  ),
+                  const SizedBox(height: 8),
+                  // Accept button for pending incoming requests
+                  if (message.canAccept && onAccept != null) ...[
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: onAccept,
+                        icon: const Icon(Icons.check, size: 18),
+                        label: const Text('Accept Friend Request'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFFE8A33C),
+                          foregroundColor: Colors.black,
+                        ),
+                      ),
+                    ),
+                  ],
+                  // Timestamp
+                  Align(
+                    alignment: Alignment.bottomRight,
+                    child: Text(
+                      _formatTime(message.timestamp),
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: Colors.white.withOpacity(0.5),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _formatTime(DateTime time) {
+    final hour = time.hour.toString().padLeft(2, '0');
+    final minute = time.minute.toString().padLeft(2, '0');
+    return '$hour:$minute';
   }
 }

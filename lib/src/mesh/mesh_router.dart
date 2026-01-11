@@ -8,21 +8,15 @@ import '../models/identity.dart';
 import 'bloom_filter.dart';
 import 'fragment_handler.dart';
 import 'store_forward.dart';
+import 'router.dart';
 
-/// Callback type for sending packets over BLE
-typedef SendPacketCallback = Future<bool> Function(
-    Uint8List recipientPubkey, Uint8List data);
-
-/// Callback type for broadcasting packets to all connected peers
-typedef BroadcastCallback = Future<void> Function(Uint8List data,
-    {Uint8List? excludePeer});
-
-/// Callback type for delivering received messages to the application layer (GSG)
-typedef MessageReceivedCallback = void Function(
-    Uint8List senderPubkey, Uint8List payload);
-
-/// Callback for peer discovery events
-typedef PeerEventCallback = void Function(Peer peer);
+// Re-export callback types from router.dart for backward compatibility
+export 'router.dart'
+    show
+        SendPacketCallback,
+        BroadcastCallback,
+        MessageReceivedCallback,
+        PeerEventCallback;
 
 /// The mesh router handles:
 /// - Packet deduplication (Bloom filter)
@@ -30,68 +24,79 @@ typedef PeerEventCallback = void Function(Peer peer);
 /// - Fragmentation of large messages
 /// - Store-and-forward for offline peers
 /// - ANNOUNCE handling for peer identity
-class MeshRouter {
+class MeshRouter implements BitchatRouter {
   final Logger _log = Logger();
-  
+
   /// Our identity
   final BitchatIdentity identity;
-  
+
   /// Bloom filter for deduplication
   final BloomFilter _seenPackets = BloomFilter();
-  
+
   /// Fragment handler for large messages
   final FragmentHandler _fragmentHandler = FragmentHandler();
-  
+
   /// Store-and-forward cache for offline peers
   final StoreForwardCache _storeForward = StoreForwardCache();
-  
+
   /// Known peers, keyed by pubkey hex
   final Map<String, Peer> _peers = {};
-  
+
   /// Callback to send a packet to a specific peer
+  @override
   SendPacketCallback? onSendPacket;
-  
+
   /// Callback to broadcast to all connected peers
+  @override
   BroadcastCallback? onBroadcast;
-  
+
   /// Callback when an application message is received
+  @override
   MessageReceivedCallback? onMessageReceived;
-  
+
   /// Callback when a new peer is discovered
+  @override
   PeerEventCallback? onPeerConnected;
-  
+
   /// Callback when a peer sends an ANNOUNCE update
+  @override
   PeerEventCallback? onPeerUpdated;
-  
+
   /// Callback when a peer disconnects
+  @override
   PeerEventCallback? onPeerDisconnected;
-  
+
   /// Protocol version for ANNOUNCE
   static const int protocolVersion = 1;
-  
+
   MeshRouter({required this.identity});
-  
+
   /// Get all known peers
+  @override
   List<Peer> get peers => _peers.values.toList();
-  
+
   /// Get connected peers only
+  @override
   List<Peer> get connectedPeers => _peers.values
       .where((p) => p.connectionState == PeerConnectionState.connected)
       .toList();
-  
+
   /// Check if a peer is reachable
+  @override
   bool isPeerReachable(Uint8List pubkey) {
     final peer = _peers[_pubkeyToHex(pubkey)];
     return peer?.isReachable ?? false;
   }
-  
+
   /// Get peer by public key
+  @override
   Peer? getPeer(Uint8List pubkey) => _peers[_pubkeyToHex(pubkey)];
-  
+
   // ===== Outbound =====
-  
+
   /// Send a message to a specific recipient.
   /// Handles fragmentation if needed.
+  @override
   Future<bool> sendMessage({
     required Uint8List payload,
     required Uint8List recipientPubkey,
@@ -115,14 +120,15 @@ class MeshRouter {
       payload: payload,
       signature: Uint8List(64), // Placeholder
     );
-    
+
     // Sign the packet
     await _signPacket(packet);
-    
+
     return _sendPacket(packet, recipientPubkey);
   }
-  
+
   /// Broadcast a message to all peers
+  @override
   Future<void> broadcastMessage({
     required Uint8List payload,
     int ttl = BitchatPacket.defaultTtl,
@@ -139,17 +145,17 @@ class MeshRouter {
       payload: payload,
       signature: Uint8List(64), // Placeholder
     );
-    
+
     // Sign packet
     await _signPacket(packet);
-    
+
     // Mark as seen (don't re-process our own broadcast)
     _seenPackets.add(packet.packetId);
-    
+
     final data = packet.serialize();
     await onBroadcast?.call(data);
   }
-  
+
   Future<bool> _sendFragmented({
     required Uint8List payload,
     required Uint8List recipientPubkey,
@@ -161,25 +167,25 @@ class MeshRouter {
       recipientPubkey: recipientPubkey,
       ttl: ttl,
     );
-    
+
     // Sign each fragment
     for (final fragment in fragmented.fragments) {
       await _signPacket(fragment);
     }
-    
+
     var success = true;
     for (final fragment in fragmented.fragments) {
       _seenPackets.add(fragment.packetId);
       final sent = await _sendPacket(fragment, recipientPubkey);
       if (!sent) success = false;
-      
+
       // Inter-fragment delay
       await Future.delayed(FragmentHandler.fragmentDelay);
     }
-    
+
     return success;
   }
-  
+
   Future<void> _broadcastFragmented({
     required Uint8List payload,
     required int ttl,
@@ -189,7 +195,7 @@ class MeshRouter {
       senderPubkey: identity.publicKey,
       ttl: ttl,
     );
-    
+
     for (final fragment in fragmented.fragments) {
       _seenPackets.add(fragment.packetId);
       final data = fragment.serialize();
@@ -197,11 +203,12 @@ class MeshRouter {
       await Future.delayed(FragmentHandler.fragmentDelay);
     }
   }
-  
-  Future<bool> _sendPacket(BitchatPacket packet, Uint8List recipientPubkey) async {
+
+  Future<bool> _sendPacket(
+      BitchatPacket packet, Uint8List recipientPubkey) async {
     // Mark as seen
     _seenPackets.add(packet.packetId);
-    
+
     // Check if peer is reachable
     if (!isPeerReachable(recipientPubkey)) {
       // Store for later delivery
@@ -209,19 +216,20 @@ class MeshRouter {
       _storeForward.cache(packet);
       return false;
     }
-    
+
     final data = packet.serialize();
     return await onSendPacket?.call(recipientPubkey, data) ?? false;
   }
-  
+
   /// Send ANNOUNCE to a newly connected peer
+  @override
   Future<void> sendAnnounce(Uint8List peerPubkey) async {
     final payload = _encodeAnnounce(
       pubkey: identity.publicKey,
       nickname: identity.nickname,
       protocolVersion: protocolVersion,
     );
-    
+
     final packet = BitchatPacket(
       type: PacketType.announce,
       ttl: 0, // ANNOUNCE is not relayed
@@ -230,27 +238,30 @@ class MeshRouter {
       payload: payload,
       signature: Uint8List(64), // Placeholder
     );
-    
+
     // Sign packet
     await _signPacket(packet);
-    
+
     final data = packet.serialize();
     await onSendPacket?.call(peerPubkey, data);
   }
-  
+
   // ===== Inbound =====
-  
+
   /// Process an incoming packet from BLE
-  void onPacketReceived(Uint8List data, {Uint8List? fromPeer, required int rssi}) {
+  @override
+  void onPacketReceived(Uint8List data,
+      {Uint8List? fromPeer, required int rssi}) {
     try {
       final packet = BitchatPacket.deserialize(data);
-      _processPacket(packet, fromPeer: fromPeer, rssi: rssi); 
+      _processPacket(packet, fromPeer: fromPeer, rssi: rssi);
     } catch (e) {
       _log.e('Failed to deserialize packet: $e');
     }
   }
-  
-  void _processPacket(BitchatPacket packet, {Uint8List? fromPeer, required int rssi}) {
+
+  void _processPacket(BitchatPacket packet,
+      {Uint8List? fromPeer, required int rssi}) {
     // Check for duplicates (except ANNOUNCE which shouldn't be deduplicated)
     if (packet.type != PacketType.announce) {
       if (_seenPackets.checkAndAdd(packet.packetId)) {
@@ -258,84 +269,86 @@ class MeshRouter {
         return;
       }
     }
-    
+
     // Handle by type
     switch (packet.type) {
       case PacketType.announce:
         _handleAnnounce(packet, rssi: rssi);
         break;
-        
+
       case PacketType.message:
         _handleMessage(packet, fromPeer: fromPeer);
         break;
-        
+
       case PacketType.fragmentStart:
       case PacketType.fragmentContinue:
       case PacketType.fragmentEnd:
         _handleFragment(packet, fromPeer: fromPeer);
         break;
-        
+
       case PacketType.ack:
         _handleAck(packet);
         break;
-        
+
       case PacketType.nack:
         _handleNack(packet);
         break;
     }
   }
-  
+
   void _handleAnnounce(BitchatPacket packet, {required int rssi}) {
     final (pubkey, nickname, version) = _decodeAnnounce(packet.payload);
     final key = _pubkeyToHex(pubkey);
-    
+
     var peer = _peers[key];
     final isNew = peer == null;
-    
+
     // TODO: Determine transport type from router; need to have a router per transport protocol
     if (isNew) {
-      peer = Peer(publicKey: pubkey, transport: PeerTransport.bleDirect, rssi: rssi);
+      peer = Peer(
+          publicKey: pubkey, transport: PeerTransport.bleDirect, rssi: rssi);
       _peers[key] = peer;
     }
-    
+
     peer.updateFromAnnounce(
       nickname: nickname,
       protocolVersion: version,
       receivedAt: DateTime.now(),
     );
-    
+
     // // Update RSSI if available
     // if (rssi != null) {
     //   peer.rssi = rssi;
     // }
-    
-    _log.i('Peer ${isNew ? "connected" : "updated"}: ${peer.displayName} at RSSI $rssi');
-    
+
+    _log.i(
+        'Peer ${isNew ? "connected" : "updated"}: ${peer.displayName} at RSSI $rssi');
+
     if (isNew) {
       onPeerConnected?.call(peer);
-      
+
       // Deliver any cached messages
       _deliverCachedMessages(pubkey);
     } else {
       onPeerUpdated?.call(peer);
     }
   }
-  
+
   void _handleMessage(BitchatPacket packet, {Uint8List? fromPeer}) {
     if (_isForUs(packet)) {
       _log.d('Message received for us: ${packet.packetId}');
       onMessageReceived?.call(packet.senderPubkey, packet.payload);
       return;
     }
-    
+
     // Not for us - relay if TTL > 0
     _maybeRelay(packet, fromPeer: fromPeer);
   }
-  
+
   void _handleFragment(BitchatPacket packet, {Uint8List? fromPeer}) {
     // Try to reassemble
     final reassembled = _fragmentHandler.processFragment(packet);
-    
+
     if (reassembled != null) {
       // Fragment complete - create a synthetic message packet
       if (_isForUs(packet)) {
@@ -347,68 +360,77 @@ class MeshRouter {
         // (with TTL=0 on reassembled to prevent re-relay)
       }
     }
-    
+
     // Relay the fragment itself if not for us
     if (!_isForUs(packet)) {
       _maybeRelay(packet, fromPeer: fromPeer);
     }
   }
-  
+
   void _handleAck(BitchatPacket packet) {
     // ACK handling - GSG layer may use this
     _log.d('ACK received: ${packet.packetId}');
   }
-  
+
   void _handleNack(BitchatPacket packet) {
     // NACK handling - GSG layer handles this for blocklace sync
     _log.d('NACK received: ${packet.packetId}');
     onMessageReceived?.call(packet.senderPubkey, packet.payload);
   }
-  
+
   bool _isForUs(BitchatPacket packet) {
     if (packet.isBroadcast) return true;
-    
+
     final recipientHex = _pubkeyToHex(packet.recipientPubkey!);
     final ourHex = _pubkeyToHex(identity.publicKey);
     return recipientHex == ourHex;
   }
-  
+
   void _maybeRelay(BitchatPacket packet, {Uint8List? fromPeer}) {
     if (packet.ttl <= 0) {
       _log.d('TTL expired, not relaying: ${packet.packetId}');
       return;
     }
-    
+
     // Decrement TTL and relay
     final relayPacket = packet.decrementTtl();
     final data = relayPacket.serialize();
-    
+
     _log.d('Relaying packet: ${packet.packetId}, TTL: ${relayPacket.ttl}');
     onBroadcast?.call(data, excludePeer: fromPeer);
   }
-  
+
   void _deliverCachedMessages(Uint8List recipientPubkey) {
     final cached = _storeForward.retrieve(recipientPubkey);
     if (cached.isEmpty) return;
-    
-    _log.i('Delivering ${cached.length} cached messages to ${_pubkeyToHex(recipientPubkey).substring(0, 8)}');
-    
+
+    _log.i(
+        'Delivering ${cached.length} cached messages to ${_pubkeyToHex(recipientPubkey).substring(0, 8)}');
+
     for (final packet in cached) {
       final data = packet.serialize();
       onSendPacket?.call(recipientPubkey, data);
     }
   }
-  
+
   // ===== Peer management =====
-  
+
   /// Called by BLE layer when a peer connects (before ANNOUNCE)
-  void onPeerBleConnected(String bleDeviceId, {int? rssi}) {
+  @override
+  void onPeerTransportConnected(String transportId, {int? rssi}) {
     // We don't know the pubkey yet - wait for ANNOUNCE
-    _log.d('BLE peer connected: $bleDeviceId');
+    _log.d('Transport peer connected: $transportId');
   }
-  
+
+  /// Called by transport layer when a peer connects (before ANNOUNCE)
+  /// @deprecated Use [onPeerTransportConnected] instead
+  void onPeerBleConnected(String bleDeviceId, {int? rssi}) {
+    onPeerTransportConnected(bleDeviceId, rssi: rssi);
+  }
+
   /// Called by BLE layer when a peer disconnects
-  void onPeerBleDisconnected(Uint8List pubkey) {
+  @override
+  void onPeerTransportDisconnected(Uint8List pubkey) {
     final key = _pubkeyToHex(pubkey);
     final peer = _peers[key];
     if (peer != null) {
@@ -417,10 +439,17 @@ class MeshRouter {
       onPeerDisconnected?.call(peer);
     }
   }
-  
+
+  /// Called by BLE layer when a peer disconnects
+  /// @deprecated Use [onPeerTransportDisconnected] instead
+  void onPeerBleDisconnected(Uint8List pubkey) {
+    onPeerTransportDisconnected(pubkey);
+  }
+
   // ===== ANNOUNCE encoding/decoding =====
-  
+
   /// Create ANNOUNCE payload for sending to a new peer
+  @override
   Uint8List createAnnouncePayload() {
     return _encodeAnnounce(
       pubkey: identity.publicKey,
@@ -428,7 +457,7 @@ class MeshRouter {
       protocolVersion: protocolVersion,
     );
   }
-  
+
   Uint8List _encodeAnnounce({
     required Uint8List pubkey,
     required String nickname,
@@ -436,51 +465,54 @@ class MeshRouter {
   }) {
     final nicknameBytes = Uint8List.fromList(nickname.codeUnits);
     final buffer = BytesBuilder();
-    
+
     // Pubkey (32 bytes)
     buffer.add(pubkey);
-    
+
     // Protocol version (2 bytes)
     final versionBytes = ByteData(2);
     versionBytes.setUint16(0, protocolVersion, Endian.big);
     buffer.add(versionBytes.buffer.asUint8List());
-    
+
     // Nickname length (1 byte) + nickname
     buffer.addByte(nicknameBytes.length);
     buffer.add(nicknameBytes);
-    
+
     return buffer.toBytes();
   }
-  
+
   (Uint8List, String, int) _decodeAnnounce(Uint8List data) {
     final pubkey = data.sublist(0, 32);
     final version = ByteData.view(data.buffer, data.offsetInBytes + 32, 2)
         .getUint16(0, Endian.big);
     final nicknameLength = data[34];
-    final nickname = String.fromCharCodes(data.sublist(35, 35 + nicknameLength));
+    final nickname =
+        String.fromCharCodes(data.sublist(35, 35 + nicknameLength));
     return (Uint8List.fromList(pubkey), nickname, version);
   }
-  
+
   String _pubkeyToHex(Uint8List pubkey) {
     return pubkey.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }
-  
+
   /// Sign a packet with the identity's private key
   Future<void> _signPacket(BitchatPacket packet) async {
     final algorithm = Ed25519();
     // final keyPair = await algorithm.newKeyPairFromSeed(identity.privateKey.sublist(0, 32));
-    
+
     // Get signable bytes (packet with signature zeroed out)
     final signableBytes = packet.getSignableBytes();
-    
+
     // Sign
-    final signature = await algorithm.sign(signableBytes, keyPair: identity.keyPair);
-    
+    final signature =
+        await algorithm.sign(signableBytes, keyPair: identity.keyPair);
+
     // Update packet signature
     packet.signature = Uint8List.fromList(signature.bytes);
   }
-  
+
   /// Clean up resources
+  @override
   void dispose() {
     _fragmentHandler.dispose();
     _storeForward.dispose();

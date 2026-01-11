@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:typed_data';
 import 'package:flutter/widgets.dart';
+import '../mesh/router.dart' show BitchatRouter;
 
 /// Transport type identifier
 enum TransportType {
@@ -9,10 +10,13 @@ enum TransportType {
 
   /// WebRTC-based P2P transport (STUN/TURN/TURNS)
   webrtc,
+
+  /// LibP2P-based transport
+  libp2p,
 }
 
 /// Display metadata for a transport service.
-/// 
+///
 /// Used by UI components to show appropriate icons and labels
 /// for each transport type.
 class TransportDisplayInfo {
@@ -58,7 +62,7 @@ enum TransportState {
 }
 
 /// Represents a discovered peer on a transport layer.
-/// 
+///
 /// This is transport-agnostic - each transport implementation maps
 /// its native peer representation to this common format.
 class TransportPeer {
@@ -170,21 +174,21 @@ class TransportDiscoveryEvent {
 }
 
 /// Abstract interface for transport services.
-/// 
+///
 /// This interface defines the contract that all transport implementations
 /// must fulfill, allowing the application layer to switch between
 /// different transport protocols (BLE, WebRTC, etc.) seamlessly.
-/// 
+///
 /// ## Implementation Requirements
-/// 
+///
 /// Implementations must:
 /// 1. Handle peer discovery appropriate to the transport
 /// 2. Manage connections to discovered peers
 /// 3. Provide reliable data transmission (or indicate unreliability)
 /// 4. Map transport-specific peer IDs to the common format
-/// 
+///
 /// ## Lifecycle
-/// 
+///
 /// ```
 /// create → initialize() → start() → [active use] → stop() → dispose()
 /// ```
@@ -198,6 +202,13 @@ abstract class TransportService {
 
   /// Current state of the transport
   TransportState get state;
+
+  /// The router associated with this transport.
+  ///
+  /// The router handles message routing, peer management, and protocol-level
+  /// operations for this transport. Each transport type has its own router
+  /// implementation optimized for its network characteristics.
+  BitchatRouter get router;
 
   /// Stream of state changes
   Stream<TransportState> get stateStream;
@@ -224,17 +235,17 @@ abstract class TransportService {
   bool get isActive;
 
   /// Initialize the transport service.
-  /// 
+  ///
   /// This should:
   /// - Set up any required resources
   /// - Check permissions
   /// - Prepare for [start] to be called
-  /// 
+  ///
   /// Returns true if initialization succeeded.
   Future<bool> initialize();
 
   /// Start the transport (begin discovery/listening).
-  /// 
+  ///
   /// After this call, the transport should:
   /// - Begin discovering peers (if applicable)
   /// - Accept incoming connections
@@ -242,7 +253,7 @@ abstract class TransportService {
   Future<void> start();
 
   /// Stop the transport (stop discovery/listening).
-  /// 
+  ///
   /// This should:
   /// - Stop discovering new peers
   /// - Optionally maintain existing connections
@@ -250,7 +261,7 @@ abstract class TransportService {
   Future<void> stop();
 
   /// Connect to a specific peer by their transport-specific ID.
-  /// 
+  ///
   /// Returns true if connection was initiated successfully.
   /// The actual connection result will come through [connectionStream].
   Future<bool> connectToPeer(String peerId);
@@ -259,19 +270,19 @@ abstract class TransportService {
   Future<void> disconnectFromPeer(String peerId);
 
   /// Send data to a specific peer.
-  /// 
+  ///
   /// Returns true if the data was sent (or queued) successfully.
   /// Note: This doesn't guarantee delivery for unreliable transports.
   Future<bool> sendToPeer(String peerId, Uint8List data);
 
   /// Broadcast data to all connected peers.
-  /// 
+  ///
   /// [excludePeerId] can be used to exclude a specific peer
   /// (useful for avoiding echo when relaying).
   Future<void> broadcast(Uint8List data, {String? excludePeerId});
 
   /// Associate a peer with a public key.
-  /// 
+  ///
   /// Called after identity exchange (e.g., ANNOUNCE packet).
   /// This allows higher layers to address peers by pubkey.
   void associatePeerWithPubkey(String peerId, Uint8List pubkey);
@@ -283,7 +294,7 @@ abstract class TransportService {
   Uint8List? getPubkeyForPeerId(String peerId);
 
   /// Clean up resources.
-  /// 
+  ///
   /// After this call, the transport cannot be used again.
   Future<void> dispose();
 }
