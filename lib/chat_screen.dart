@@ -7,12 +7,13 @@ import 'chat_models.dart';
 /// Chat screen for a conversation with a specific peer
 class ChatScreen extends StatefulWidget {
   final Bitchat bitchat;
-  final Peer peer;
+  final PeerState peer;
   final Uint8List myPubkey;
   final MessageStore messageStore;
   final FriendshipStore? friendshipStore;
   final VoidCallback? onSendFriendRequest;
   final VoidCallback? onAcceptFriendRequest;
+  final VoidCallback? onUnfriend;
   final String? myLibp2pAddress;
 
   const ChatScreen({
@@ -24,6 +25,7 @@ class ChatScreen extends StatefulWidget {
     this.friendshipStore,
     this.onSendFriendRequest,
     this.onAcceptFriendRequest,
+    this.onUnfriend,
     this.myLibp2pAddress,
   });
 
@@ -290,6 +292,9 @@ class _ChatScreenState extends State<ChatScreen> {
             case 'info':
               _showPeerInfo();
               break;
+            case 'unfriend':
+              _confirmUnfriend();
+              break;
           }
         },
         itemBuilder: (context) => [
@@ -303,11 +308,50 @@ class _ChatScreenState extends State<ChatScreen> {
               ],
             ),
           ),
+          if (_isFriend)
+            const PopupMenuItem(
+              value: 'unfriend',
+              child: Row(
+                children: [
+                  Icon(Icons.person_remove, color: Colors.red),
+                  SizedBox(width: 12),
+                  Text('Unfriend', style: TextStyle(color: Colors.red)),
+                ],
+              ),
+            ),
         ],
       ),
     );
 
     return actions;
+  }
+
+  void _confirmUnfriend() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Unfriend'),
+        content: Text(
+          'Are you sure you want to remove ${widget.peer.displayName} from your friends?\n\n'
+          'You will only be able to contact them via Bluetooth when they are nearby.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              widget.onUnfriend?.call();
+              Navigator.pop(context); // Close chat screen
+            },
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Unfriend'),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _buildFriendRequestBanner() {
@@ -526,8 +570,8 @@ class _MessageBubble extends StatelessWidget {
 /// Bottom sheet for selecting a peer to forward message to
 class _ForwardSheet extends StatelessWidget {
   final ChatMessage message;
-  final List<Peer> peers;
-  final void Function(Peer peer) onForward;
+  final List<PeerState> peers;
+  final void Function(PeerState peer) onForward;
 
   const _ForwardSheet({
     required this.message,

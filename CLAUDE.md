@@ -1,5 +1,34 @@
 # Claude Instructions for Bitchat Transport
 
+## CRITICAL: NO Legacy or Compatibility Code
+
+**IMPORTANT**: When refactoring, DO NOT keep old code "for legacy" or "for compatibility".
+
+- ❌ **NO** `// Legacy - kept for compatibility` comments
+- ❌ **NO** keeping both old and new implementations
+- ✅ **DO** fully replace old code with new implementation
+- ✅ **DO** remove unused imports and dead code
+- ✅ **DO** update all call sites when changing APIs
+- ❌ **NO** `PeerStore` - use Redux store (`AppState.peers`) only
+
+---
+
+## CRITICAL: NO Store-and-Forward / NO Relaying
+
+**IMPORTANT**: Bitchat does NOT implement store-and-forward or message relaying.
+
+- ❌ **NO caching** messages for offline peers
+- ❌ **NO relaying** messages through intermediate peers
+- ❌ **NO forwarding** packets on behalf of other peers
+
+Messages are sent **directly** to the recipient:
+- If the recipient is **online and reachable** → message is delivered
+- If the recipient is **offline** → message **fails** and sender must retry later
+
+This is by design - the application layer (GSG) handles message persistence and retry logic.
+
+---
+
 ## BLE Service UUID Architecture
 
 **IMPORTANT**: Each Bitchat device MUST advertise its own **unique** service UUID derived from its public key.
@@ -55,9 +84,78 @@
 - ✅ Exchange ANNOUNCE packets after confirming Bitchat peer
 - ✅ Maintain BLE Device ID ↔ Public Key mapping
 
+## NO Store-and-Forward
+
+**IMPORTANT**: Bitchat does NOT implement store-and-forward messaging.
+
+- Messages to offline peers simply **fail** - they are NOT cached
+- The sender must retry later when the peer is online
+- This is by design to keep the protocol simple and avoid message accumulation
+- If a peer is unreachable via any enabled transport (BLE or libp2p), `send()` returns `false`
+
+### DO NOT:
+- ❌ Cache messages for offline peers
+- ❌ Implement store-and-forward queues
+- ❌ Automatically retry sending to offline peers
+- ❌ Hold messages in memory waiting for peers to reconnect
+
+### DO:
+- ✅ Return `false` immediately if peer is unreachable
+- ✅ Let the application layer handle retry logic if needed
+- ✅ Try all available transports (BLE first, then libp2p) before failing
+
+## Redux Architecture for Peers
+
+All peer state is managed through Redux:
+
+### State Structure
+- `AppState.peers` → `PeersState`
+  - `discoveredBlePeers: Map<String, DiscoveredPeerState>` - Pre-ANNOUNCE BLE devices
+  - `peers: Map<String, PeerState>` - Post-ANNOUNCE identified peers
+
+### Key Actions
+- `BleDeviceDiscoveredAction` - BLE scan found a device
+- `BleDeviceConnectedAction` / `BleDeviceDisconnectedAction` - Connection state
+- `PeerAnnounceReceivedAction` - ANNOUNCE packet received (peer identified)
+- `PeerRssiUpdatedAction` - Signal strength updated
+- `StaleDiscoveredBlePeersRemovedAction` / `StalePeersRemovedAction` - Cleanup
+
+### UI Pattern
+```dart
+// Read peers from Redux store
+Map<String, Peer> get _peers {
+  return {
+    for (var p in appStore.state.peers.connectedPeers) 
+      p.pubkeyHex: _peerStateToLegacy(p)
+  };
+}
+
+// Subscribe to store changes
+appStore.onChange.listen((_) => setState(() {}));
+```
+
+## Transport Layer Settings
+
+### Transport Priority
+When both transports are enabled and a peer is reachable via both:
+1. **Bluetooth (BLE)** is preferred - faster, no Internet needed, works for nearby peers
+2. **libp2p (Internet)** is fallback - works globally but requires Internet
+
+### Disabling Transports
+- When Bluetooth is disabled: stop advertising, stop scanning, no BLE communication
+- When libp2p is disabled: stop libp2p host, no Internet communication
+- At least one transport should remain enabled for the app to function
+
+### Per-Peer Addresses
+Each peer can have both a BLE address and a libp2p address stored:
+- `PeerState.bleDeviceId` - BLE device ID (MAC on Android, UUID on iOS)
+- `PeerState.libp2pAddress` - libp2p multiaddress
+- Messages route through the best available transport based on peer availability
+
 ## Code References
 
 - Service UUID derivation: `lib/src/models/identity.dart` → `bleServiceUuid` getter
 - Peripheral advertising: `lib/src/ble/ble_peripheral_service.dart` → `startAdvertising()`
 - Central scanning: `lib/src/ble/ble_central_service.dart` → `startScan()` and `_onScanResults()`
-- ANNOUNCE handling: `lib/src/mesh/mesh_router.dart` → `handleAnnounce()`
+- ANNOUNCE handling: `lib/src/transport/ble_transport_service.dart` → `_handleAnnounce()`
+- Redux store: `lib/src/store/` → `peers_state.dart`, `peers_actions.dart`, `peers_reducer.dart`

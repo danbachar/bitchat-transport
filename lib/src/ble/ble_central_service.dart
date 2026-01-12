@@ -65,9 +65,6 @@ class BleCentralService {
   /// Connection timeout
   static const Duration connectionTimeout = Duration(seconds: 15);
   
-  /// Whether scanning is active
-  bool _isScanning = false;
-  
   /// Discovered devices, keyed by device ID
   final Map<String, DiscoveredDevice> _discovered = {};
   
@@ -89,7 +86,7 @@ class BleCentralService {
   BleCentralService({required this.serviceUuid});
   
   /// Whether scanning is active
-  bool get isScanning => _isScanning;
+  bool get isScanning => FlutterBluePlus.isScanningNow;
   
   /// Number of connected peripherals
   int get connectedCount => _connected.length;
@@ -130,13 +127,12 @@ class BleCentralService {
   
   /// Start scanning for peers
   Future<void> startScan({Duration? timeout}) async {
-    if (_isScanning) {
+    if (isScanning) {
       _log.w('Already scanning');
       return;
     }
     
-    _isScanning = true;
-    _log.i('Starting BLE scan for service: $serviceUuid');
+    _log.i('Starting BLE scan');
     
     try {
       // Listen for scan results
@@ -152,15 +148,10 @@ class BleCentralService {
         androidScanMode: AndroidScanMode.lowLatency,
       );
       
-      // Mark as not scanning when done
-      FlutterBluePlus.isScanning.listen((scanning) {
-        if (!scanning) {
-          _isScanning = false;
-          _log.i('Scan completed');
-        }
-      });
+      // Wait for scan to actually complete by listening to isScanning stream
+      await FlutterBluePlus.isScanning.firstWhere((scanning) => !scanning);
+      _log.i('Scan completed');
     } catch (e) {
-      _isScanning = false;
       _log.e('Failed to start scan: $e');
       rethrow;
     }
@@ -168,10 +159,9 @@ class BleCentralService {
   
   /// Stop scanning
   Future<void> stopScan() async {
-    if (!_isScanning) return;
+    if (!isScanning) return;
     
     await FlutterBluePlus.stopScan();
-    _isScanning = false;
     _log.i('Scan stopped');
   }
   
@@ -219,6 +209,7 @@ class BleCentralService {
       }
       
       if (targetService == null) {
+        _log.w("Service not found on device: $deviceId");
         await device.disconnect();
         return false;
       }
@@ -326,7 +317,9 @@ class BleCentralService {
         final uuidStr = result.advertisementData.serviceUuids.first.toString().toLowerCase();
         final deviceId = result.device.remoteId.str;
         
-        if (!_discovered.containsKey(deviceId)) {
+        final existing = _discovered[deviceId];
+        if (existing == null) {
+          // New device discovered
           final discovered = DiscoveredDevice(
             deviceId: deviceId,
             name: result.advertisementData.advName,
@@ -338,6 +331,20 @@ class BleCentralService {
           _discovered[deviceId] = discovered;
           _log.d('Discovered: $deviceId (${result.advertisementData.advName})');
           onDeviceDiscovered?.call(discovered);
+        } else {
+          // Already discovered - update RSSI and notify
+          // Create updated device with new RSSI
+          final updated = DiscoveredDevice(
+            deviceId: deviceId,
+            name: result.advertisementData.advName,
+            serviceUuid: uuidStr,
+            rssi: result.rssi,
+            device: result.device,
+          );
+          _discovered[deviceId] = updated;
+          
+          // Notify with updated RSSI (callback can decide to update UI)
+          onDeviceDiscovered?.call(updated);
         }
       }
     }

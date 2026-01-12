@@ -1,11 +1,10 @@
 import 'dart:async';
 import 'dart:typed_data';
 import 'package:flutter/widgets.dart';
-import '../mesh/router.dart' show BitchatRouter;
 
 /// Transport type identifier
 enum TransportType {
-  /// Bluetooth Low Energy mesh transport
+  /// Bluetooth Low Energy direct P2P transport
   ble,
 
   /// WebRTC-based P2P transport (STUN/TURN/TURNS)
@@ -202,13 +201,6 @@ abstract class TransportService {
 
   /// Current state of the transport
   TransportState get state;
-
-  /// The router associated with this transport.
-  ///
-  /// The router handles message routing, peer management, and protocol-level
-  /// operations for this transport. Each transport type has its own router
-  /// implementation optimized for its network characteristics.
-  BitchatRouter get router;
 
   /// Stream of state changes
   Stream<TransportState> get stateStream;

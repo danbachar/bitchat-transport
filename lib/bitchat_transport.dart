@@ -73,9 +73,14 @@ export 'src/transport/transport.dart';
 // Models
 export 'src/models/identity.dart';
 export 'src/models/peer.dart';
+export 'src/models/peer_store.dart';
 export 'src/models/packet.dart';
 export 'src/models/block.dart';
 export 'src/models/friendship.dart';
+export 'src/models/transport_settings.dart';
+
+// Redux Store
+export 'src/store/store.dart';
 
 // BLE (for advanced usage)
 export 'src/ble/permission_handler.dart' show PermissionHandler, PermissionResult;

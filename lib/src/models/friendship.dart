@@ -329,6 +329,26 @@ class FriendshipStore extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Unfriend a peer - removes the friendship and clears their addresses
+  /// This is called when WE unfriend someone
+  Future<void> unfriend(String peerPubkeyHex) async {
+    _friendships.remove(peerPubkeyHex);
+    await _save();
+    notifyListeners();
+  }
+
+  /// Handle being unfriended by someone else
+  /// Removes them from our friend list and clears their libp2p address
+  Future<void> handleUnfriendedBy(String peerPubkeyHex) async {
+    final existing = _friendships[peerPubkeyHex];
+    if (existing != null) {
+      // Remove the friendship entirely
+      _friendships.remove(peerPubkeyHex);
+      await _save();
+      notifyListeners();
+    }
+  }
+
   /// Update friend's online status
   Future<void> updateOnlineStatus({
     required String peerPubkeyHex,

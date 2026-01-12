@@ -40,6 +40,10 @@ dependencies:
   encrypt: ^5.0.3
   pointycastle: ^3.9.1
   dart_libp2p: ^0.5.3
+  
+  # State management
+  redux: ^5.0.0
+  flutter_redux: ^0.10.0
 
 dev_dependencies:
   flutter_test:
@@ -48,6 +52,7 @@ dev_dependencies:
   protoc_plugin: ^21.1.0
   build_runner: ^2.4.0
   mockito: ^5.4.0
+  flutter_prunekit: ^2.4.0
 
 flutter:
   uses-material-design: true

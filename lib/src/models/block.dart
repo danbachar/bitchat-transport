@@ -13,7 +13,10 @@ enum BlockType {
   friendshipAccept(0x03),
 
   /// Announce presence to friends over libp2p
-  friendAnnounce(0x04);
+  friendAnnounce(0x04),
+
+  /// Revoke friendship (unfriend)
+  friendshipRevoke(0x05);
 
   final int value;
   const BlockType(this.value);
@@ -23,6 +26,11 @@ enum BlockType {
       (t) => t.value == value,
       orElse: () => throw ArgumentError('Unknown block type: $value'),
     );
+  }
+
+  /// Check if value is a valid block type
+  static bool isValidType(int value) {
+    return value >= 0x01 && value <= 0x05;
   }
 }
 
@@ -58,6 +66,8 @@ abstract class Block {
         return FriendshipAcceptBlock.fromPayload(payload);
       case BlockType.friendAnnounce:
         return FriendAnnounceBlock.fromPayload(payload);
+      case BlockType.friendshipRevoke:
+        return FriendshipRevokeBlock.fromPayload(payload);
     }
   }
 
@@ -68,7 +78,7 @@ abstract class Block {
       // Check if first byte is a valid block type
       if (data.isEmpty) return null;
       final typeValue = data[0];
-      if (typeValue < 0x01 || typeValue > 0x04) {
+      if (!BlockType.isValidType(typeValue)) {
         // Not a block - treat as legacy plain text
         return null;
       }
@@ -274,5 +284,30 @@ class FriendAnnounceBlock extends Block {
       nickname: nickname,
       isOnline: isOnline,
     );
+  }
+}
+
+/// A friendship revoke block (unfriend notification)
+/// 
+/// This is sent when a user unfriends someone. The recipient should:
+/// 1. Remove the sender from their friend list
+/// 2. Delete any stored addresses for the sender
+/// 
+/// The message is intentionally minimal to not reveal the reason.
+class FriendshipRevokeBlock extends Block {
+  @override
+  BlockType get type => BlockType.friendshipRevoke;
+
+  FriendshipRevokeBlock();
+
+  @override
+  Uint8List serialize() {
+    // Just the type byte - no additional data needed
+    return Uint8List.fromList([type.value]);
+  }
+
+  factory FriendshipRevokeBlock.fromPayload(Uint8List payload) {
+    // No payload to parse
+    return FriendshipRevokeBlock();
   }
 }
