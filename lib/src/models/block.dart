@@ -113,43 +113,68 @@ class SayBlock extends Block {
   }
 }
 
-/// A friendship offer block containing the sender's libp2p address
+/// A friendship offer block containing the sender's libp2p host info
 class FriendshipOfferBlock extends Block {
   @override
   BlockType get type => BlockType.friendshipOffer;
 
-  /// The sender's libp2p multiaddress
-  final String libp2pAddress;
+  /// The sender's libp2p host ID (PeerId)
+  final String hostId;
+
+  /// The sender's libp2p addresses (list of multiaddrs)
+  final List<String> hostAddrs;
 
   /// Optional message with the friend request
   final String? message;
 
+  /// Computed full multiaddress string combining first address with host ID
+  String get fullAddress => hostAddrs.isNotEmpty ? '${hostAddrs.first}/p2p/$hostId' : '/p2p/$hostId';
+
   FriendshipOfferBlock({
-    required this.libp2pAddress,
+    required this.hostId,
+    required this.hostAddrs,
     this.message,
   });
 
   @override
   Uint8List serialize() {
-    // Format: type (1) + address_len (2) + address + message_len (2) + message
-    final addressBytes = utf8.encode(libp2pAddress);
+    // Format: type (1) + hostId_len (2) + hostId + addrs_count (2) + [addr_len (2) + addr]... + message_len (2) + message
+    final hostIdBytes = utf8.encode(hostId);
+    final addrsBytes = hostAddrs.map((a) => utf8.encode(a)).toList();
     final messageBytes = message != null ? utf8.encode(message!) : Uint8List(0);
 
-    final data =
-        ByteData(1 + 2 + addressBytes.length + 2 + messageBytes.length);
+    // Calculate total size
+    var totalSize = 1 + 2 + hostIdBytes.length + 2;
+    for (final addrBytes in addrsBytes) {
+      totalSize += 2 + addrBytes.length;
+    }
+    totalSize += 2 + messageBytes.length;
+
+    final bytes = Uint8List(totalSize);
+    final data = ByteData.view(bytes.buffer);
     var offset = 0;
 
     data.setUint8(offset++, type.value);
-    data.setUint16(offset, addressBytes.length, Endian.big);
+    
+    // Host ID
+    data.setUint16(offset, hostIdBytes.length, Endian.big);
     offset += 2;
+    bytes.setRange(offset, offset + hostIdBytes.length, hostIdBytes);
+    offset += hostIdBytes.length;
 
-    final bytes = data.buffer.asUint8List();
-    bytes.setRange(offset, offset + addressBytes.length, addressBytes);
-    offset += addressBytes.length;
+    // Addresses
+    data.setUint16(offset, hostAddrs.length, Endian.big);
+    offset += 2;
+    for (final addrBytes in addrsBytes) {
+      data.setUint16(offset, addrBytes.length, Endian.big);
+      offset += 2;
+      bytes.setRange(offset, offset + addrBytes.length, addrBytes);
+      offset += addrBytes.length;
+    }
 
+    // Message
     data.setUint16(offset, messageBytes.length, Endian.big);
     offset += 2;
-
     if (messageBytes.isNotEmpty) {
       bytes.setRange(offset, offset + messageBytes.length, messageBytes);
     }
@@ -161,57 +186,120 @@ class FriendshipOfferBlock extends Block {
     final data = ByteData.view(payload.buffer, payload.offsetInBytes);
     var offset = 0;
 
-    final addressLen = data.getUint16(offset, Endian.big);
+    // Host ID
+    final hostIdLen = data.getUint16(offset, Endian.big);
     offset += 2;
+    final hostId = utf8.decode(payload.sublist(offset, offset + hostIdLen));
+    offset += hostIdLen;
 
-    final addressBytes = payload.sublist(offset, offset + addressLen);
-    final address = utf8.decode(addressBytes);
-    offset += addressLen;
+    // Addresses
+    final addrsCount = data.getUint16(offset, Endian.big);
+    offset += 2;
+    final hostAddrs = <String>[];
+    for (var i = 0; i < addrsCount; i++) {
+      final addrLen = data.getUint16(offset, Endian.big);
+      offset += 2;
+      hostAddrs.add(utf8.decode(payload.sublist(offset, offset + addrLen)));
+      offset += addrLen;
+    }
 
+    // Message
     final messageLen = data.getUint16(offset, Endian.big);
     offset += 2;
-
     String? message;
     if (messageLen > 0) {
-      final messageBytes = payload.sublist(offset, offset + messageLen);
-      message = utf8.decode(messageBytes);
+      message = utf8.decode(payload.sublist(offset, offset + messageLen));
     }
 
     return FriendshipOfferBlock(
-      libp2pAddress: address,
+      hostId: hostId,
+      hostAddrs: hostAddrs,
       message: message,
     );
   }
 }
 
-/// A friendship accept block containing the accepter's libp2p address
+/// A friendship accept block containing the accepter's libp2p host info
 class FriendshipAcceptBlock extends Block {
   @override
   BlockType get type => BlockType.friendshipAccept;
 
-  /// The accepter's libp2p multiaddress
-  final String libp2pAddress;
+  /// The accepter's libp2p host ID (PeerId)
+  final String hostId;
 
-  FriendshipAcceptBlock({required this.libp2pAddress});
+  /// The accepter's libp2p addresses (list of multiaddrs)
+  final List<String> hostAddrs;
+
+  /// Computed full multiaddress string combining first address with host ID
+  String get fullAddress => hostAddrs.isNotEmpty ? '${hostAddrs.first}/p2p/$hostId' : '/p2p/$hostId';
+
+  FriendshipAcceptBlock({
+    required this.hostId,
+    required this.hostAddrs,
+  });
 
   @override
   Uint8List serialize() {
-    final addressBytes = utf8.encode(libp2pAddress);
-    final data = Uint8List(1 + 2 + addressBytes.length);
-    final byteData = ByteData.view(data.buffer);
+    // Format: type (1) + hostId_len (2) + hostId + addrs_count (2) + [addr_len (2) + addr]...
+    final hostIdBytes = utf8.encode(hostId);
+    final addrsBytes = hostAddrs.map((a) => utf8.encode(a)).toList();
 
-    data[0] = type.value;
-    byteData.setUint16(1, addressBytes.length, Endian.big);
-    data.setRange(3, 3 + addressBytes.length, addressBytes);
+    // Calculate total size
+    var totalSize = 1 + 2 + hostIdBytes.length + 2;
+    for (final addrBytes in addrsBytes) {
+      totalSize += 2 + addrBytes.length;
+    }
 
-    return data;
+    final bytes = Uint8List(totalSize);
+    final data = ByteData.view(bytes.buffer);
+    var offset = 0;
+
+    data.setUint8(offset++, type.value);
+    
+    // Host ID
+    data.setUint16(offset, hostIdBytes.length, Endian.big);
+    offset += 2;
+    bytes.setRange(offset, offset + hostIdBytes.length, hostIdBytes);
+    offset += hostIdBytes.length;
+
+    // Addresses
+    data.setUint16(offset, hostAddrs.length, Endian.big);
+    offset += 2;
+    for (final addrBytes in addrsBytes) {
+      data.setUint16(offset, addrBytes.length, Endian.big);
+      offset += 2;
+      bytes.setRange(offset, offset + addrBytes.length, addrBytes);
+      offset += addrBytes.length;
+    }
+
+    return bytes;
   }
 
   factory FriendshipAcceptBlock.fromPayload(Uint8List payload) {
     final data = ByteData.view(payload.buffer, payload.offsetInBytes);
-    final addressLen = data.getUint16(0, Endian.big);
-    final addressBytes = payload.sublist(2, 2 + addressLen);
-    return FriendshipAcceptBlock(libp2pAddress: utf8.decode(addressBytes));
+    var offset = 0;
+
+    // Host ID
+    final hostIdLen = data.getUint16(offset, Endian.big);
+    offset += 2;
+    final hostId = utf8.decode(payload.sublist(offset, offset + hostIdLen));
+    offset += hostIdLen;
+
+    // Addresses
+    final addrsCount = data.getUint16(offset, Endian.big);
+    offset += 2;
+    final hostAddrs = <String>[];
+    for (var i = 0; i < addrsCount; i++) {
+      final addrLen = data.getUint16(offset, Endian.big);
+      offset += 2;
+      hostAddrs.add(utf8.decode(payload.sublist(offset, offset + addrLen)));
+      offset += addrLen;
+    }
+
+    return FriendshipAcceptBlock(
+      hostId: hostId,
+      hostAddrs: hostAddrs,
+    );
   }
 }
 

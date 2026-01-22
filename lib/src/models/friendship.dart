@@ -26,6 +26,12 @@ class Friendship {
   /// The friend's libp2p multiaddress (if known)
   String? libp2pAddress;
 
+  /// The friend's libp2p host ID (PeerId) for connection
+  String? libp2pHostId;
+
+  /// The friend's libp2p addresses for connection
+  List<String>? libp2pHostAddrs;
+
   /// The friend's nickname (if known)
   String? nickname;
 
@@ -50,6 +56,8 @@ class Friendship {
   Friendship({
     required this.peerPubkeyHex,
     this.libp2pAddress,
+    this.libp2pHostId,
+    this.libp2pHostAddrs,
     this.nickname,
     required this.status,
     DateTime? createdAt,
@@ -76,6 +84,8 @@ class Friendship {
   Map<String, dynamic> toJson() => {
         'peerPubkeyHex': peerPubkeyHex,
         'libp2pAddress': libp2pAddress,
+        'libp2pHostId': libp2pHostId,
+        'libp2pHostAddrs': libp2pHostAddrs,
         'nickname': nickname,
         'status': status.index,
         'createdAt': createdAt.toIso8601String(),
@@ -88,6 +98,10 @@ class Friendship {
   factory Friendship.fromJson(Map<String, dynamic> json) => Friendship(
         peerPubkeyHex: json['peerPubkeyHex'],
         libp2pAddress: json['libp2pAddress'],
+        libp2pHostId: json['libp2pHostId'],
+        libp2pHostAddrs: json['libp2pHostAddrs'] != null
+            ? List<String>.from(json['libp2pHostAddrs'])
+            : null,
         nickname: json['nickname'],
         status: FriendshipStatus.values[json['status']],
         createdAt: DateTime.parse(json['createdAt']),
@@ -101,6 +115,8 @@ class Friendship {
 
   Friendship copyWith({
     String? libp2pAddress,
+    String? libp2pHostId,
+    List<String>? libp2pHostAddrs,
     String? nickname,
     FriendshipStatus? status,
     String? message,
@@ -110,6 +126,8 @@ class Friendship {
       Friendship(
         peerPubkeyHex: peerPubkeyHex,
         libp2pAddress: libp2pAddress ?? this.libp2pAddress,
+        libp2pHostId: libp2pHostId ?? this.libp2pHostId,
+        libp2pHostAddrs: libp2pHostAddrs ?? this.libp2pHostAddrs,
         nickname: nickname ?? this.nickname,
         status: status ?? this.status,
         createdAt: createdAt,
@@ -211,6 +229,8 @@ class FriendshipStore extends ChangeNotifier {
   Future<Friendship> receiveFriendRequest({
     required String peerPubkeyHex,
     required String libp2pAddress,
+    String? libp2pHostId,
+    List<String>? libp2pHostAddrs,
     String? nickname,
     String? message,
   }) async {
@@ -221,6 +241,8 @@ class FriendshipStore extends ChangeNotifier {
       final friendship = existing.copyWith(
         status: FriendshipStatus.accepted,
         libp2pAddress: libp2pAddress,
+        libp2pHostId: libp2pHostId,
+        libp2pHostAddrs: libp2pHostAddrs,
         nickname: nickname ?? existing.nickname,
       );
       _friendships[peerPubkeyHex] = friendship;
@@ -234,6 +256,8 @@ class FriendshipStore extends ChangeNotifier {
       // Already friends, just update the address
       final friendship = existing.copyWith(
         libp2pAddress: libp2pAddress,
+        libp2pHostId: libp2pHostId,
+        libp2pHostAddrs: libp2pHostAddrs,
         nickname: nickname ?? existing.nickname,
       );
       _friendships[peerPubkeyHex] = friendship;
@@ -245,6 +269,8 @@ class FriendshipStore extends ChangeNotifier {
     final friendship = Friendship(
       peerPubkeyHex: peerPubkeyHex,
       libp2pAddress: libp2pAddress,
+      libp2pHostId: libp2pHostId,
+      libp2pHostAddrs: libp2pHostAddrs,
       nickname: nickname,
       status: FriendshipStatus.received,
       message: message,
@@ -278,6 +304,8 @@ class FriendshipStore extends ChangeNotifier {
   Future<Friendship?> processFriendshipAccept({
     required String peerPubkeyHex,
     required String libp2pAddress,
+    String? libp2pHostId,
+    List<String>? libp2pHostAddrs,
     String? nickname,
   }) async {
     final existing = _friendships[peerPubkeyHex];
@@ -287,6 +315,8 @@ class FriendshipStore extends ChangeNotifier {
       final friendship = Friendship(
         peerPubkeyHex: peerPubkeyHex,
         libp2pAddress: libp2pAddress,
+        libp2pHostId: libp2pHostId,
+        libp2pHostAddrs: libp2pHostAddrs,
         nickname: nickname,
         status: FriendshipStatus.accepted,
       );
@@ -299,6 +329,8 @@ class FriendshipStore extends ChangeNotifier {
     final friendship = existing.copyWith(
       status: FriendshipStatus.accepted,
       libp2pAddress: libp2pAddress,
+      libp2pHostId: libp2pHostId,
+      libp2pHostAddrs: libp2pHostAddrs,
       nickname: nickname ?? existing.nickname,
     );
     _friendships[peerPubkeyHex] = friendship;

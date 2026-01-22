@@ -39,11 +39,12 @@ dependencies:
   shared_preferences: ^2.5.4
   encrypt: ^5.0.3
   pointycastle: ^3.9.1
-  dart_libp2p: ^0.5.3
   
   # State management
   redux: ^5.0.0
   flutter_redux: ^0.10.0
+  public_ip_address: ^1.2.1
+  dart_libp2p: ^0.5.3
 
 dev_dependencies:
   flutter_test:

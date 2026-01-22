@@ -9,6 +9,18 @@ import '../models/peer.dart';
 import '../models/peer_store.dart';
 import '../mesh/bloom_filter.dart';
 
+import 'package:dart_libp2p/dart_libp2p.dart';
+import 'package:dart_libp2p/config/config.dart' as p2p_config;
+import 'package:dart_libp2p/core/crypto/ed25519.dart' as crypto_ed25519;
+import 'package:dart_libp2p/core/multiaddr.dart';
+import 'package:dart_libp2p/p2p/security/noise/noise_protocol.dart';
+import 'package:dart_libp2p/p2p/transport/udx_transport.dart';
+import 'package:dart_libp2p/p2p/transport/connection_manager.dart' as p2p_conn_manager;
+import 'package:dart_udx/dart_udx.dart';
+
+import 'package:public_ip_address/public_ip_address.dart';
+
+
 /// Default display info for LibP2P transport
 const _defaultLibP2PDisplayInfo = TransportDisplayInfo(
   icon: Icons.public,
@@ -68,8 +80,14 @@ class LibP2PTransportService extends TransportService with TransportServiceMixin
   /// Protocol version
   static const int protocolVersion = 1;
 
-  /// LibP2P host instance (to be initialized with dart_libp2p)
-  Object? _host;
+  /// LibP2P host instance
+  Host? _host;
+
+  /// Get the host ID (PeerId) as string - null if host not initialized
+  String? get hostId => _host?.id.toString();
+
+  /// Get the host addresses (list of multiaddrs) - empty if host not initialized
+  List<String> get hostAddrs => _host?.addrs.map((a) => a.toString()).toList() ?? [];
 
   /// Current transport state
   TransportState _state = TransportState.uninitialized;
@@ -154,9 +172,19 @@ class LibP2PTransportService extends TransportService with TransportServiceMixin
     _log.i('Initializing LibP2P transport service');
 
     try {
+      _host = await createHost();
+      _log.i('Host: ${_host!.id} ${_host!.addrs}');
+
+
+      // DERP DERP
       // TODO: Initialize dart_libp2p host here
       // final keyPair = await crypto_ed25519.generateEd25519KeyPair();
       // _host = await Libp2p.new_([...options...]);
+
+      
+      // Sample Output : "2a05:dfc7:5::53"
+
+
 
       _setState(TransportState.ready);
       _log.i('LibP2P transport initialized successfully');
@@ -213,6 +241,50 @@ class LibP2PTransportService extends TransportService with TransportServiceMixin
       _log.e('Failed to connect to peer $peerId: $e');
       return false;
     }
+  }
+
+  /// Connect to a peer using their host info (ID and addresses)
+  /// This is used when accepting a friend request or receiving acceptance
+  /// Returns the successful address on success, null on failure
+  Future<String?> connectToHost({required String hostId, required List<String> hostAddrs}) async {
+    if (_host == null) {
+      _log.w('Cannot connect: host not initialized');
+      return null;
+    }
+
+    _log.i('Connecting to host: $hostId with addresses: $hostAddrs');
+
+    // Separate IPv4 and IPv6 addresses - try IPv4 first (more common/reliable)
+    final ipv4Addrs = hostAddrs.where((addr) => addr.startsWith('/ip4/')).toList();
+    final ipv6Addrs = hostAddrs.where((addr) => addr.startsWith('/ip6/')).toList();
+
+    // Try IPv4 first, then IPv6
+    // final orderedAddrs = [...ipv4Addrs, ...ipv6Addrs];
+    final orderedAddrs = [...ipv6Addrs];
+
+    if (orderedAddrs.isEmpty) {
+      _log.w('No valid addresses found for host $hostId');
+      return null;
+    }
+
+    _log.d('Trying ${ipv4Addrs.length} IPv4 and ${ipv6Addrs.length} IPv6 addresses');
+
+    for (final addr in orderedAddrs) {
+      try {
+        _log.i('Connecting to host: $hostId with address: $addr');
+        final peerId = PeerId.fromString(hostId);
+        final address = MultiAddr(addr);
+        final addrs = [address];
+        final addrInfo = AddrInfo(peerId, addrs);
+        await _host!.connect(addrInfo);
+        _log.i('Successfully connected to host: $hostId with address: $addr');
+        return addr;
+      } catch (e) {
+        _log.e('Failed to connect to host $hostId with address: $addr: $e');
+      }
+    }
+
+    return null;
   }
 
   @override
@@ -469,5 +541,35 @@ class LibP2PTransportService extends TransportService with TransportServiceMixin
       result[i] = int.parse(hex.substring(i * 2, i * 2 + 2), radix: 16);
     }
     return result;
+  }
+
+  Future<Host> createHost() async {
+    final keyPair = await crypto_ed25519.generateEd25519KeyPair();
+    final udx = UDX();
+    final connMgr = p2p_conn_manager.ConnectionManager();
+
+    String ipv6 = await IpAddress().getIpv6();
+    _log.i('Public IPv6 address: $ipv6');
+
+    final options = <p2p_config.Option>[
+      p2p_config.Libp2p.identity(keyPair),
+      p2p_config.Libp2p.connManager(connMgr),
+      p2p_config.Libp2p.transport(UDXTransport(connManager: connMgr, udxInstance: udx)),
+      p2p_config.Libp2p.security(await NoiseSecurity.create(keyPair)),
+      // Listen on both IPv4 and IPv6 for maximum connectivity
+      p2p_config.Libp2p.listenAddrs([
+        MultiAddr('/ip4/0.0.0.0/udp/0/udx'),
+        MultiAddr('/ip6/::/udp/0/udx'),
+      ]),
+    ];
+
+    final host = await p2p_config.Libp2p.new_(options);
+    await host.start();
+
+    _log.i("Host has ${host.addrs.length} addresses");
+    for (var addr in host.addrs) {
+      _log.i('Listening on address: $addr');
+    }
+    return host;
   }
 }

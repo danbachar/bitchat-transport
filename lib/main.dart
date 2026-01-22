@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:logger/logger.dart' show Logger;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:redux/redux.dart';
 import 'package:flutter_redux/flutter_redux.dart';
@@ -21,6 +22,9 @@ final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
 
 // Global key for navigation from notification
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
+
+final Logger _log = Logger();
+
 
 // Pending chat to open from notification
 String? _pendingChatPeerHex;
@@ -140,13 +144,28 @@ class _BitchatHomeState extends State<BitchatHome>
 
   // Track nickname changes for animation
   final Map<String, _NicknameChange> _nicknameChanges = {};
-
-  // LibP2P address (placeholder - will be set when libp2p is configured)
-  String? _myLibp2pAddress;
   
   // Transport availability flags
   bool _bleAvailable = true;
   bool _libp2pAvailable = true;
+
+  /// Check if libp2p host is available for friend requests
+  bool get _hasLibp2pHost => _bitchat?.libp2pHostId != null;
+
+  /// Get host ID for friend requests (null if not available)
+  String? get _myLibp2pHostId => _bitchat?.libp2pHostId;
+
+  /// Get host addresses for friend requests (empty if not available)
+  List<String> get _myLibp2pHostAddrs => _bitchat?.libp2pHostAddrs ?? [];
+
+  /// Computed full multiaddress string combining first address with host ID
+  String? get _myLibp2pAddress {
+    final hostId = _myLibp2pHostId;
+    final addrs = _myLibp2pHostAddrs;
+    if (hostId == null) return null;
+    if (addrs.isNotEmpty) return '${addrs.first}/p2p/$hostId';
+    return '/p2p/$hostId';
+  }
   
   /// Get all peers from Redux store
   Map<String, PeerState> get _peers {
@@ -199,12 +218,7 @@ class _BitchatHomeState extends State<BitchatHome>
     
     // The Bitchat class should handle transport changes
     // For now, we just update the UI to reflect the changes
-    _log('Transport settings changed: BT=${_transportSettingsStore.bluetoothEnabled}, libp2p=${_transportSettingsStore.libp2pEnabled}');
-  }
-
-  void _log(String message) {
-    // Simple logging helper
-    print('[BitchatHome] $message');
+    _log.i('Transport settings changed: BT=${_transportSettingsStore.bluetoothEnabled}, libp2p=${_transportSettingsStore.libp2pEnabled}');
   }
 
   void _checkPendingChat() {
@@ -241,11 +255,6 @@ class _BitchatHomeState extends State<BitchatHome>
       await _friendshipStore.initialize();
       await _transportSettingsStore.initialize();
       final identity = await _initIdentity();
-
-      // Generate a placeholder libp2p address based on identity
-      // In a real implementation, this would come from the libp2p transport
-      _myLibp2pAddress =
-          '/ip4/0.0.0.0/tcp/0/p2p/${ChatMessage.pubkeyToHex(identity.publicKey).substring(0, 32)}';
 
       // Dispatch initializing status
       appStore.dispatch(SetInitializingAction());
@@ -348,12 +357,17 @@ class _BitchatHomeState extends State<BitchatHome>
     final senderHex = ChatMessage.pubkeyToHex(senderPubkey);
     final myHex = ChatMessage.pubkeyToHex(_identity!.publicKey);
 
+    debugPrint('📨 _handleIncomingMessage: ${payload.length} bytes from $senderHex');
+    debugPrint('📨 First byte (block type): 0x${payload[0].toRadixString(16)}');
+
     // Try to parse as a block
     final block = Block.tryDeserialize(payload);
 
     if (block != null) {
+      debugPrint('📨 Parsed block type: ${block.type}');
       await _handleBlock(block, senderHex, myHex);
     } else {
+      debugPrint('📨 Failed to parse as block, treating as plain text');
       // Legacy plain text message
       final content = String.fromCharCodes(payload);
       await _handleTextMessage(senderHex, myHex, content);
@@ -369,23 +383,28 @@ class _BitchatHomeState extends State<BitchatHome>
 
     switch (block.type) {
       case BlockType.say:
+        _log.i('Handling SayBlock from $senderName ($senderHex)');
         final sayBlock = block as SayBlock;
         await _handleTextMessage(senderHex, myHex, sayBlock.content);
 
       case BlockType.friendshipOffer:
+        _log.i('Handling FriendshipOfferBlock from $senderName ($senderHex)');
         final offerBlock = block as FriendshipOfferBlock;
         await _handleFriendshipOffer(senderHex, myHex, offerBlock, senderName);
 
       case BlockType.friendshipAccept:
+        _log.i('Handling FriendshipAcceptBlock from $senderName ($senderHex)');
         final acceptBlock = block as FriendshipAcceptBlock;
         await _handleFriendshipAccept(
             senderHex, myHex, acceptBlock, senderName);
 
       case BlockType.friendAnnounce:
+        _log.i('Handling FriendAnnounceBlock from $senderName ($senderHex)');
         final announceBlock = block as FriendAnnounceBlock;
         await _handleFriendAnnounce(senderHex, announceBlock);
 
       case BlockType.friendshipRevoke:
+        _log.i('Handling FriendshipRevokeBlock from $senderName ($senderHex)');
         await _handleFriendshipRevoke(senderHex);
     }
   }
@@ -417,19 +436,28 @@ class _BitchatHomeState extends State<BitchatHome>
     FriendshipOfferBlock block,
     String senderName,
   ) async {
-    // Record the friend request
+    // Record the friend request with host info for later connection
     final friendship = await _friendshipStore.receiveFriendRequest(
       peerPubkeyHex: senderHex,
-      libp2pAddress: block.libp2pAddress,
+      libp2pAddress: block.fullAddress,
+      libp2pHostId: block.hostId,
+      libp2pHostAddrs: block.hostAddrs,
       nickname: senderName,
       message: block.message,
     );
+
+    // Update Redux store with the libp2p address
+    final pubkey = ChatMessage.hexToPubkey(senderHex);
+    appStore.dispatch(AssociateLibp2pAddressAction(
+      publicKey: pubkey,
+      address: block.fullAddress,
+    ));
 
     // Save as a chat message
     final chatMessage = ChatMessage.friendRequestReceived(
       senderPubkeyHex: senderHex,
       recipientPubkeyHex: myHex,
-      libp2pAddress: block.libp2pAddress,
+      libp2pAddress: block.fullAddress,
       message: block.message,
     );
     await _messageStore.saveMessage(chatMessage);
@@ -446,20 +474,55 @@ class _BitchatHomeState extends State<BitchatHome>
     FriendshipAcceptBlock block,
     String senderName,
   ) async {
-    // Update friendship status
+    debugPrint('🤝 _handleFriendshipAccept from $senderName ($senderHex)');
+    debugPrint('🤝 hostId: ${block.hostId}');
+    debugPrint('🤝 hostAddrs: ${block.hostAddrs}');
+
+    // Try to connect to the accepter using their host info
+    String? successfulAddress;
+    if (_bitchat != null && block.hostId.isNotEmpty && block.hostAddrs.isNotEmpty) {
+      debugPrint('🤝 Attempting libp2p connection...');
+      successfulAddress = await _bitchat!.connectToLibp2pHost(
+        hostId: block.hostId,
+        hostAddrs: block.hostAddrs,
+      );
+      if (successfulAddress != null) {
+        debugPrint('🤝 Successfully connected to friend $senderName via libp2p at $successfulAddress');
+      } else {
+        debugPrint('🤝 Could not connect to peer $senderHex via libp2p (will use BLE)');
+      }
+    }
+
+    // Use the successful address if available, otherwise fall back to fullAddress
+    final libp2pAddress = successfulAddress != null
+        ? '$successfulAddress/p2p/${block.hostId}'
+        : block.fullAddress;
+
+    // Update friendship status with host info
     await _friendshipStore.processFriendshipAccept(
       peerPubkeyHex: senderHex,
-      libp2pAddress: block.libp2pAddress,
+      libp2pAddress: libp2pAddress,
+      libp2pHostId: block.hostId,
+      libp2pHostAddrs: block.hostAddrs,
       nickname: senderName,
     );
+    debugPrint('🤝 Friendship status updated with address: $libp2pAddress');
+
+    // Update Redux store with the libp2p address so send() can find the peer
+    final pubkey = ChatMessage.hexToPubkey(senderHex);
+    appStore.dispatch(AssociateLibp2pAddressAction(
+      publicKey: pubkey,
+      address: libp2pAddress,
+    ));
 
     // Save as a chat message
     final chatMessage = ChatMessage.friendRequestAccepted(
       senderPubkeyHex: senderHex,
       recipientPubkeyHex: myHex,
-      libp2pAddress: block.libp2pAddress,
+      libp2pAddress: libp2pAddress,
     );
     await _messageStore.saveMessage(chatMessage);
+    debugPrint('🤝 Chat message saved');
   }
 
   Future<void> _handleFriendAnnounce(
@@ -590,8 +653,17 @@ class _BitchatHomeState extends State<BitchatHome>
   }
 
   Future<void> _sendFriendRequest(PeerState peer) async {
-    if (_bitchat == null || _identity == null || _myLibp2pAddress == null)
+    if (_bitchat == null || _identity == null || !_hasLibp2pHost) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Cannot send friend request: LibP2P not ready'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
       return;
+    }
 
     final peerHex = peer.pubkeyHex;
     final myHex = ChatMessage.pubkeyToHex(_identity!.publicKey);
@@ -602,9 +674,10 @@ class _BitchatHomeState extends State<BitchatHome>
       nickname: peer.displayName,
     );
 
-    // Create the friendship offer block
+    // Create the friendship offer block with our host info
     final block = FriendshipOfferBlock(
-      libp2pAddress: _myLibp2pAddress!,
+      hostId: _myLibp2pHostId!,
+      hostAddrs: _myLibp2pHostAddrs,
       message: 'Hey, let\'s be friends!',
     );
 
@@ -630,24 +703,34 @@ class _BitchatHomeState extends State<BitchatHome>
   }
 
   Future<void> _acceptFriendRequest(PeerState peer) async {
-    if (_bitchat == null || _identity == null || _myLibp2pAddress == null)
+    if (_bitchat == null || _identity == null || !_hasLibp2pHost) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Cannot accept friend request: LibP2P not ready'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
       return;
+    }
 
     final peerHex = peer.pubkeyHex;
     final myHex = ChatMessage.pubkeyToHex(_identity!.publicKey);
 
-    // Accept the friend request
+    // Accept the friend request in the store FIRST
     await _friendshipStore.acceptFriendRequest(
       peerPubkeyHex: peerHex,
       myLibp2pAddress: _myLibp2pAddress!,
     );
 
-    // Create the friendship accept block
+    // Create the friendship accept block with our host info
     final block = FriendshipAcceptBlock(
-      libp2pAddress: _myLibp2pAddress!,
+      hostId: _myLibp2pHostId!,
+      hostAddrs: _myLibp2pHostAddrs,
     );
 
-    // Send via Bitchat
+    // Send via Bitchat (works over BLE or libp2p)
     await _bitchat!.send(peer.publicKey, block.serialize());
 
     // Save as a chat message
@@ -656,6 +739,32 @@ class _BitchatHomeState extends State<BitchatHome>
       recipientPubkeyHex: peerHex,
     );
     await _messageStore.saveMessage(chatMessage);
+
+    // Try to connect to the requester using their host info (best effort)
+    final friendship = _friendshipStore.getFriendship(peerHex);
+    if (friendship != null && friendship.libp2pHostId != null && friendship.libp2pHostAddrs != null) {
+      final successfulAddress = await _bitchat!.connectToLibp2pHost(
+        hostId: friendship.libp2pHostId!,
+        hostAddrs: friendship.libp2pHostAddrs!,
+      );
+      if (successfulAddress != null) {
+        debugPrint('Successfully connected to friend ${peer.displayName} via libp2p at $successfulAddress');
+        // Update the friendship with the successful address
+        final fullAddress = '$successfulAddress/p2p/${friendship.libp2pHostId}';
+        await _friendshipStore.updateOnlineStatus(
+          peerPubkeyHex: peerHex,
+          isOnline: true,
+          libp2pAddress: fullAddress,
+        );
+        // Update Redux store with the libp2p address so send() can find the peer
+        appStore.dispatch(AssociateLibp2pAddressAction(
+          publicKey: peer.publicKey,
+          address: fullAddress,
+        ));
+      } else {
+        debugPrint('Could not connect to peer $peerHex via libp2p (will use BLE)');
+      }
+    }
 
     // if (mounted) {
     //   ScaffoldMessenger.of(context).showSnackBar(

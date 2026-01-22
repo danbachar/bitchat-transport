@@ -235,19 +235,19 @@ class BleTransportService extends TransportService with TransportServiceMixin {
 
   /// Trigger a new scan for peers
   Future<void> scan({Duration? timeout}) async {
-    _log.d('Starting BLE scan${timeout != null ? " for ${timeout.inSeconds}s" : ""}');
+    // _log.d('Starting BLE scan${timeout != null ? " for ${timeout.inSeconds}s" : ""}');
     await _central.startScan(timeout: timeout);
   }
 
   @override
   Future<bool> connectToPeer(String peerId) async {
-    _log.d('Connecting to peer: $peerId');
+    // _log.d('Connecting to peer: $peerId');
     return await _central.connectToDevice(peerId);
   }
 
   @override
   Future<void> disconnectFromPeer(String peerId) async {
-    _log.d('Disconnecting from peer: $peerId');
+    // _log.d('Disconnecting from peer: $peerId');
     await _central.disconnectFromDevice(peerId);
   }
 
@@ -272,7 +272,7 @@ class BleTransportService extends TransportService with TransportServiceMixin {
     associatePeerWithPubkeyImpl(peerId, pubkey);
     // Dispatch action to associate the device with pubkey in Redux store
     store.dispatch(AssociateBleDeviceAction(publicKey: pubkey, deviceId: peerId));
-    _log.d('Associated peer $peerId with pubkey');
+    // _log.d('Associated peer $peerId with pubkey');
   }
 
   @override
@@ -302,35 +302,36 @@ class BleTransportService extends TransportService with TransportServiceMixin {
   // ===== Messaging =====
 
   /// Send a message directly to a specific peer.
-  /// 
+  ///
   /// Returns true if sent successfully, false if peer is offline.
   /// NO forwarding - direct delivery only.
   Future<bool> sendMessage({
     required Uint8List payload,
     required Uint8List recipientPubkey,
   }) async {
-    // Check if fragmentation needed
-    if (_fragmentHandler.needsFragmentation(payload)) {
+    // Create packet and check if serialized size exceeds BLE MTU
+    final packet = _createMessagePacket(payload, recipientPubkey);
+    final serialized = packet.serialize();
+
+    if (serialized.length > _SimpleFragmentHandler.bleMaxPacketSize) {
       return _sendFragmented(payload: payload, recipientPubkey: recipientPubkey);
     }
 
-    // Create packet
-    final packet = _createMessagePacket(payload, recipientPubkey);
     return _sendPacket(packet, recipientPubkey);
   }
 
   /// Broadcast a message to all connected peers.
   Future<void> broadcastMessage({required Uint8List payload}) async {
-    if (_fragmentHandler.needsFragmentation(payload)) {
+    final packet = _createMessagePacket(payload, null);
+    final serialized = packet.serialize();
+
+    if (serialized.length > _SimpleFragmentHandler.bleMaxPacketSize) {
       await _broadcastFragmented(payload: payload);
       return;
     }
 
-    final packet = _createMessagePacket(payload, null);
     _seenPackets.add(packet.packetId);
-    
-    final data = packet.serialize();
-    await broadcast(data);
+    await broadcast(serialized);
   }
 
   /// Send ANNOUNCE to a specific peer
@@ -411,16 +412,16 @@ class BleTransportService extends TransportService with TransportServiceMixin {
       recipientPubkey: recipientPubkey,
     );
 
+    final peerId = getPeerIdForPubkey(recipientPubkey);
+    if (peerId == null) {
+      _log.w('No peer ID found for pubkey, cannot send fragments');
+      return false;
+    }
+
     var success = true;
     for (final fragment in fragments) {
       _seenPackets.add(fragment.packetId);
-      
-      final peerId = getPeerIdForPubkey(recipientPubkey);
-      if (peerId == null) {
-        success = false;
-        continue;
-      }
-      
+
       final data = fragment.serialize();
       final sent = await sendToPeer(peerId, data);
       if (!sent) success = false;
@@ -512,9 +513,9 @@ class BleTransportService extends TransportService with TransportServiceMixin {
     
     if (discoveredPeer != null) {
       effectiveRssi = discoveredPeer.rssi;
-      _log.d('Using our scanned RSSI ($effectiveRssi) instead of connection RSSI ($rssi)');
+      // _log.d('Using our scanned RSSI ($effectiveRssi) instead of connection RSSI ($rssi)');
     } else {
-      _log.d('No scanned peer found, using connection RSSI: $rssi');
+      // _log.d('No scanned peer found, using connection RSSI: $rssi');
     }
     
     // Check if peer already exists
@@ -554,7 +555,7 @@ class BleTransportService extends TransportService with TransportServiceMixin {
   void _handleMessage(BitchatPacket packet) {
     // Direct delivery only - no forwarding
     if (_isForUs(packet)) {
-      _log.d('Message received for us');
+      // _log.d('Message received for us');
       onMessageReceived?.call(packet.senderPubkey, packet.payload);
     } else {
       // NOT for us - drop it (no forwarding in this layer)
@@ -660,7 +661,7 @@ class BleTransportService extends TransportService with TransportServiceMixin {
   
   /// Automatically connect to a discovered peer and send ANNOUNCE
   Future<bool> _autoConnectToPeer(String deviceId) async {
-    _log.i('Auto-connecting to peer: $deviceId');
+    // _log.i('Auto-connecting to peer: $deviceId');
     
     // Skip if already connected
     if (_isConnected(deviceId)) {
@@ -671,7 +672,7 @@ class BleTransportService extends TransportService with TransportServiceMixin {
     // Skip if already connecting
     final discovered = _peersState.getDiscoveredBlePeer(deviceId);
     if (discovered?.isConnecting == true) {
-      _log.d('Already connecting to $deviceId');
+      // _log.d('Already connecting to $deviceId');
       return false;
     }
     
@@ -695,16 +696,16 @@ class BleTransportService extends TransportService with TransportServiceMixin {
           signature: Uint8List(64),
         );
         await sendToPeer(deviceId, packet.serialize());
-        _log.d('Sent ANNOUNCE to $deviceId');
+        // _log.d('Sent ANNOUNCE to $deviceId');
         
         return true;
       } else {
-        _log.w('Failed to connect to $deviceId');
+        // _log.w('Failed to connect to $deviceId');
         store.dispatch(BleDeviceConnectionFailedAction(deviceId, error: 'Connection failed'));
         return false;
       }
     } catch (e) {
-      _log.e('Error auto-connecting to $deviceId: $e');
+      // _log.e('Error auto-connecting to $deviceId: $e');
       store.dispatch(BleDeviceConnectionFailedAction(deviceId, error: e.toString()));
       return false;
     }
@@ -713,7 +714,7 @@ class BleTransportService extends TransportService with TransportServiceMixin {
   void _handleConnectionChange(String deviceId, bool connected, {required bool isCentral}) {
     if (connected) {
       store.dispatch(BleDeviceConnectedAction(deviceId));
-      _log.i('Peer connected: $deviceId (via ${isCentral ? "central" : "peripheral"})');
+      // _log.i('Peer connected: $deviceId (via ${isCentral ? "central" : "peripheral"})');
     } else {
       store.dispatch(BleDeviceDisconnectedAction(deviceId));
       final pubkey = getPubkeyForPeerId(deviceId);
@@ -721,7 +722,7 @@ class BleTransportService extends TransportService with TransportServiceMixin {
         onPeerBleDisconnected(pubkey);
       }
       removePeerPubkeyAssociation(deviceId);
-      _log.i('Peer disconnected: $deviceId');
+      // _log.i('Peer disconnected: $deviceId');
     }
 
     _connectionController.add(TransportConnectionEvent(
@@ -785,24 +786,22 @@ class BleTransportService extends TransportService with TransportServiceMixin {
 // ===== Simple Fragment Handler (no TTL, direct P2P) =====
 
 /// Simple fragment handler for large messages.
-/// Used when payload exceeds BLE MTU.
+/// Used when payload exceeds BLE MTU (512 bytes).
 class _SimpleFragmentHandler {
-  static const int maxFragmentPayload = 450;
-  static const int fragmentThreshold = 500;
+  /// Max BLE packet size (withoutResponse mode)
+  static const int bleMaxPacketSize = 512;
+
+  /// Max chunk size per fragment (512 - 152 header - ~20 metadata)
+  static const int maxFragmentPayload = 340;
   static const Duration fragmentDelay = Duration(milliseconds: 20);
 
   final Map<String, _ReassemblyState> _reassemblyBuffer = {};
-
-  bool needsFragmentation(Uint8List payload) => payload.length > fragmentThreshold;
 
   List<BitchatPacket> fragment({
     required Uint8List payload,
     required Uint8List senderPubkey,
     Uint8List? recipientPubkey,
   }) {
-    if (!needsFragmentation(payload)) {
-      throw ArgumentError('Payload does not need fragmentation');
-    }
 
     final messageId = DateTime.now().millisecondsSinceEpoch.toString();
     final fragments = <BitchatPacket>[];

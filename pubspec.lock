@@ -816,6 +816,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.2.0"
+  public_ip_address:
+    dependency: "direct main"
+    description:
+      name: public_ip_address
+      sha256: "97d3a69a818c7715a80ba8a63afd9d777ea25812329e92fd00849a9b3191560f"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.2.1"
   pubspec_parse:
     dependency: transitive
     description:

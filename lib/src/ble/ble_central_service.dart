@@ -128,11 +128,11 @@ class BleCentralService {
   /// Start scanning for peers
   Future<void> startScan({Duration? timeout}) async {
     if (isScanning) {
-      _log.w('Already scanning');
+      // _log.w('Already scanning');
       return;
     }
     
-    _log.i('Starting BLE scan');
+    // _log.i('Starting BLE scan');
     
     try {
       // Listen for scan results
@@ -150,7 +150,7 @@ class BleCentralService {
       
       // Wait for scan to actually complete by listening to isScanning stream
       await FlutterBluePlus.isScanning.firstWhere((scanning) => !scanning);
-      _log.i('Scan completed');
+      // _log.i('Scan completed');
     } catch (e) {
       _log.e('Failed to start scan: $e');
       rethrow;
@@ -169,16 +169,16 @@ class BleCentralService {
   Future<bool> connectToDevice(String deviceId) async {
     final discovered = _discovered[deviceId];
     if (discovered == null) {
-      _log.w('Device not found: $deviceId');
+      // _log.w('Device not found: $deviceId');
       return false;
     }
     
     if (_connected.containsKey(deviceId)) {
-      _log.w('Already connected to: $deviceId');
+      // _log.w('Already connected to: $deviceId');
       return true;
     }
     
-    _log.i('Connecting to: $deviceId');
+    // _log.i('Connecting to: $deviceId');
     
     try {
       final device = discovered.device;
@@ -209,7 +209,7 @@ class BleCentralService {
       }
       
       if (targetService == null) {
-        _log.w("Service not found on device: $deviceId");
+        // _log.w("Service not found on device: $deviceId");
         await device.disconnect();
         return false;
       }
@@ -252,12 +252,12 @@ class BleCentralService {
         rssi: discovered.rssi,
       );
       
-      _log.i('Connected to: $deviceId');
+      // _log.i('Connected to: $deviceId');
       onConnectionChanged?.call(deviceId, true);
       
       return true;
     } catch (e) {
-      _log.e('Failed to connect to $deviceId: $e');
+      // _log.e('Failed to connect to $deviceId: $e');
       return false;
     }
   }
@@ -270,7 +270,7 @@ class BleCentralService {
     try {
       await peer.device.disconnect();
     } catch (e) {
-      _log.e('Error disconnecting from $deviceId: $e');
+      // _log.e('Error disconnecting from $deviceId: $e');
     }
     
     _onDeviceDisconnected(deviceId);
@@ -329,7 +329,7 @@ class BleCentralService {
           );
           
           _discovered[deviceId] = discovered;
-          _log.d('Discovered: $deviceId (${result.advertisementData.advName})');
+          // _log.d('Discovered: $deviceId (${result.advertisementData.advName})');
           onDeviceDiscovered?.call(discovered);
         } else {
           // Already discovered - update RSSI and notify

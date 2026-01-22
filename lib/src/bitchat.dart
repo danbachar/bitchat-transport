@@ -210,7 +210,24 @@ class Bitchat {
   
   /// Whether currently scanning for BLE devices
   bool get isScanning => _bleService?.isScanning ?? false;
-  
+
+  /// Get the libp2p host ID (PeerId) - null if not initialized
+  String? get libp2pHostId => _libp2pService?.hostId;
+
+  /// Get the libp2p host addresses - empty if not initialized
+  List<String> get libp2pHostAddrs => _libp2pService?.hostAddrs ?? [];
+
+  /// Connect to a libp2p peer using their host info
+  /// Used when accepting a friend request or receiving acceptance
+  /// Returns the successful address on success, null on failure
+  Future<String?> connectToLibp2pHost({required String hostId, required List<String> hostAddrs}) async {
+    if (_libp2pService == null) {
+      _log.w('Cannot connect: libp2p service not initialized');
+      return null;
+    }
+    return await _libp2pService!.connectToHost(hostId: hostId, hostAddrs: hostAddrs);
+  }
+
   bool get _isBleEnabledInSettings => 
       transportSettings.bluetoothEnabled;
   
@@ -495,6 +512,7 @@ class Bitchat {
     }
     
     // Fall back to libp2p if enabled and peer has libp2p address
+    _log.i('libp2p enabled: $_isLibp2pEnabledInSettings, available: $_libp2pAvailable, service: ${_libp2pService != null}');
     if (_isLibp2pEnabledInSettings && _libp2pAvailable && _libp2pService != null) {
       final hasLibp2pAddress = peer?.libp2pAddress != null;
       
@@ -555,7 +573,7 @@ class Bitchat {
     
     // Peer updated (ANNOUNCE received from existing peer)
     _bleService!.onPeerUpdated = (peer) {
-      _log.d('BLE Peer updated: ${peer.displayName}');
+      // _log.d('BLE Peer updated: ${peer.displayName}');
       onPeerUpdated?.call(peer);
     };
     
@@ -596,13 +614,13 @@ class Bitchat {
     
     // Peer updated
     _libp2pService!.onPeerUpdated = (peer) {
-      _log.d('libp2p Peer updated: ${peer.displayName}');
+      // _log.d('libp2p Peer updated: ${peer.displayName}');
       onPeerUpdated?.call(peer);
     };
     
     // Peer disconnected
     _libp2pService!.onPeerDisconnected = (peer) {
-      _log.i('libp2p Peer disconnected: ${peer.displayName}');
+      // _log.i('libp2p Peer disconnected: ${peer.displayName}');
       onPeerDisconnected?.call(peer);
     };
     
@@ -649,7 +667,7 @@ class Bitchat {
   void _startAnnounceTimer() {
     _announceTimer?.cancel();
     _announceTimer = Timer.periodic(config.announceInterval, (_) {
-      _log.d('Timer is up! time to ANNOUNCE again 📢');
+      // _log.d('Timer is up! time to ANNOUNCE again 📢');
       _broadcastAnnounce();
       _broadcastAnnounceViaLibp2p();
       _removeStalePeers();
@@ -660,7 +678,7 @@ class Bitchat {
   void _startScanTimer() {
     _scanTimer?.cancel();
     _scanTimer = Timer.periodic(config.scanInterval, (_) {
-      _log.d('Scan timer is up! Scanning for new devices 📡');
+      // _log.d('Scan timer is up! Scanning for new devices 📡');
       _periodicScan();
     });
   }
@@ -668,7 +686,7 @@ class Bitchat {
   /// Perform a periodic scan for new BLE devices
   Future<void> _periodicScan() async {
     if (_bleService == null || !_bleAvailable) return;
-    _log.i('Performing periodic BLE scan for new devices');
+    // _log.i('Performing periodic BLE scan for new devices');
     try {
       // Dispatch to redux store
       store.dispatch(ScanStartedAction());
@@ -686,7 +704,7 @@ class Bitchat {
   Future<void> _broadcastAnnounce() async {
     if (_bleService == null || !_bleAvailable) return;
     
-    _log.d('Broadcasting ANNOUNCE to all BLE devices');
+    // _log.d('Broadcasting ANNOUNCE to all BLE devices');
 
     // Create ANNOUNCE packet using the service
     final payload = _bleService!.createAnnouncePayload();
@@ -711,7 +729,7 @@ class Bitchat {
   Future<void> _broadcastAnnounceViaLibp2p() async {
     if (_libp2pService == null || !_libp2pAvailable) return;
     
-    _log.d('Broadcasting ANNOUNCE via libp2p');
+    // _log.d('Broadcasting ANNOUNCE via libp2p');
     
     // Create ANNOUNCE packet using the service
     final payload = _libp2pService!.createAnnouncePayload();
@@ -737,7 +755,7 @@ class Bitchat {
     store.dispatch(StaleDiscoveredBlePeersRemovedAction(staleThreshold));
     store.dispatch(StalePeersRemovedAction(staleThreshold));
     
-    _log.d('Dispatched stale peer cleanup actions');
+    // _log.d('Dispatched stale peer cleanup actions');
   }
   
   // ===== Signature =====

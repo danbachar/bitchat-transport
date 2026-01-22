@@ -1,7 +1,5 @@
 # Claude Instructions for Bitchat Transport
 
-## Critical: always be precise, critical, but helpful.
-
 ## CRITICAL: NO Legacy or Compatibility Code
 
 **IMPORTANT**: When refactoring, DO NOT keep old code "for legacy" or "for compatibility".
