@@ -39,7 +39,7 @@ const _defaultBleDisplayInfo = TransportDisplayInfo(
 /// - NO relaying/forwarding through intermediate peers
 /// - NO store-and-forward for offline peers
 /// - All routing/forwarding logic belongs in the GSG layer above
-class BleTransportService extends TransportService with TransportServiceMixin {
+class BleTransportService extends TransportService {
   final Logger _log = Logger();
 
   /// BLE Service UUID (derived from user's public key)
@@ -128,7 +128,7 @@ class BleTransportService extends TransportService with TransportServiceMixin {
 
   /// @deprecated Use store.state.peers.discoveredBlePeersList instead
   @override
-  Stream<TransportDiscoveryEvent> get discoveryStream => Stream.empty();
+  Stream<TransportDiscoveryEvent> get discoveryStream => const Stream.empty();
 
   /// @deprecated Use store.state.peers.discoveredBlePeersList instead
   @override
@@ -223,7 +223,13 @@ class BleTransportService extends TransportService with TransportServiceMixin {
   Future<void> stop() async {
     _log.i('Stopping BLE transport');
 
+    // Stop scanning for new devices
     await _central.stopScan();
+
+    // Disconnect all connected devices explicitly
+    await _central.disconnectAll();
+
+    // Stop advertising and disconnect all centrals
     await _peripheral.stopAdvertising();
 
     if (_state == TransportState.active) {
@@ -269,17 +275,28 @@ class BleTransportService extends TransportService with TransportServiceMixin {
 
   @override
   void associatePeerWithPubkey(String peerId, Uint8List pubkey) {
-    associatePeerWithPubkeyImpl(peerId, pubkey);
     // Dispatch action to associate the device with pubkey in Redux store
+    // Redux store is the single source of truth
     store.dispatch(AssociateBleDeviceAction(publicKey: pubkey, deviceId: peerId));
-    // _log.d('Associated peer $peerId with pubkey');
   }
 
   @override
-  String? getPeerIdForPubkey(Uint8List pubkey) => getPeerIdForPubkeyImpl(pubkey);
+  String? getPeerIdForPubkey(Uint8List pubkey) {
+    // Look up in Redux store
+    final peer = store.state.peers.getPeerByPubkey(pubkey);
+    return peer?.bleDeviceId;
+  }
 
   @override
-  Uint8List? getPubkeyForPeerId(String peerId) => getPubkeyForPeerIdImpl(peerId);
+  Uint8List? getPubkeyForPeerId(String peerId) {
+    // Look up in Redux store - find peer with matching bleDeviceId
+    for (final peer in store.state.peers.peersList) {
+      if (peer.bleDeviceId == peerId) {
+        return peer.publicKey;
+      }
+    }
+    return null;
+  }
 
   @override
   Future<void> dispose() async {
@@ -290,7 +307,6 @@ class BleTransportService extends TransportService with TransportServiceMixin {
     await _peripheral.dispose();
 
     _fragmentHandler.dispose();
-    clearPubkeyAssociations();
 
     await _stateController.close();
     await _dataController.close();
@@ -721,8 +737,6 @@ class BleTransportService extends TransportService with TransportServiceMixin {
       if (pubkey != null) {
         onPeerBleDisconnected(pubkey);
       }
-      removePeerPubkeyAssociation(deviceId);
-      // _log.i('Peer disconnected: $deviceId');
     }
 
     _connectionController.add(TransportConnectionEvent(

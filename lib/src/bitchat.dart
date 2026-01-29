@@ -8,7 +8,6 @@ import 'transport/ble_transport_service.dart';
 import 'transport/libp2p_transport_service.dart';
 import 'models/identity.dart';
 import 'models/peer.dart';
-import 'models/peer_store.dart';
 import 'models/packet.dart';
 import 'models/transport_settings.dart';
 import 'store/store.dart';
@@ -338,10 +337,9 @@ class Bitchat {
       _log.i('Initializing libp2p transport');
       
       // Create libp2p transport service
-      // TODO: Update LibP2PTransportService to use Redux store
       _libp2pService = LibP2PTransportService(
         identity: identity,
-        peerStore: PeerStore(), // Temporary - libp2p needs Redux update
+        store: store,
         config: const LibP2PConfig(enableMdns: true),
       );
       
@@ -511,13 +509,14 @@ class Bitchat {
       }
     }
     
-    // Fall back to libp2p if enabled and peer has libp2p address
+    // Fall back to libp2p if enabled and peer has libp2p host info
     _log.i('libp2p enabled: $_isLibp2pEnabledInSettings, available: $_libp2pAvailable, service: ${_libp2pService != null}');
     if (_isLibp2pEnabledInSettings && _libp2pAvailable && _libp2pService != null) {
-      final hasLibp2pAddress = peer?.libp2pAddress != null;
-      
-      if (hasLibp2pAddress) {
-        _log.d('Sending via libp2p to ${peer?.displayName ?? "peer"}');
+      // Check for libp2pHostId which is what sendMessage() actually uses
+      final hasLibp2pHostInfo = peer?.libp2pHostId != null && peer!.libp2pHostId!.isNotEmpty;
+
+      if (hasLibp2pHostInfo) {
+        _log.d('Sending via libp2p to ${peer.displayName}');
         final success = await _libp2pService!.sendMessage(
           payload: payload,
           recipientPubkey: recipientPubkey,

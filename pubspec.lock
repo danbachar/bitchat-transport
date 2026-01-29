@@ -228,10 +228,9 @@ packages:
   dart_libp2p:
     dependency: "direct main"
     description:
-      name: dart_libp2p
-      sha256: d299e3761582693916e495d424caf6fd3fce5f081e3c7ebaa430458871454552
-      url: "https://pub.dev"
-    source: hosted
+      path: "packages/dart_libp2p"
+      relative: true
+    source: path
     version: "0.5.3"
   dart_multihash:
     dependency: transitive
@@ -497,7 +496,7 @@ packages:
     source: hosted
     version: "2.3.2"
   http:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: http
       sha256: "87721a4a50b19c7f1d49001e51409bddc46303966ce89a65af4f4e6004896412"

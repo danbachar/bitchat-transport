@@ -230,12 +230,23 @@ PeersState peersReducer(PeersState state, dynamic action) {
     final existing = state.peers[pubkeyHex];
     if (existing != null) {
       // If no other transport, mark as disconnected
-      final newConnectionState = existing.libp2pAddress != null 
-          ? existing.connectionState 
+      final newConnectionState = existing.libp2pAddress != null
+          ? existing.connectionState
           : PeerConnectionState.disconnected;
-      final updated = existing.copyWith(
+      // Construct directly to clear bleDeviceId (copyWith with null keeps old value)
+      final updated = PeerState(
+        publicKey: existing.publicKey,
+        nickname: existing.nickname,
         connectionState: newConnectionState,
-        bleDeviceId: null,
+        transport: existing.transport,
+        rssi: existing.rssi,
+        protocolVersion: existing.protocolVersion,
+        lastSeen: existing.lastSeen,
+        bleDeviceId: null,  // Clear BLE device ID
+        libp2pAddress: existing.libp2pAddress,
+        isFriend: existing.isFriend,
+        libp2pHostId: existing.libp2pHostId,
+        libp2pHostAddrs: existing.libp2pHostAddrs,
       );
       return state.copyWith(
         peers: Map.from(state.peers)..[pubkeyHex] = updated,
@@ -249,12 +260,23 @@ PeersState peersReducer(PeersState state, dynamic action) {
     final existing = state.peers[pubkeyHex];
     if (existing != null) {
       // If no other transport, mark as disconnected
-      final newConnectionState = existing.bleDeviceId != null 
-          ? existing.connectionState 
+      final newConnectionState = existing.bleDeviceId != null
+          ? existing.connectionState
           : PeerConnectionState.disconnected;
-      final updated = existing.copyWith(
+      // Construct directly to clear libp2pAddress (copyWith with null keeps old value)
+      final updated = PeerState(
+        publicKey: existing.publicKey,
+        nickname: existing.nickname,
         connectionState: newConnectionState,
-        libp2pAddress: null,
+        transport: existing.transport,
+        rssi: existing.rssi,
+        protocolVersion: existing.protocolVersion,
+        lastSeen: existing.lastSeen,
+        bleDeviceId: existing.bleDeviceId,
+        libp2pAddress: null,  // Clear libp2p address
+        isFriend: existing.isFriend,
+        libp2pHostId: existing.libp2pHostId,
+        libp2pHostAddrs: existing.libp2pHostAddrs,
       );
       return state.copyWith(
         peers: Map.from(state.peers)..[pubkeyHex] = updated,
@@ -287,12 +309,38 @@ PeersState peersReducer(PeersState state, dynamic action) {
   if (action is StalePeersRemovedAction) {
     final now = DateTime.now();
     final newMap = Map<String, PeerState>.from(state.peers);
-    newMap.removeWhere((_, peer) {
-      if (peer.connectionState != PeerConnectionState.connected) return false;
-      if (peer.lastSeen == null) return false;
+    final staleKeys = <String>[];
+    newMap.forEach((key, peer) {
+      if (peer.connectionState != PeerConnectionState.connected) return;
+      if (peer.lastSeen == null) return;
       final timeSinceLastSeen = now.difference(peer.lastSeen!);
-      return timeSinceLastSeen > action.staleThreshold;
+      if (timeSinceLastSeen > action.staleThreshold) {
+        if (peer.isFriend) {
+          // Friends are never removed — just clear BLE device (out of range)
+          newMap[key] = PeerState(
+            publicKey: peer.publicKey,
+            nickname: peer.nickname,
+            connectionState: peer.libp2pAddress != null
+                ? PeerConnectionState.connected
+                : PeerConnectionState.disconnected,
+            transport: peer.transport,
+            rssi: -100,
+            protocolVersion: peer.protocolVersion,
+            lastSeen: peer.lastSeen,
+            bleDeviceId: null,
+            libp2pAddress: peer.libp2pAddress,
+            isFriend: true,
+            libp2pHostId: peer.libp2pHostId,
+            libp2pHostAddrs: peer.libp2pHostAddrs,
+          );
+        } else {
+          staleKeys.add(key);
+        }
+      }
     });
+    for (final key in staleKeys) {
+      newMap.remove(key);
+    }
     return state.copyWith(peers: newMap);
   }
   
@@ -325,7 +373,76 @@ PeersState peersReducer(PeersState state, dynamic action) {
     }
     return state;
   }
-  
+
+  // ===== Friendship Actions =====
+
+  if (action is FriendEstablishedAction) {
+    final pubkeyHex = _pubkeyToHex(action.publicKey);
+    final existing = state.peers[pubkeyHex];
+    final libp2pAddress = action.libp2pHostAddrs.isNotEmpty
+        ? '${action.libp2pHostAddrs.first}/p2p/${action.libp2pHostId}'
+        : null;
+
+    if (existing != null) {
+      final updated = existing.copyWith(
+        isFriend: true,
+        libp2pHostId: action.libp2pHostId,
+        libp2pHostAddrs: action.libp2pHostAddrs,
+        libp2pAddress: libp2pAddress ?? existing.libp2pAddress,
+        connectionState: PeerConnectionState.connected,
+        nickname: action.nickname ?? existing.nickname,
+      );
+      return state.copyWith(
+        peers: Map.from(state.peers)..[pubkeyHex] = updated,
+      );
+    } else {
+      // Peer may not exist yet (e.g. hydrated from FriendshipStore on startup)
+      final newPeer = PeerState(
+        publicKey: action.publicKey,
+        nickname: action.nickname ?? '',
+        connectionState: PeerConnectionState.connected,
+        transport: PeerTransport.libp2p,
+        lastSeen: DateTime.now(),
+        isFriend: true,
+        libp2pHostId: action.libp2pHostId,
+        libp2pHostAddrs: action.libp2pHostAddrs,
+        libp2pAddress: libp2pAddress,
+      );
+      return state.copyWith(
+        peers: Map.from(state.peers)..[pubkeyHex] = newPeer,
+      );
+    }
+  }
+
+  if (action is FriendRemovedAction) {
+    final pubkeyHex = _pubkeyToHex(action.publicKey);
+    final existing = state.peers[pubkeyHex];
+    if (existing != null) {
+      // Construct directly to clear nullable fields
+      final updated = PeerState(
+        publicKey: existing.publicKey,
+        nickname: existing.nickname,
+        connectionState: existing.bleDeviceId != null
+            ? existing.connectionState
+            : PeerConnectionState.disconnected,
+        transport: existing.transport,
+        rssi: existing.rssi,
+        protocolVersion: existing.protocolVersion,
+        lastSeen: existing.lastSeen,
+        bleDeviceId: existing.bleDeviceId,
+        // Clear all libp2p/friend fields
+        isFriend: false,
+        libp2pAddress: null,
+        libp2pHostId: null,
+        libp2pHostAddrs: null,
+      );
+      return state.copyWith(
+        peers: Map.from(state.peers)..[pubkeyHex] = updated,
+      );
+    }
+    return state;
+  }
+
   return state;
 }
 

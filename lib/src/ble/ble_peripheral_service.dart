@@ -150,14 +150,34 @@ class BlePeripheralService {
   /// Stop advertising
   Future<void> stopAdvertising() async {
     if (!_isAdvertising) return;
-    
+
     try {
       await BlePeripheral.stopAdvertising();
       _isAdvertising = false;
+
+      // Disconnect all connected centrals
+      await disconnectAllCentrals();
+
       _log.i('Stopped advertising');
     } catch (e) {
       _log.e('Failed to stop advertising: $e');
     }
+  }
+
+  /// Disconnect all connected centrals
+  Future<void> disconnectAllCentrals() async {
+    if (_connectedCentrals.isEmpty) return;
+
+    _log.i('Disconnecting all ${_connectedCentrals.length} connected centrals');
+    final deviceIds = _connectedCentrals.toList();
+
+    // Notify disconnection for each central
+    for (final deviceId in deviceIds) {
+      onConnectionChanged?.call(deviceId, false);
+    }
+
+    // Clear the connection set
+    _connectedCentrals.clear();
   }
   
   /// Send data to a connected central via notification

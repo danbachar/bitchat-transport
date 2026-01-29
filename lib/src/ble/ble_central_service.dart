@@ -266,16 +266,28 @@ class BleCentralService {
   Future<void> disconnectFromDevice(String deviceId) async {
     final peer = _connected[deviceId];
     if (peer == null) return;
-    
+
     try {
       await peer.device.disconnect();
     } catch (e) {
       // _log.e('Error disconnecting from $deviceId: $e');
     }
-    
+
     _onDeviceDisconnected(deviceId);
   }
-  
+
+  /// Disconnect from all connected devices
+  Future<void> disconnectAll() async {
+    if (_connected.isEmpty) return;
+
+    _log.i('Disconnecting all ${_connected.length} connected devices');
+    final deviceIds = _connected.keys.toList();
+
+    for (final deviceId in deviceIds) {
+      await disconnectFromDevice(deviceId);
+    }
+  }
+
   /// Send data to a connected peripheral
   Future<bool> sendData(String deviceId, Uint8List data) async {
     final peer = _connected[deviceId];

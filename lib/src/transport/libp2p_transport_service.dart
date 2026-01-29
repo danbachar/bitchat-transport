@@ -3,22 +3,21 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:logger/logger.dart';
 
+import 'package:redux/redux.dart';
+
 import '../transport/transport_service.dart';
 import '../models/identity.dart';
 import '../models/peer.dart';
-import '../models/peer_store.dart';
-import '../mesh/bloom_filter.dart';
+import '../store/store.dart';
 
 import 'package:dart_libp2p/dart_libp2p.dart';
 import 'package:dart_libp2p/config/config.dart' as p2p_config;
 import 'package:dart_libp2p/core/crypto/ed25519.dart' as crypto_ed25519;
-import 'package:dart_libp2p/core/multiaddr.dart';
 import 'package:dart_libp2p/p2p/security/noise/noise_protocol.dart';
 import 'package:dart_libp2p/p2p/transport/udx_transport.dart';
 import 'package:dart_libp2p/p2p/transport/connection_manager.dart' as p2p_conn_manager;
 import 'package:dart_udx/dart_udx.dart';
-
-import 'package:public_ip_address/public_ip_address.dart';
+import 'package:http/http.dart' as http;
 
 
 /// Default display info for LibP2P transport
@@ -62,7 +61,7 @@ class LibP2PConfig {
 /// 
 /// Routing logic (ANNOUNCE handling, peer management) is embedded directly
 /// in this service class, not in a separate router.
-class LibP2PTransportService extends TransportService with TransportServiceMixin {
+class LibP2PTransportService extends TransportService {
   final Logger _log = Logger();
 
   /// Our identity
@@ -71,12 +70,9 @@ class LibP2PTransportService extends TransportService with TransportServiceMixin
   /// LibP2P configuration
   final LibP2PConfig config;
   
-  /// Central peer store - single source of truth
-  final PeerStore peerStore;
-  
-  /// Bloom filter for packet deduplication
-  final BloomFilter _seenPackets = BloomFilter();
-  
+  /// Redux store for peer state
+  final Store<AppState> store;
+
   /// Protocol version
   static const int protocolVersion = 1;
 
@@ -92,12 +88,7 @@ class LibP2PTransportService extends TransportService with TransportServiceMixin
   /// Current transport state
   TransportState _state = TransportState.uninitialized;
 
-  /// Map of libp2p peer IDs to pubkey hex
-  final Map<String, String> _peerIdToPubkey = {};
   
-  /// Map of pubkey hex to libp2p peer IDs
-  final Map<String, String> _pubkeyToPeerId = {};
-
   /// Stream controllers
   final _stateController = StreamController<TransportState>.broadcast();
   final _dataController = StreamController<TransportDataEvent>.broadcast();
@@ -119,7 +110,7 @@ class LibP2PTransportService extends TransportService with TransportServiceMixin
 
   LibP2PTransportService({
     required this.identity,
-    required this.peerStore,
+    required this.store,
     this.config = const LibP2PConfig(),
   });
 
@@ -145,7 +136,7 @@ class LibP2PTransportService extends TransportService with TransportServiceMixin
 
   /// @deprecated Use PeerStore.discoveredLibp2pPeers instead - the PeerStore is the single source of truth
   @override
-  Stream<TransportDiscoveryEvent> get discoveryStream => Stream.empty();
+  Stream<TransportDiscoveryEvent> get discoveryStream => const Stream.empty();
 
   /// @deprecated Use PeerStore.libp2pPeers instead
   @override
@@ -306,8 +297,12 @@ class LibP2PTransportService extends TransportService with TransportServiceMixin
   @override
   Future<bool> sendToPeer(String peerId, Uint8List data) async {
     try {
-      // TODO: Use dart_libp2p to send data
-      // await _host?.newStream(peerId, protocolId).write(data);
+      const duration = Duration(seconds: 10);
+      final ctx = Context(timeout: duration);
+      P2PStream myStream = await _host!.newStream(PeerId.fromString(peerId), [''], ctx);
+      await myStream.write(data);
+      await myStream.close();
+
       _log.d('Sent ${data.length} bytes to peer $peerId');
       return true;
     } catch (e) {
@@ -327,20 +322,27 @@ class LibP2PTransportService extends TransportService with TransportServiceMixin
 
   @override
   void associatePeerWithPubkey(String peerId, Uint8List pubkey) {
-    final hex = _pubkeyToHex(pubkey);
-    _peerIdToPubkey[peerId] = hex;
-    _pubkeyToPeerId[hex] = peerId;
-    _log.d('Associated peer $peerId with pubkey');
+    // No-op: Redux store is the source of truth for peer associations
+    // The association is made via PeerAnnounceReceivedAction or FriendEstablishedAction
+    _log.d('associatePeerWithPubkey called (no-op, using Redux store)');
   }
 
   @override
-  String? getPeerIdForPubkey(Uint8List pubkey) => _pubkeyToPeerId[_pubkeyToHex(pubkey)];
+  String? getPeerIdForPubkey(Uint8List pubkey) {
+    // Look up in Redux store
+    final peer = store.state.peers.getPeerByPubkey(pubkey);
+    return peer?.libp2pHostId;
+  }
 
   @override
   Uint8List? getPubkeyForPeerId(String peerId) {
-    final hex = _peerIdToPubkey[peerId];
-    if (hex == null) return null;
-    return _hexToPubkey(hex);
+    // Look up in Redux store - find peer with matching libp2pHostId
+    for (final peer in store.state.peers.peersList) {
+      if (peer.libp2pHostId == peerId) {
+        return peer.publicKey;
+      }
+    }
+    return null;
   }
 
   @override
@@ -348,8 +350,6 @@ class LibP2PTransportService extends TransportService with TransportServiceMixin
     _log.i('Disposing LibP2P transport');
     await stop();
     _host = null;
-    _peerIdToPubkey.clear();
-    _pubkeyToPeerId.clear();
     await _stateController.close();
     await _dataController.close();
     await _connectionController.close();
@@ -363,20 +363,61 @@ class LibP2PTransportService extends TransportService with TransportServiceMixin
     required Uint8List payload,
     required Uint8List recipientPubkey,
   }) async {
-    final peerId = getPeerIdForPubkey(recipientPubkey);
-    if (peerId == null) {
-      _log.w('No peer ID found for pubkey');
+    if (_host == null) {
+      _log.w('Cannot send: host not initialized');
       return false;
     }
-    
-    if (!peerStore.isPeerReachable(recipientPubkey)) {
-      _log.d('Peer offline, cannot send message');
+
+    // Look up peer in Redux store
+    final peer = store.state.peers.getPeerByPubkey(recipientPubkey);
+    if (peer == null) {
+      _log.w('No peer found for pubkey');
       return false;
     }
-    
-    // Create simple message envelope
+
+    final hostId = peer.libp2pHostId;
+    final hostAddrs = peer.libp2pHostAddrs;
+
+    if (hostId == null || hostId.isEmpty) {
+      _log.w('Peer has no libp2p host ID');
+      return false;
+    }
+
+    // Ensure addresses are in peerstore before dialing
+    if (hostAddrs != null && hostAddrs.isNotEmpty) {
+      await _ensureAddressesInPeerstore(hostId, hostAddrs);
+    }
+
+    // Create simple message envelope and send
     final envelope = _createMessageEnvelope(payload);
-    return await sendToPeer(peerId, envelope);
+    return await sendToPeer(hostId, envelope);
+  }
+
+  /// Ensure peer addresses are in the libp2p peerstore
+  Future<void> _ensureAddressesInPeerstore(String hostId, List<String> hostAddrs) async {
+    if (_host == null) return;
+
+    try {
+      final peerId = PeerId.fromString(hostId);
+      final multiAddrs = hostAddrs
+          .map((addr) {
+            try {
+              return MultiAddr(addr);
+            } catch (e) {
+              _log.w('Invalid multiaddr: $addr');
+              return null;
+            }
+          })
+          .whereType<MultiAddr>()
+          .toList();
+
+      if (multiAddrs.isNotEmpty) {
+        await _host!.peerStore.addrBook.addAddrs(peerId, multiAddrs, const Duration(hours: 1));
+        _log.d('Added ${multiAddrs.length} addresses to peerstore for $hostId');
+      }
+    } catch (e) {
+      _log.w('Failed to add addresses to peerstore: $e');
+    }
   }
 
   /// Broadcast a message to all connected peers
@@ -449,30 +490,23 @@ class LibP2PTransportService extends TransportService with TransportServiceMixin
       
       final nickname = String.fromCharCodes(data.sublist(35, 35 + nicknameLength));
 
-      // Check if peer already exists
-      final existingPeer = peerStore.getPeerByPubkey(Uint8List.fromList(pubkey));
+      final pubkeyBytes = Uint8List.fromList(pubkey);
+
+      // Check if peer already exists in Redux store
+      final existingPeer = store.state.peers.getPeerByPubkey(pubkeyBytes);
       final isNew = existingPeer == null;
 
-      // Update central peer store
-      final peer = peerStore.updateFromAnnounce(
-        publicKey: Uint8List.fromList(pubkey),
+      // Update Redux store via ANNOUNCE action
+      store.dispatch(PeerAnnounceReceivedAction(
+        publicKey: pubkeyBytes,
         nickname: nickname,
         protocolVersion: version,
-        receivedAt: DateTime.now(),
-        libp2pAddress: peerId,
+        rssi: 0,
         transport: PeerTransport.libp2p,
-      );
+        libp2pAddress: peerId,
+      ));
 
-      // Associate peer ID with pubkey
-      associatePeerWithPubkey(peerId, Uint8List.fromList(pubkey));
-
-      _log.i('Peer ${isNew ? "connected" : "updated"}: ${peer.displayName}');
-
-      if (isNew) {
-        onPeerConnected?.call(peer);
-      } else {
-        onPeerUpdated?.call(peer);
-      }
+      _log.i('Peer ${isNew ? "connected" : "updated"}: $nickname');
 
       return true;
     } catch (e) {
@@ -495,18 +529,11 @@ class LibP2PTransportService extends TransportService with TransportServiceMixin
   void onPeerTransportDisconnected(String peerId) {
     final pubkey = getPubkeyForPeerId(peerId);
     if (pubkey != null) {
-      final peer = peerStore.getPeerByPubkey(pubkey);
-      if (peer != null) {
-        peerStore.markLibp2pDisconnected(pubkey);
-        _log.i('Peer disconnected: ${peer.displayName}');
-        onPeerDisconnected?.call(peer);
+      final peerState = store.state.peers.getPeerByPubkey(pubkey);
+      if (peerState != null) {
+        store.dispatch(PeerLibp2pDisconnectedAction(pubkey));
+        _log.i('Peer disconnected: ${peerState.displayName}');
       }
-    }
-
-    // Clean up mappings
-    final hex = _peerIdToPubkey.remove(peerId);
-    if (hex != null) {
-      _pubkeyToPeerId.remove(hex);
     }
 
     _connectionController.add(TransportConnectionEvent(
@@ -531,16 +558,16 @@ class LibP2PTransportService extends TransportService with TransportServiceMixin
     }
   }
 
-  String _pubkeyToHex(Uint8List pubkey) {
-    return pubkey.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-  }
-
-  Uint8List _hexToPubkey(String hex) {
-    final result = Uint8List(hex.length ~/ 2);
-    for (var i = 0; i < result.length; i++) {
-      result[i] = int.parse(hex.substring(i * 2, i * 2 + 2), radix: 16);
-    }
-    return result;
+  Future<String> _getIPv6Address() async {
+    // final response = await http.get(Uri.parse('https://api64.ipify.org/?format=text'));
+    final response = await http.get(Uri.parse('https://ipv6.icanhazip.com/'));
+    
+    if (response.statusCode == 200) {
+      return response.body.trim();
+    } else {
+        _log.w('Failed to get IPv6 address from api64.ipify.org, status code: ${response.statusCode}');
+        return '::1'; // Fallback to loopback
+      }
   }
 
   Future<Host> createHost() async {
@@ -548,7 +575,7 @@ class LibP2PTransportService extends TransportService with TransportServiceMixin
     final udx = UDX();
     final connMgr = p2p_conn_manager.ConnectionManager();
 
-    String ipv6 = await IpAddress().getIpv6();
+    String ipv6 = await _getIPv6Address();
     _log.i('Public IPv6 address: $ipv6');
 
     final options = <p2p_config.Option>[
@@ -558,7 +585,7 @@ class LibP2PTransportService extends TransportService with TransportServiceMixin
       p2p_config.Libp2p.security(await NoiseSecurity.create(keyPair)),
       // Listen on both IPv4 and IPv6 for maximum connectivity
       p2p_config.Libp2p.listenAddrs([
-        MultiAddr('/ip4/0.0.0.0/udp/0/udx'),
+        // MultiAddr('/ip4/0.0.0.0/udp/0/udx'),
         MultiAddr('/ip6/::/udp/0/udx'),
       ]),
     ];

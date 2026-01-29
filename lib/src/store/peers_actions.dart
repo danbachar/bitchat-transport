@@ -183,9 +183,33 @@ class AssociateBleDeviceAction extends PeerAction {
 class AssociateLibp2pAddressAction extends PeerAction {
   final Uint8List publicKey;
   final String address;
-  
+
   AssociateLibp2pAddressAction({
     required this.publicKey,
     required this.address,
   });
+}
+
+// ===== Friendship Actions =====
+
+/// A friendship has been established - mark peer as friend with libp2p info
+class FriendEstablishedAction extends PeerAction {
+  final Uint8List publicKey;
+  final String libp2pHostId;
+  final List<String> libp2pHostAddrs;
+  final String? nickname;
+
+  FriendEstablishedAction({
+    required this.publicKey,
+    required this.libp2pHostId,
+    required this.libp2pHostAddrs,
+    this.nickname,
+  });
+}
+
+/// A friendship has been removed
+class FriendRemovedAction extends PeerAction {
+  final Uint8List publicKey;
+
+  FriendRemovedAction(this.publicKey);
 }

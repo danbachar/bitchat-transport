@@ -118,10 +118,19 @@ class PeerState {
   
   /// BLE device ID if connected via BLE
   final String? bleDeviceId;
-  
+
   /// Libp2p address if connected via libp2p
   final String? libp2pAddress;
-  
+
+  /// Whether this peer is a friend (friendship established)
+  final bool isFriend;
+
+  /// Libp2p host ID (PeerId string) for transport-level addressing
+  final String? libp2pHostId;
+
+  /// Libp2p host addresses (multiaddrs) for reconnection
+  final List<String>? libp2pHostAddrs;
+
   const PeerState({
     required this.publicKey,
     required this.nickname,
@@ -132,6 +141,9 @@ class PeerState {
     this.lastSeen,
     this.bleDeviceId,
     this.libp2pAddress,
+    this.isFriend = false,
+    this.libp2pHostId,
+    this.libp2pHostAddrs,
   });
   
   /// Hex representation of public key (for map keys)
@@ -145,6 +157,14 @@ class PeerState {
   
   /// Whether this peer is reachable via any transport
   bool get isReachable => bleDeviceId != null || libp2pAddress != null;
+
+  /// The currently active transport based on available connections.
+  /// BLE is preferred when available; falls back to libp2p, then stored value.
+  PeerTransport get activeTransport {
+    if (bleDeviceId != null) return PeerTransport.bleDirect;
+    if (libp2pAddress != null) return PeerTransport.libp2p;
+    return transport;
+  }
   
   /// Signal quality (0.0 - 1.0)
   double get signalQuality {
@@ -163,6 +183,9 @@ class PeerState {
     DateTime? lastSeen,
     String? bleDeviceId,
     String? libp2pAddress,
+    bool? isFriend,
+    String? libp2pHostId,
+    List<String>? libp2pHostAddrs,
   }) {
     return PeerState(
       publicKey: publicKey ?? this.publicKey,
@@ -174,6 +197,9 @@ class PeerState {
       lastSeen: lastSeen ?? this.lastSeen,
       bleDeviceId: bleDeviceId ?? this.bleDeviceId,
       libp2pAddress: libp2pAddress ?? this.libp2pAddress,
+      isFriend: isFriend ?? this.isFriend,
+      libp2pHostId: libp2pHostId ?? this.libp2pHostId,
+      libp2pHostAddrs: libp2pHostAddrs ?? this.libp2pHostAddrs,
     );
   }
   
@@ -228,8 +254,12 @@ class PeersState {
       peers.values.where((p) => p.bleDeviceId != null).toList();
   
   /// Peers reachable via libp2p
-  List<PeerState> get libp2pPeers => 
+  List<PeerState> get libp2pPeers =>
       peers.values.where((p) => p.libp2pAddress != null).toList();
+
+  /// All friends
+  List<PeerState> get friends =>
+      peers.values.where((p) => p.isFriend).toList();
   
   /// Count of connected peers
   int get connectedCount => connectedPeers.length;
