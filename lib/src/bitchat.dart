@@ -3,13 +3,13 @@ import 'dart:typed_data';
 import 'package:logger/logger.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:redux/redux.dart';
+import 'package:uuid/uuid.dart';
 import 'ble/permission_handler.dart';
 import 'transport/ble_transport_service.dart';
 import 'transport/libp2p_transport_service.dart';
 import 'models/identity.dart';
 import 'models/peer.dart';
 import 'models/packet.dart';
-import 'models/transport_settings.dart';
 import 'store/store.dart';
 
 /// Transport status
@@ -111,12 +111,15 @@ class Bitchat {
   
   /// Configuration
   final BitchatConfig config;
-  
-  /// Transport settings store
-  final TransportSettingsStore transportSettings;
-  
+
   /// Redux store for app state
   final Store<AppState> store;
+
+  /// Subscription for listening to store changes
+  StreamSubscription<AppState>? _storeSubscription;
+
+  /// Last known settings state for detecting changes
+  SettingsState? _lastSettingsState;
   
   /// Permission handler
   final PermissionHandler _permissions = PermissionHandler();
@@ -146,10 +149,11 @@ class Bitchat {
   bool _libp2pAvailable = false;
   
   // ===== Public callbacks =====
-  
+
   /// Called when an application message is received.
-  /// The payload is the raw GSG block data.
-  void Function(Uint8List senderPubkey, Uint8List payload)? onMessageReceived;
+  /// Parameters: messageId, senderPubkey, payload (raw GSG block data)
+  void Function(String messageId, Uint8List senderPubkey, Uint8List payload)?
+      onMessageReceived;
   
   /// Called when a new peer connects and exchanges ANNOUNCE
   void Function(Peer peer)? onPeerConnected;
@@ -170,11 +174,16 @@ class Bitchat {
   Bitchat({
     required this.identity,
     this.config = const BitchatConfig(),
-    required this.transportSettings,
     required this.store,
   }) {
-    // Listen to transport settings changes
-    transportSettings.addListener(_onTransportSettingsChanged);
+    // Listen to Redux store changes for settings updates
+    _lastSettingsState = store.state.settings;
+    _storeSubscription = store.onChange.listen((state) {
+      if (state.settings != _lastSettingsState) {
+        _lastSettingsState = state.settings;
+        _onTransportSettingsChanged();
+      }
+    });
   }
   
   /// Current transport status
@@ -227,11 +236,11 @@ class Bitchat {
     return await _libp2pService!.connectToHost(hostId: hostId, hostAddrs: hostAddrs);
   }
 
-  bool get _isBleEnabledInSettings => 
-      transportSettings.bluetoothEnabled;
-  
-  bool get _isLibp2pEnabledInSettings => 
-      transportSettings.libp2pEnabled;
+  bool get _isBleEnabledInSettings =>
+      store.state.settings.bluetoothEnabled;
+
+  bool get _isLibp2pEnabledInSettings =>
+      store.state.settings.libp2pEnabled;
   
   // ===== Lifecycle =====
   
@@ -439,7 +448,7 @@ class Bitchat {
   /// Update transports based on current settings
   Future<void> _updateTransportsFromSettings() async {
     final wasActive = _status == TransportStatus.active;
-    
+
     // Handle BLE enable/disable
     if (_isBleEnabledInSettings && !_bleAvailable) {
       // BLE was enabled, try to initialize
@@ -447,9 +456,30 @@ class Bitchat {
       if (wasActive && _bleAvailable && _bleService != null) {
         await _bleService!.start();
       }
-    } else if (!_isBleEnabledInSettings && _bleService != null) {
-      // BLE was disabled, stop it
-      await _bleService!.stop();
+    } else if (!_isBleEnabledInSettings && _bleAvailable) {
+      // BLE was disabled, stop it and clean up state
+      _log.i('BLE disabled from settings, cleaning up...');
+
+      // Stop the BLE service
+      if (_bleService != null) {
+        await _bleService!.stop();
+      }
+
+      // Mark BLE as unavailable
+      _bleAvailable = false;
+
+      // Clear all discovered BLE peers from Redux
+      store.dispatch(ClearDiscoveredBlePeersAction());
+
+      // Disconnect all peers that were connected via BLE
+      // This clears their bleDeviceId and updates connection state
+      for (final peer in _peersState.peersList) {
+        if (peer.bleDeviceId != null) {
+          store.dispatch(PeerBleDisconnectedAction(peer.publicKey));
+        }
+      }
+
+      _log.i('BLE cleanup complete');
     }
     
     // Handle libp2p enable/disable
@@ -459,9 +489,30 @@ class Bitchat {
       if (wasActive && _libp2pAvailable && _libp2pService != null) {
         await _libp2pService!.start();
       }
-    } else if (!_isLibp2pEnabledInSettings && _libp2pService != null) {
-      // libp2p was disabled, stop it
-      await _libp2pService!.stop();
+    } else if (!_isLibp2pEnabledInSettings && _libp2pAvailable) {
+      // libp2p was disabled, stop it and clean up state
+      _log.i('libp2p disabled from settings, cleaning up...');
+
+      // Stop the libp2p service
+      if (_libp2pService != null) {
+        await _libp2pService!.stop();
+      }
+
+      // Mark libp2p as unavailable
+      _libp2pAvailable = false;
+
+      // Clear all discovered libp2p peers from Redux
+      store.dispatch(ClearDiscoveredLibp2pPeersAction());
+
+      // Disconnect all peers that were connected via libp2p
+      // This clears their libp2pAddress and updates connection state
+      for (final peer in _peersState.peersList) {
+        if (peer.libp2pAddress != null) {
+          store.dispatch(PeerLibp2pDisconnectedAction(peer.publicKey));
+        }
+      }
+
+      _log.i('libp2p cleanup complete');
     }
   }
   
@@ -478,60 +529,160 @@ class Bitchat {
     await _broadcastAnnounce();
   }
   
+  static const _uuid = Uuid();
+
   // ===== Messaging =====
-  
+
   /// Send a message to a specific peer.
-  /// 
+  ///
   /// Routes through the best available transport:
   /// 1. Bluetooth (if peer is nearby and BLE is enabled)
   /// 2. libp2p (if peer has libp2p address and libp2p is enabled)
-  /// 
-  /// Returns true if the message was sent via any transport.
-  Future<bool> send(Uint8List recipientPubkey, Uint8List payload) async {
+  ///
+  /// Returns the message ID if sent successfully, null if failed.
+  /// The message status can be tracked via store.state.messages.
+  Future<String?> send(Uint8List recipientPubkey, Uint8List payload) async {
     final peer = _peersState.getPeerByPubkey(recipientPubkey);
-    
-    // Determine which transport to use based on peer availability
-    // Priority: BLE > libp2p (BLE is preferred for proximity/speed)
-    
-    // Try BLE first if enabled and peer is reachable via BLE
-    _log.i('BLE enabled: $_isBleEnabledInSettings, available: $_bleAvailable, service: ${_bleService != null}');
-    if (_isBleEnabledInSettings && _bleAvailable && _bleService != null) {
-      if (peer != null && peer.isReachable && peer.bleDeviceId != null) {
-        _log.d('Sending via BLE to ${peer.displayName}');
-        final success = await _bleService!.sendMessage(
-          payload: payload,
-          recipientPubkey: recipientPubkey,
-        );
-        if (success) {
-          return true;
-        }
-        _log.w('BLE send failed, trying fallback...');
-      }
-    }
-    
-    // Fall back to libp2p if enabled and peer has libp2p host info
-    _log.i('libp2p enabled: $_isLibp2pEnabledInSettings, available: $_libp2pAvailable, service: ${_libp2pService != null}');
-    if (_isLibp2pEnabledInSettings && _libp2pAvailable && _libp2pService != null) {
-      // Check for libp2pHostId which is what sendMessage() actually uses
-      final hasLibp2pHostInfo = peer?.libp2pHostId != null && peer!.libp2pHostId!.isNotEmpty;
 
-      if (hasLibp2pHostInfo) {
-        _log.d('Sending via libp2p to ${peer.displayName}');
-        final success = await _libp2pService!.sendMessage(
+    // Generate message ID (short UUID)
+    final messageId = _uuid.v4().substring(0, 8);
+
+    // Determine which transport will be used
+    MessageTransport? transport;
+    if (_isBleEnabledInSettings && _bleAvailable && _bleService != null &&
+        peer != null && peer.isReachable && peer.bleDeviceId != null) {
+      transport = MessageTransport.ble;
+    } else if (_isLibp2pEnabledInSettings && _libp2pAvailable && _libp2pService != null &&
+        peer?.libp2pHostId != null && peer!.libp2pHostId!.isNotEmpty) {
+      transport = MessageTransport.libp2p;
+    }
+
+    // If no transport available, return null immediately (don't dispatch sending)
+    if (transport == null) {
+      _log.w('No transport available to send message - peer is offline');
+      return null;
+    }
+
+    // Dispatch sending action (clock icon)
+    store.dispatch(MessageSendingAction(
+      messageId: messageId,
+      transport: transport,
+      recipientPubkey: recipientPubkey,
+      payloadSize: payload.length,
+    ));
+
+    // Try BLE first if that's the selected transport
+    if (transport == MessageTransport.ble) {
+      _log.d('Sending via BLE to ${peer!.displayName}');
+
+      final success = await _bleService!.sendMessage(
+        payload: payload,
+        recipientPubkey: recipientPubkey,
+      );
+      if (success) {
+        // Update to sent (1 green ✓)
+        store.dispatch(MessageSentAction(
+          messageId: messageId,
+          transport: MessageTransport.ble,
+          recipientPubkey: recipientPubkey,
+          payloadSize: payload.length,
+        ));
+        // BLE write-with-response confirms delivery (2 green ✓✓)
+        store.dispatch(MessageDeliveredAction(messageId: messageId));
+        return messageId;
+      }
+      _log.w('BLE send failed, trying libp2p fallback...');
+
+      // Try libp2p fallback if available
+      if (_isLibp2pEnabledInSettings && _libp2pAvailable && _libp2pService != null &&
+          peer.libp2pHostId != null && peer.libp2pHostId!.isNotEmpty) {
+        final libp2pSuccess = await _libp2pService!.sendMessage(
           payload: payload,
           recipientPubkey: recipientPubkey,
+          messageId: messageId,
         );
-        if (success) {
-          return true;
+        if (libp2pSuccess) {
+          // Update to sent (1 green ✓) - delivery confirmation comes via ACK
+          store.dispatch(MessageSentAction(
+            messageId: messageId,
+            transport: MessageTransport.libp2p,
+            recipientPubkey: recipientPubkey,
+            payloadSize: payload.length,
+          ));
+          return messageId;
         }
-        _log.w('libp2p send also failed');
+      }
+
+      // Both transports failed
+      store.dispatch(MessageFailedAction(messageId: messageId));
+      _log.w('All transports failed to send message');
+      return messageId; // Return messageId so UI can track the failed state
+    }
+
+    // Try libp2p if that's the selected transport
+    if (transport == MessageTransport.libp2p) {
+      _log.d('Sending via libp2p to ${peer!.displayName}');
+
+      final success = await _libp2pService!.sendMessage(
+        payload: payload,
+        recipientPubkey: recipientPubkey,
+        messageId: messageId,
+      );
+      if (success) {
+        // Update to sent (1 green ✓) - delivery confirmation comes via ACK
+        store.dispatch(MessageSentAction(
+          messageId: messageId,
+          transport: MessageTransport.libp2p,
+          recipientPubkey: recipientPubkey,
+          payloadSize: payload.length,
+        ));
+        return messageId;
+      }
+
+      // libp2p failed
+      store.dispatch(MessageFailedAction(messageId: messageId));
+      _log.w('libp2p send failed');
+      return messageId; // Return messageId so UI can track the failed state
+    }
+
+    return null;
+  }
+
+  /// Send a read receipt to the original sender of a message.
+  /// Call this when the user has read/viewed a message.
+  /// Returns true if the read receipt was sent successfully.
+  Future<bool> sendReadReceipt({
+    required String messageId,
+    required Uint8List senderPubkey,
+  }) async {
+    final peer = _peersState.getPeerByPubkey(senderPubkey);
+
+    // Try BLE first
+    if (_isBleEnabledInSettings && _bleAvailable && _bleService != null) {
+      if (peer != null && peer.bleDeviceId != null) {
+        final success = await _bleService!.sendReadReceipt(
+          messageId: messageId,
+          recipientPubkey: senderPubkey,
+        );
+        if (success) return true;
       }
     }
-    
-    _log.w('No transport available to send message - peer is offline');
+
+    // Fall back to libp2p
+    if (_isLibp2pEnabledInSettings && _libp2pAvailable && _libp2pService != null) {
+      if (peer?.libp2pHostId != null && peer!.libp2pHostId!.isNotEmpty) {
+        final success = await _libp2pService!.sendReadReceipt(
+          messageId: messageId,
+          recipientPubkey: senderPubkey,
+        );
+        if (success) return true;
+      }
+    }
+
+    _log.w('No transport available to send read receipt');
     return false;
   }
-  
+
   /// Broadcast a message to all peers on all enabled transports.
   Future<void> broadcast(Uint8List payload) async {
     // Broadcast via BLE
@@ -560,10 +711,23 @@ class Bitchat {
     if (_bleService == null) return;
     
     // Message received for application layer
-    _bleService!.onMessageReceived = (senderPubkey, payload) {
-      onMessageReceived?.call(senderPubkey, payload);
+    _bleService!.onMessageReceived = (messageId, senderPubkey, payload) {
+      // Dispatch to store
+      store.dispatch(MessageReceivedAction(
+        messageId: messageId,
+        transport: MessageTransport.ble,
+        senderPubkey: senderPubkey,
+        payloadSize: payload.length,
+      ));
+      onMessageReceived?.call(messageId, senderPubkey, payload);
     };
-    
+
+    // Read receipt received - message was read by recipient
+    _bleService!.onReadReceiptReceived = (messageId) {
+      _log.d('BLE read receipt received for message $messageId');
+      store.dispatch(MessageReadAction(messageId: messageId));
+    };
+
     // Peer connected (after ANNOUNCE received and processed)
     _bleService!.onPeerConnected = (peer) {
       _log.i('BLE Peer connected: ${peer.displayName}');
@@ -599,10 +763,17 @@ class Bitchat {
   /// Set up callbacks for libp2p transport service
   void _setupLibp2pServiceCallbacks() {
     if (_libp2pService == null) return;
-    
+
     // Message received for application layer
-    _libp2pService!.onMessageReceived = (senderPubkey, payload) {
-      onMessageReceived?.call(senderPubkey, payload);
+    _libp2pService!.onMessageReceived = (messageId, senderPubkey, payload) {
+      // Dispatch to store
+      store.dispatch(MessageReceivedAction(
+        messageId: messageId,
+        transport: MessageTransport.libp2p,
+        senderPubkey: senderPubkey,
+        payloadSize: payload.length,
+      ));
+      onMessageReceived?.call(messageId, senderPubkey, payload);
     };
     
     // Peer connected
@@ -623,6 +794,18 @@ class Bitchat {
       onPeerDisconnected?.call(peer);
     };
     
+    // ACK received - message was delivered
+    _libp2pService!.onAckReceived = (messageId) {
+      _log.d('libp2p ACK received for message $messageId');
+      store.dispatch(MessageDeliveredAction(messageId: messageId));
+    };
+
+    // Read receipt received - message was read
+    _libp2pService!.onReadReceiptReceived = (messageId) {
+      _log.d('libp2p read receipt received for message $messageId');
+      store.dispatch(MessageReadAction(messageId: messageId));
+    };
+
     // Listen to connection events for ANNOUNCE broadcasts
     _libp2pService!.connectionStream.listen((event) {
       if (event.connected) {
@@ -633,7 +816,7 @@ class Bitchat {
         _log.i('libp2p peer disconnected: ${event.peerId}');
       }
     });
-    
+
     // Discovery is handled by Redux store - UI subscribes to store changes
   }
   
@@ -646,7 +829,7 @@ class Bitchat {
   
   /// Clean up resources
   Future<void> dispose() async {
-    transportSettings.removeListener(_onTransportSettingsChanged);
+    _storeSubscription?.cancel();
     _announceTimer?.cancel();
     _scanTimer?.cancel();
     await stop();
@@ -727,9 +910,9 @@ class Bitchat {
   /// Broadcast ANNOUNCE via libp2p
   Future<void> _broadcastAnnounceViaLibp2p() async {
     if (_libp2pService == null || !_libp2pAvailable) return;
-    
+
     // _log.d('Broadcasting ANNOUNCE via libp2p');
-    
+
     // Create ANNOUNCE packet using the service
     final payload = _libp2pService!.createAnnouncePayload();
     final packet = BitchatPacket(
@@ -739,13 +922,58 @@ class Bitchat {
       payload: payload,
       signature: Uint8List(64),
     );
-    
+
     await _signPacket(packet);
     final data = packet.serialize();
-    
+
     await _libp2pService!.broadcast(data);
   }
-  
+
+  /// Send ANNOUNCE with address to a specific friend.
+  ///
+  /// This is the unified presence mechanism - friends receive our libp2p address
+  /// in the ANNOUNCE so they can connect to us over the internet.
+  ///
+  /// Works over both BLE and libp2p transports.
+  Future<bool> sendAnnounceToFriend({
+    required Uint8List friendPubkey,
+    required String myAddress,
+  }) async {
+    var sent = false;
+
+    // Try BLE first if available
+    if (_bleService != null && _bleAvailable) {
+      final payload = _bleService!.createAnnouncePayload(address: myAddress);
+      final packet = BitchatPacket(
+        type: PacketType.announce,
+        ttl: 0,
+        senderPubkey: identity.publicKey,
+        recipientPubkey: friendPubkey,
+        payload: payload,
+        signature: Uint8List(64),
+      );
+      await _signPacket(packet);
+
+      final peerId = _bleService!.getPeerIdForPubkey(friendPubkey);
+      if (peerId != null) {
+        sent = await _bleService!.sendToPeer(peerId, packet.serialize());
+      }
+    }
+
+    // Also try libp2p if available
+    if (_libp2pService != null && _libp2pAvailable) {
+      final payload = _libp2pService!.createAnnouncePayload(address: myAddress);
+
+      final peerId = _libp2pService!.getPeerIdForPubkey(friendPubkey);
+      if (peerId != null) {
+        final libp2pSent = await _libp2pService!.sendToPeer(peerId, payload);
+        sent = sent || libp2pSent;
+      }
+    }
+
+    return sent;
+  }
+
   /// Remove peers that haven't sent an ANNOUNCE within the interval
   void _removeStalePeers() {
     final staleThreshold = config.announceInterval * 2; // Give 2x grace period

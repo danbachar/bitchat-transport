@@ -1,22 +1,24 @@
 import 'package:flutter/material.dart';
-import 'src/models/transport_settings.dart';
+import 'package:redux/redux.dart';
+import 'src/store/app_state.dart';
+import 'src/store/settings_actions.dart';
 
 /// Settings screen for configuring transport protocols
 class SettingsScreen extends StatefulWidget {
-  final TransportSettingsStore settingsStore;
-  
+  final Store<AppState> store;
+
   /// Whether BLE is available on this device
   final bool bleAvailable;
-  
+
   /// Whether libp2p is available
   final bool libp2pAvailable;
-  
+
   /// Callback when settings are changed
   final VoidCallback? onSettingsChanged;
 
   const SettingsScreen({
     super.key,
-    required this.settingsStore,
+    required this.store,
     this.bleAvailable = true,
     this.libp2pAvailable = true,
     this.onSettingsChanged,
@@ -33,8 +35,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void initState() {
     super.initState();
-    _bluetoothEnabled = widget.settingsStore.bluetoothEnabled;
-    _libp2pEnabled = widget.settingsStore.libp2pEnabled;
+    _bluetoothEnabled = widget.store.state.settings.bluetoothEnabled;
+    _libp2pEnabled = widget.store.state.settings.libp2pEnabled;
   }
 
   @override
@@ -47,7 +49,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       body: ListView(
         children: [
           const SizedBox(height: 16),
-          
+
           // Transport Section Header
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -66,7 +68,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ],
             ),
           ),
-          
+
           const Padding(
             padding: EdgeInsets.symmetric(horizontal: 16),
             child: Text(
@@ -75,9 +77,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
               style: TextStyle(color: Colors.grey, fontSize: 13),
             ),
           ),
-          
+
           const SizedBox(height: 8),
-          
+
           // Bluetooth Toggle
           _buildTransportTile(
             icon: Icons.bluetooth,
@@ -89,7 +91,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onChanged: _onBluetoothChanged,
             priority: 1,
           ),
-          
+
           // libp2p Toggle
           _buildTransportTile(
             icon: Icons.public,
@@ -101,9 +103,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onChanged: _onLibp2pChanged,
             priority: 2,
           ),
-          
+
           const Divider(height: 32),
-          
+
           // Warning if no transport enabled
           if (!_bluetoothEnabled && !_libp2pEnabled)
             Container(
@@ -141,15 +143,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ],
               ),
             ),
-          
+
           const SizedBox(height: 16),
-          
+
           // Info Section
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: _buildInfoCard(),
           ),
-          
+
           const SizedBox(height: 32),
         ],
       ),
@@ -167,7 +169,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     required int priority,
   }) {
     final isEnabled = value && available;
-    
+
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       color: isEnabled ? const Color(0xFF1B3D2F) : null,
@@ -227,8 +229,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ],
         ),
         subtitle: Text(
-          !available 
-              ? 'Not available on this device' 
+          !available
+              ? 'Not available on this device'
               : subtitle,
           style: TextStyle(
             color: isEnabled ? Colors.grey[400] : Colors.grey,
@@ -312,7 +314,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  Future<void> _onBluetoothChanged(bool value) async {
+  void _onBluetoothChanged(bool value) {
     // Prevent disabling both transports
     if (!value && !_libp2pEnabled) {
       _showCannotDisableDialog();
@@ -323,11 +325,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _bluetoothEnabled = value;
     });
 
-    await widget.settingsStore.setBluetoothEnabled(value);
+    widget.store.dispatch(SetBluetoothEnabledAction(value));
     widget.onSettingsChanged?.call();
   }
 
-  Future<void> _onLibp2pChanged(bool value) async {
+  void _onLibp2pChanged(bool value) {
     // Prevent disabling both transports
     if (!value && !_bluetoothEnabled) {
       _showCannotDisableDialog();
@@ -338,7 +340,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _libp2pEnabled = value;
     });
 
-    await widget.settingsStore.setLibp2pEnabled(value);
+    widget.store.dispatch(SetLibp2pEnabledAction(value));
     widget.onSettingsChanged?.call();
   }
 

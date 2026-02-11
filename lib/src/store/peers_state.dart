@@ -96,11 +96,25 @@ class DiscoveredPeerState {
       identical(this, other) ||
       other is DiscoveredPeerState &&
           runtimeType == other.runtimeType &&
-          transportId == other.transportId;
-  
+          transportId == other.transportId &&
+          rssi == other.rssi &&
+          isConnecting == other.isConnecting &&
+          isConnected == other.isConnected &&
+          connectionAttempts == other.connectionAttempts &&
+          lastError == other.lastError &&
+          serviceUuid == other.serviceUuid;
+
   @override
-  int get hashCode => transportId.hashCode;
-  
+  int get hashCode => Object.hash(
+    transportId,
+    rssi,
+    isConnecting,
+    isConnected,
+    connectionAttempts,
+    lastError,
+    serviceUuid,
+  );
+
   @override
   String toString() => 'DiscoveredPeerState($transportId, rssi: $rssi, connected: $isConnected)';
 }
@@ -208,10 +222,28 @@ class PeerState {
       identical(this, other) ||
       other is PeerState &&
           runtimeType == other.runtimeType &&
-          pubkeyHex == other.pubkeyHex;
-  
+          pubkeyHex == other.pubkeyHex &&
+          nickname == other.nickname &&
+          connectionState == other.connectionState &&
+          transport == other.transport &&
+          rssi == other.rssi &&
+          bleDeviceId == other.bleDeviceId &&
+          libp2pAddress == other.libp2pAddress &&
+          isFriend == other.isFriend &&
+          libp2pHostId == other.libp2pHostId;
+
   @override
-  int get hashCode => pubkeyHex.hashCode;
+  int get hashCode => Object.hash(
+    pubkeyHex,
+    nickname,
+    connectionState,
+    transport,
+    rssi,
+    bleDeviceId,
+    libp2pAddress,
+    isFriend,
+    libp2pHostId,
+  );
 }
 
 /// Complete peers state for Redux store
@@ -250,8 +282,13 @@ class PeersState {
       peers.values.where((p) => p.isConnected).toList();
   
   /// Peers reachable via BLE
-  List<PeerState> get blePeers => 
+  List<PeerState> get blePeers =>
       peers.values.where((p) => p.bleDeviceId != null).toList();
+
+  /// Nearby peers - connected peers reachable via BLE (in physical proximity)
+  /// Use this for the "Nearby" section in UI.
+  List<PeerState> get nearbyBlePeers =>
+      peers.values.where((p) => p.isConnected && p.bleDeviceId != null).toList();
   
   /// Peers reachable via libp2p
   List<PeerState> get libp2pPeers =>
@@ -260,6 +297,11 @@ class PeersState {
   /// All friends
   List<PeerState> get friends =>
       peers.values.where((p) => p.isFriend).toList();
+
+  /// Online friends - friends connected via libp2p only (not nearby via BLE).
+  /// Use this for the "Friends Online" section in UI.
+  List<PeerState> get onlineFriends =>
+      peers.values.where((p) => p.isFriend && p.isConnected && p.bleDeviceId == null && p.libp2pAddress != null).toList();
   
   /// Count of connected peers
   int get connectedCount => connectedPeers.length;

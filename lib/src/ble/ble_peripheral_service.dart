@@ -10,57 +10,61 @@ typedef PeripheralDataCallback = void Function(String deviceId, Uint8List data, 
 typedef PeripheralConnectionCallback = void Function(String deviceId, bool connected);
 
 /// BLE Peripheral service - advertises our presence and accepts connections.
-/// 
+///
 /// In Bitchat mesh, every device acts as both Central (scanner) and
 /// Peripheral (advertiser) simultaneously. This allows maximum connectivity.
-/// 
+///
 /// Uses the ble_peripheral package for peripheral mode.
-/// 
+///
 /// The service UUID is derived from the user's public key (last 128 bits).
 /// Identity details are exchanged via ANNOUNCE packets after connection.
 class BlePeripheralService {
   final Logger _log = Logger();
-  
+
   /// BLE Service UUID (derived from public key)
   final String serviceUuid;
-  
+
   /// Characteristic UUID for data transfer
   static const String characteristicUuid = '0000ff01-0000-1000-8000-00805f9b34fb';
-  
+
   /// Maximum characteristic value size
   static const int maxCharacteristicSize = 512;
-  
+
   /// Whether peripheral mode is currently active
   bool _isAdvertising = false;
-  
+
+  /// Whether the peripheral service is active and should process data
+  /// Set to false when BLE is disabled to block ALL incoming data
+  bool _active = false;
+
   /// Connected centrals, keyed by device ID
   final Set<String> _connectedCentrals = {};
-  
+
   /// Completer for waiting for BLE to be powered on
   final Completer<void> _bleReadyCompleter = Completer<void>();
-  
+
   /// Callback when data is received
   PeripheralDataCallback? onDataReceived;
-  
+
   /// Callback for connection events
   PeripheralConnectionCallback? onConnectionChanged;
-  
+
   BlePeripheralService({required this.serviceUuid});
-  
+
   /// Whether we're currently advertising
   bool get isAdvertising => _isAdvertising;
-  
+
   /// Number of connected centrals
   int get connectedCount => _connectedCentrals.length;
-  
+
   /// Initialize the peripheral service
   Future<void> initialize() async {
     _log.i('Initializing BLE peripheral service');
-    
+
     try {
       // Initialize the peripheral
       await BlePeripheral.initialize();
-      
+
       // Set up BLE state change callback to know when powered on
       BlePeripheral.setBleStateChangeCallback((bool state) {
         _log.i('BLE peripheral state changed: $state');
@@ -68,35 +72,35 @@ class BlePeripheralService {
           _bleReadyCompleter.complete();
         }
       });
-      
+
       // Set up connection state callback (Android only, but safe to call on all platforms)
       BlePeripheral.setConnectionStateChangeCallback(_onConnectionStateChanged);
-      
+
       // Set up characteristic subscription callback (iOS/Mac/Windows)
       BlePeripheral.setCharacteristicSubscriptionChangeCallback(
         _onCharacteristicSubscriptionChange,
       );
-      
+
       // Set up read request callback
       BlePeripheral.setReadRequestCallback(_onReadRequest);
-      
+
       // Set up write request callback
       BlePeripheral.setWriteRequestCallback(_onWriteRequest);
-      
+
       _log.i('BLE peripheral initialized');
     } catch (e) {
       _log.e('Failed to initialize BLE peripheral: $e');
       rethrow;
     }
   }
-  
+
   /// Start advertising our service
   Future<void> startAdvertising({String? localName}) async {
     if (_isAdvertising) {
       _log.w('Already advertising');
       return;
     }
-    
+
     try {
       // Wait for BLE to be powered on (important for iOS)
       _log.i('Waiting for BLE to be powered on...');
@@ -107,7 +111,7 @@ class BlePeripheralService {
         },
       );
       _log.i('BLE is powered on, adding service...');
-      
+
       // Add the GATT service with our characteristic
       await BlePeripheral.addService(
         BleService(
@@ -130,7 +134,7 @@ class BlePeripheralService {
           ],
         ),
       );
-      
+
       // Start advertising - NO local name to keep packet small
       // The 128-bit UUID derived from pubkey is used for discovery
       // Identity exchange happens via ANNOUNCE after connection
@@ -138,22 +142,32 @@ class BlePeripheralService {
         services: [serviceUuid],
         // localName omitted to fit in legacy advertising packet
       );
-      
+
       _isAdvertising = true;
+      _active = true;  // Enable data processing
       _log.i('Started advertising: $serviceUuid');
     } catch (e) {
       _log.e('Failed to start advertising: $e');
       rethrow;
     }
   }
-  
+
   /// Stop advertising
   Future<void> stopAdvertising() async {
+    // Disable data processing FIRST - this blocks all incoming writes
+    // even if stopAdvertising() fails or takes time
+    _active = false;
+
     if (!_isAdvertising) return;
 
     try {
       await BlePeripheral.stopAdvertising();
       _isAdvertising = false;
+
+      // Clear callbacks to stop receiving data
+      // This prevents processing packets after BLE is disabled
+      onDataReceived = null;
+      onConnectionChanged = null;
 
       // Disconnect all connected centrals
       await disconnectAllCentrals();
@@ -179,14 +193,14 @@ class BlePeripheralService {
     // Clear the connection set
     _connectedCentrals.clear();
   }
-  
+
   /// Send data to a connected central via notification
   Future<bool> sendData(String deviceId, Uint8List data) async {
     if (!_connectedCentrals.contains(deviceId)) {
       _log.w('Cannot send to disconnected central: $deviceId');
       return false;
     }
-    
+
     try {
       // Send via characteristic notification
       await BlePeripheral.updateCharacteristic(
@@ -200,7 +214,7 @@ class BlePeripheralService {
       return false;
     }
   }
-  
+
   /// Send data to all connected centrals
   Future<void> broadcastData(Uint8List data, {String? excludeDevice}) async {
     for (final deviceId in _connectedCentrals) {
@@ -208,9 +222,9 @@ class BlePeripheralService {
       await sendData(deviceId, data);
     }
   }
-  
+
   // ===== Event handlers =====
-  
+
   void _onConnectionStateChanged(String deviceId, bool connected) {
     if (connected) {
       _connectedCentrals.add(deviceId);
@@ -219,10 +233,10 @@ class BlePeripheralService {
       _connectedCentrals.remove(deviceId);
       _log.i('Central disconnected: $deviceId');
     }
-    
+
     onConnectionChanged?.call(deviceId, connected);
   }
-  
+
   void _onCharacteristicSubscriptionChange(
     String deviceId,
     String characteristicId,
@@ -237,10 +251,10 @@ class BlePeripheralService {
       _connectedCentrals.remove(deviceId);
       _log.i('Central unsubscribed: $deviceId (char: $characteristicId)');
     }
-    
+
     onConnectionChanged?.call(deviceId, isSubscribed);
   }
-  
+
   ReadRequestResult? _onReadRequest(
     String deviceId,
     String characteristicId,
@@ -249,29 +263,35 @@ class BlePeripheralService {
   ) {
     // We don't use read requests - data flows via write + notify
     _log.d('Read request from $deviceId');
-    
+
     // Respond with empty data
     return ReadRequestResult(value: Uint8List(0));
   }
-  
+
   WriteRequestResult? _onWriteRequest(
     String deviceId,
     String characteristicId,
     int offset,
     Uint8List? value,
   ) {
+    // Block ALL writes when peripheral is inactive (BLE disabled)
+    if (!_active) {
+      _log.d('Ignoring write request - peripheral inactive');
+      return WriteRequestResult();  // Acknowledge but ignore
+    }
+
     _log.d('Write request from $deviceId: ${value?.length ?? 0} bytes');
-    
+
     // Deliver data to callback
     if (value != null && value.isNotEmpty) {
       // Peripheral doesn't have RSSI data, use placeholder value
       onDataReceived?.call(deviceId, Uint8List.fromList(value), -100);
     }
-    
+
     // Acknowledge the write (return null or WriteRequestResult for success)
     return WriteRequestResult();
   }
-  
+
   /// Clean up resources
   Future<void> dispose() async {
     await stopAdvertising();

@@ -2,6 +2,9 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 /// Block types for the Bitchat protocol
+///
+/// Note: FriendAnnounce (0x04) was removed - presence is now handled at
+/// the transport layer via unified ANNOUNCE messages.
 enum BlockType {
   /// Regular text message
   say(0x01),
@@ -11,9 +14,6 @@ enum BlockType {
 
   /// Accept friend request with libp2p address
   friendshipAccept(0x03),
-
-  /// Announce presence to friends over libp2p
-  friendAnnounce(0x04),
 
   /// Revoke friendship (unfriend)
   friendshipRevoke(0x05);
@@ -30,7 +30,9 @@ enum BlockType {
 
   /// Check if value is a valid block type
   static bool isValidType(int value) {
-    return value >= 0x01 && value <= 0x05;
+    // Valid types: 0x01 (say), 0x02 (friendshipOffer), 0x03 (friendshipAccept), 0x05 (friendshipRevoke)
+    // Note: 0x04 (friendAnnounce) is no longer a valid block type
+    return value == 0x01 || value == 0x02 || value == 0x03 || value == 0x05;
   }
 }
 
@@ -64,8 +66,6 @@ abstract class Block {
         return FriendshipOfferBlock.fromPayload(payload);
       case BlockType.friendshipAccept:
         return FriendshipAcceptBlock.fromPayload(payload);
-      case BlockType.friendAnnounce:
-        return FriendAnnounceBlock.fromPayload(payload);
       case BlockType.friendshipRevoke:
         return FriendshipRevokeBlock.fromPayload(payload);
     }
@@ -76,14 +76,20 @@ abstract class Block {
   static Block? tryDeserialize(Uint8List data) {
     try {
       // Check if first byte is a valid block type
-      if (data.isEmpty) return null;
+      if (data.isEmpty) {
+        print('[GEVER]############# 📨 Data is empty!!');
+
+        return null;
+      }
       final typeValue = data[0];
       if (!BlockType.isValidType(typeValue)) {
         // Not a block - treat as legacy plain text
+        print('[GEVER]############# 📨 Data is not a valid block type: $typeValue');
         return null;
       }
       return deserialize(data);
     } catch (e) {
+      print("[GEVER]############# 📨 Failed to deserialize block: $e");
       return null;
     }
   }
@@ -276,102 +282,42 @@ class FriendshipAcceptBlock extends Block {
   }
 
   factory FriendshipAcceptBlock.fromPayload(Uint8List payload) {
-    final data = ByteData.view(payload.buffer, payload.offsetInBytes);
-    var offset = 0;
+    try {
+      final data = ByteData.view(payload.buffer, payload.offsetInBytes);
+      var offset = 0;
 
-    // Host ID
-    final hostIdLen = data.getUint16(offset, Endian.big);
-    offset += 2;
-    final hostId = utf8.decode(payload.sublist(offset, offset + hostIdLen));
-    offset += hostIdLen;
-
-    // Addresses
-    final addrsCount = data.getUint16(offset, Endian.big);
-    offset += 2;
-    final hostAddrs = <String>[];
-    for (var i = 0; i < addrsCount; i++) {
-      final addrLen = data.getUint16(offset, Endian.big);
+      // Host ID
+      final hostIdLen = data.getUint16(offset, Endian.big);
       offset += 2;
-      hostAddrs.add(utf8.decode(payload.sublist(offset, offset + addrLen)));
-      offset += addrLen;
+      print('🤝 FriendshipAcceptBlock.fromPayload: hostIdLen=$hostIdLen, payload.length=${payload.length}');
+      final hostId = utf8.decode(payload.sublist(offset, offset + hostIdLen));
+      offset += hostIdLen;
+      print('🤝 FriendshipAcceptBlock.fromPayload: hostId=$hostId');
+
+      // Addresses
+      final addrsCount = data.getUint16(offset, Endian.big);
+      offset += 2;
+      print('🤝 FriendshipAcceptBlock.fromPayload: addrsCount=$addrsCount');
+      final hostAddrs = <String>[];
+      for (var i = 0; i < addrsCount; i++) {
+        final addrLen = data.getUint16(offset, Endian.big);
+        offset += 2;
+        final addr = utf8.decode(payload.sublist(offset, offset + addrLen));
+        hostAddrs.add(addr);
+        offset += addrLen;
+        print('🤝 FriendshipAcceptBlock.fromPayload: addr[$i]=$addr');
+      }
+
+      print('🤝 FriendshipAcceptBlock.fromPayload: SUCCESS');
+      return FriendshipAcceptBlock(
+        hostId: hostId,
+        hostAddrs: hostAddrs,
+      );
+    } catch (e, stack) {
+      print('🤝 FriendshipAcceptBlock.fromPayload: FAILED - $e');
+      print('🤝 Stack: $stack');
+      rethrow;
     }
-
-    return FriendshipAcceptBlock(
-      hostId: hostId,
-      hostAddrs: hostAddrs,
-    );
-  }
-}
-
-/// A friend announce block for presence over libp2p
-class FriendAnnounceBlock extends Block {
-  @override
-  BlockType get type => BlockType.friendAnnounce;
-
-  /// The sender's libp2p multiaddress
-  final String libp2pAddress;
-
-  /// The sender's nickname
-  final String nickname;
-
-  /// Whether the sender is coming online or going offline
-  final bool isOnline;
-
-  FriendAnnounceBlock({
-    required this.libp2pAddress,
-    required this.nickname,
-    this.isOnline = true,
-  });
-
-  @override
-  Uint8List serialize() {
-    final addressBytes = utf8.encode(libp2pAddress);
-    final nicknameBytes = utf8.encode(nickname);
-
-    final data =
-        ByteData(1 + 1 + 2 + addressBytes.length + 2 + nicknameBytes.length);
-    var offset = 0;
-
-    data.setUint8(offset++, type.value);
-    data.setUint8(offset++, isOnline ? 1 : 0);
-    data.setUint16(offset, addressBytes.length, Endian.big);
-    offset += 2;
-
-    final bytes = data.buffer.asUint8List();
-    bytes.setRange(offset, offset + addressBytes.length, addressBytes);
-    offset += addressBytes.length;
-
-    data.setUint16(offset, nicknameBytes.length, Endian.big);
-    offset += 2;
-
-    bytes.setRange(offset, offset + nicknameBytes.length, nicknameBytes);
-
-    return bytes;
-  }
-
-  factory FriendAnnounceBlock.fromPayload(Uint8List payload) {
-    final data = ByteData.view(payload.buffer, payload.offsetInBytes);
-    var offset = 0;
-
-    final isOnline = data.getUint8(offset++) == 1;
-    final addressLen = data.getUint16(offset, Endian.big);
-    offset += 2;
-
-    final addressBytes = payload.sublist(offset, offset + addressLen);
-    final address = utf8.decode(addressBytes);
-    offset += addressLen;
-
-    final nicknameLen = data.getUint16(offset, Endian.big);
-    offset += 2;
-
-    final nicknameBytes = payload.sublist(offset, offset + nicknameLen);
-    final nickname = utf8.decode(nicknameBytes);
-
-    return FriendAnnounceBlock(
-      libp2pAddress: address,
-      nickname: nickname,
-      isOnline: isOnline,
-    );
   }
 }
 

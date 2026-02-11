@@ -7,6 +7,7 @@ import 'package:logger/logger.dart' show Logger;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:redux/redux.dart';
 import 'package:flutter_redux/flutter_redux.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:async';
@@ -14,7 +15,6 @@ import 'package:cryptography/cryptography.dart';
 import 'chat_screen.dart';
 import 'chat_models.dart';
 import 'settings_screen.dart';
-import 'src/models/transport_settings.dart';
 
 // Global notification plugin instance
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
@@ -31,6 +31,9 @@ String? _pendingChatPeerHex;
 
 // Global redux store
 late final Store<AppState> appStore;
+
+// Global persistence service
+late final PersistenceService persistenceService;
 
 Future<BitchatIdentity> _initIdentity() async {
   const storage = FlutterSecureStorage();
@@ -72,11 +75,27 @@ Future<BitchatIdentity> _initIdentity() async {
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Initialize redux store
+  // Create persistence service and load persisted state
+  persistenceService = PersistenceService();
+  final friendships = await persistenceService.loadFriendships();
+  final settings = await persistenceService.loadSettings();
+  final (conversations, unreadCounts) = await persistenceService.loadConversations();
+
+  // Initialize redux store with hydrated state
   appStore = Store<AppState>(
     appReducer,
-    initialState: AppState.initial,
+    initialState: AppState(
+      friendships: friendships,
+      settings: settings,
+      messages: MessagesState(
+        conversations: conversations,
+        unreadCounts: unreadCounts,
+      ),
+    ),
   );
+
+  // Subscribe to persist changes (debounced)
+  appStore.onChange.listen((state) => persistenceService.onStateChanged(state));
 
   // Initialize notifications
   const AndroidInitializationSettings initializationSettingsAndroid =
@@ -137,9 +156,7 @@ class _BitchatHomeState extends State<BitchatHome>
   Bitchat? _bitchat;
   Timer? _refreshTimer;
   Timer? _friendAnnounceTimer;
-  final MessageStore _messageStore = MessageStore();
-  final FriendshipStore _friendshipStore = FriendshipStore();
-  final TransportSettingsStore _transportSettingsStore = TransportSettingsStore();
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
   int _currentIndex = 1; // Start on "Around" tab (center)
 
   // Track nickname changes for animation
@@ -167,22 +184,24 @@ class _BitchatHomeState extends State<BitchatHome>
     return '/p2p/$hostId';
   }
   
-  /// Get all peers from Redux store
+  /// Get nearby peers from Redux store (BLE-connected peers in physical proximity).
+  /// For the "Nearby" section - only peers reachable via Bluetooth.
   Map<String, PeerState> get _peers {
     final peersState = appStore.state.peers;
     return {
-      for (var p in peersState.connectedPeers) p.pubkeyHex: p
+      for (var p in peersState.nearbyBlePeers) p.pubkeyHex: p
     };
   }
 
   @override
   void initState() {
     super.initState();
-    _messageStore.addListener(_onMessagesChanged);
-    _friendshipStore.addListener(_onFriendshipsChanged);
-    _transportSettingsStore.addListener(_onTransportSettingsChanged);
-    // Subscribe to Redux store changes for peer updates
-    appStore.onChange.listen((_) => _onPeersChanged());
+    // Subscribe to Redux store changes - this handles all state updates
+    appStore.onChange.listen((_) {
+      if (mounted) setState(() {});
+    });
+    // Subscribe to connectivity changes
+    _connectivitySubscription = Connectivity().onConnectivityChanged.listen(_onConnectivityChanged);
     _initialize();
     // Refresh UI every second to update "seconds ago" display
     _refreshTimer = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -194,31 +213,8 @@ class _BitchatHomeState extends State<BitchatHome>
     });
   }
 
-  void _onMessagesChanged() {
-    setState(() {});
-  }
-
-  void _onFriendshipsChanged() {
-    setState(() {});
-  }
-
-  void _onTransportSettingsChanged() {
-    setState(() {});
-    // Restart transports if needed based on new settings
-    _handleTransportSettingsChange();
-  }
-  
-  void _onPeersChanged() {
-    // PeerStore notifies us when peers change - just update UI
-    setState(() {});
-  }
-
-  Future<void> _handleTransportSettingsChange() async {
-    if (_bitchat == null) return;
-    
-    // The Bitchat class should handle transport changes
-    // For now, we just update the UI to reflect the changes
-    _log.i('Transport settings changed: BT=${_transportSettingsStore.bluetoothEnabled}, libp2p=${_transportSettingsStore.libp2pEnabled}');
+  void _onConnectivityChanged(List<ConnectivityResult> results) {
+    _log.i('🌐 Connectivity changed: $results');
   }
 
   void _checkPendingChat() {
@@ -239,21 +235,17 @@ class _BitchatHomeState extends State<BitchatHome>
 
   @override
   void dispose() {
-    _messageStore.removeListener(_onMessagesChanged);
-    _friendshipStore.removeListener(_onFriendshipsChanged);
-    _transportSettingsStore.removeListener(_onTransportSettingsChanged);
-    // Redux store subscription is handled automatically
+    _connectivitySubscription?.cancel();
     _refreshTimer?.cancel();
     _friendAnnounceTimer?.cancel();
     _bitchat?.dispose();
+    // Flush persistence on exit
+    persistenceService.flush(appStore.state);
     super.dispose();
   }
 
   Future<void> _initialize() async {
     try {
-      await _messageStore.initialize();
-      await _friendshipStore.initialize();
-      await _transportSettingsStore.initialize();
       final identity = await _initIdentity();
 
       // Dispatch initializing status
@@ -261,13 +253,12 @@ class _BitchatHomeState extends State<BitchatHome>
 
       final bitchat = Bitchat(
         identity: identity,
-        transportSettings: _transportSettingsStore,
         store: appStore,
       );
 
-      bitchat.onMessageReceived = (senderPubkey, payload) {
+      bitchat.onMessageReceived = (messageId, senderPubkey, payload) {
         // print('Received ${payload.length} bytes from $senderPubkey');
-        _handleIncomingMessage(senderPubkey, payload);
+        _handleIncomingMessage(messageId, senderPubkey, payload);
       };
 
       // bitchat.onPeerConnected = (peer) {
@@ -313,12 +304,14 @@ class _BitchatHomeState extends State<BitchatHome>
     }
   }
 
-  /// Hydrate Redux store with friends from persistent FriendshipStore
-  /// and attempt to reconnect to each friend via libp2p.
+  /// Hydrate peers state with friends and attempt to reconnect to each via libp2p.
+  /// Friendships are already hydrated from persistence; this just adds them to peers
+  /// and establishes connections.
   Future<void> _hydrateFriendsFromStore() async {
-    for (final friendship in _friendshipStore.friends) {
+    for (final friendship in appStore.state.friendships.friends) {
       if (friendship.libp2pHostId != null) {
         final pubkey = ChatMessage.hexToPubkey(friendship.peerPubkeyHex);
+        // Add friend to peers state for connection tracking
         appStore.dispatch(FriendEstablishedAction(
           publicKey: pubkey,
           libp2pHostId: friendship.libp2pHostId!,
@@ -345,87 +338,90 @@ class _BitchatHomeState extends State<BitchatHome>
     _announceToFriends();
   }
 
-  /// Send FriendAnnounce block to all friends
+  /// Send ANNOUNCE with our libp2p address to all friends.
+  ///
+  /// Friends receive our address in the ANNOUNCE payload so they can
+  /// connect to us over the internet.
   Future<void> _announceToFriends() async {
-    if (_bitchat == null || _identity == null || _myLibp2pAddress == null)
+    if (_bitchat == null || _identity == null || _myLibp2pAddress == null) {
       return;
+    }
 
-    final friends = _friendshipStore.friends;
+    final friends = appStore.state.friendships.friends;
     if (friends.isEmpty) return;
-
-    final block = FriendAnnounceBlock(
-      libp2pAddress: _myLibp2pAddress!,
-      nickname: _identity!.nickname,
-      isOnline: true,
-    );
-    final data = block.serialize();
 
     for (final friend in friends) {
       final pubkey = ChatMessage.hexToPubkey(friend.peerPubkeyHex);
-      // Try to send via BLE if peer is nearby
-      final peer = _peers.values
-          .where((p) =>
-              ChatMessage.pubkeyToHex(p.publicKey) == friend.peerPubkeyHex)
-          .firstOrNull;
-
-      if (peer != null &&
-          peer.connectionState == PeerConnectionState.connected) {
-        await _bitchat!.send(pubkey, data);
-      }
-      // TODO: Also send via libp2p if friend has libp2p address
+      await _bitchat!.sendAnnounceToFriend(
+        friendPubkey: pubkey,
+        myAddress: _myLibp2pAddress!,
+      );
     }
   }
 
   Future<void> _handleIncomingMessage(
-      Uint8List senderPubkey, Uint8List payload) async {
+      String messageId, Uint8List senderPubkey, Uint8List payload) async {
     final senderHex = ChatMessage.pubkeyToHex(senderPubkey);
+    debugPrint('📨 Message ID: $messageId');
     final myHex = ChatMessage.pubkeyToHex(_identity!.publicKey);
 
     debugPrint('📨 _handleIncomingMessage: ${payload.length} bytes from $senderHex');
     debugPrint('📨 First byte (block type): 0x${payload[0].toRadixString(16)}');
 
     // Try to parse as a block
+    debugPrint('📨 Attempting to parse payload of ${payload.length} bytes, first byte: ${payload.isNotEmpty ? payload[0] : "empty"}');
     final block = Block.tryDeserialize(payload);
 
     if (block != null) {
-      debugPrint('📨 Parsed block type: ${block.type}');
-      await _handleBlock(block, senderHex, myHex);
+      debugPrint('📨 Parsed block type: ${block.type}, runtimeType: ${block.runtimeType}');
+      await _handleBlock(block, senderHex, myHex, messageId, senderPubkey);
     } else {
-      debugPrint('📨 Failed to parse as block, treating as plain text');
-      // Legacy plain text message
-      final content = String.fromCharCodes(payload);
-      await _handleTextMessage(senderHex, myHex, content);
+      debugPrint('📨 Failed to parse as block - dropping message');
     }
   }
 
-  Future<void> _handleBlock(Block block, String senderHex, String myHex) async {
+  Future<void> _handleBlock(Block block, String senderHex, String myHex,
+      String messageId, Uint8List senderPubkey) async {
     // Find sender name
     final peer = _peers.values
         .where((p) => ChatMessage.pubkeyToHex(p.publicKey) == senderHex)
         .firstOrNull;
     final senderName = peer?.displayName ?? 'Unknown';
 
+    debugPrint('📦 _handleBlock: block.type=${block.type}, block.runtimeType=${block.runtimeType}');
+    debugPrint('📦 _handleBlock: block.type.value=${block.type.value}');
+    debugPrint('📦 _handleBlock: is FriendshipAcceptBlock? ${block is FriendshipAcceptBlock}');
+
     switch (block.type) {
       case BlockType.say:
         _log.i('Handling SayBlock from $senderName ($senderHex)');
         final sayBlock = block as SayBlock;
-        await _handleTextMessage(senderHex, myHex, sayBlock.content);
+        await _handleTextMessage(
+            senderHex, myHex, sayBlock.content, messageId, senderPubkey);
 
       case BlockType.friendshipOffer:
-        _log.i('Handling FriendshipOfferBlock from $senderName ($senderHex)');
+        _log.i('Hansdling FriendshipOfferBlock from $senderName ($senderHex)');
         final offerBlock = block as FriendshipOfferBlock;
         await _handleFriendshipOffer(senderHex, myHex, offerBlock, senderName);
 
       case BlockType.friendshipAccept:
-        _log.i('Handling FriendshipAcceptBlock from $senderName ($senderHex)');
-        final acceptBlock = block as FriendshipAcceptBlock;
-        await _handleFriendshipAccept(
-            senderHex, myHex, acceptBlock, senderName);
-
-      case BlockType.friendAnnounce:
-        _log.i('Handling FriendAnnounceBlock from $senderName ($senderHex)');
-        final announceBlock = block as FriendAnnounceBlock;
-        await _handleFriendAnnounce(senderHex, announceBlock);
+        _log.i('Handling Fr siendshipAcceptBlock from $senderName ($senderHex)');
+        debugPrint('🤝 ENTER _handleBlock for friendshipAccept');
+        debugPrint('🤝 block.runtimeType: ${block.runtimeType}');
+        debugPrint('🤝 FriendshipAcceptBlock type: $FriendshipAcceptBlock');
+        debugPrint('🤝 block is FriendshipAcceptBlock: ${block is FriendshipAcceptBlock}');
+        try {
+          final acceptBlock = block as FriendshipAcceptBlock;
+          debugPrint('🤝 Cast succeeded!');
+          debugPrint('🤝 acceptBlock.hostId: ${acceptBlock.hostId}');
+          debugPrint('🤝 acceptBlock.hostAddrs: ${acceptBlock.hostAddrs}');
+          await _handleFriendshipAccept(
+              senderHex, myHex, acceptBlock, senderName);
+          debugPrint('🤝 EXIT _handleBlock for friendshipAccept');
+        } catch (e, stack) {
+          debugPrint('🤝 CAST FAILED: $e');
+          debugPrint('🤝 Stack: $stack');
+        }
 
       case BlockType.friendshipRevoke:
         _log.i('Handling FriendshipRevokeBlock from $senderName ($senderHex)');
@@ -433,16 +429,17 @@ class _BitchatHomeState extends State<BitchatHome>
     }
   }
 
-  Future<void> _handleTextMessage(
-      String senderHex, String myHex, String content) async {
-    final chatMessage = ChatMessage(
+  Future<void> _handleTextMessage(String senderHex, String myHex,
+      String content, String messageId, Uint8List senderPubkey) async {
+    // Save message to Redux store
+    appStore.dispatch(SaveChatMessageAction(
       senderPubkeyHex: senderHex,
       recipientPubkeyHex: myHex,
       content: content,
-      timestamp: DateTime.now(),
       isOutgoing: false,
-    );
-    await _messageStore.saveMessage(chatMessage);
+      messageId: messageId,
+    ));
+    // Read receipt sent when user opens the chat (see ChatScreen._sendReadReceipts)
 
     // Find sender name
     final peer = _peers.values
@@ -461,18 +458,20 @@ class _BitchatHomeState extends State<BitchatHome>
     String senderName,
   ) async {
     // Record the friend request with host info for later connection
-    final friendship = await _friendshipStore.receiveFriendRequest(
+    appStore.dispatch(ReceiveFriendRequestAction(
       peerPubkeyHex: senderHex,
       libp2pAddress: block.fullAddress,
       libp2pHostId: block.hostId,
       libp2pHostAddrs: block.hostAddrs,
       nickname: senderName,
       message: block.message,
-    );
+    ));
 
+    // Get the updated friendship state
+    final friendship = appStore.state.friendships.getFriendship(senderHex);
     final pubkey = ChatMessage.hexToPubkey(senderHex);
 
-    if (friendship.isAccepted && block.hostId.isNotEmpty) {
+    if (friendship != null && friendship.isAccepted && block.hostId.isNotEmpty) {
       // Auto-accepted (mutual friend requests) — establish friendship in Redux
       appStore.dispatch(FriendEstablishedAction(
         publicKey: pubkey,
@@ -494,16 +493,17 @@ class _BitchatHomeState extends State<BitchatHome>
     }
 
     // Save as a chat message
-    final chatMessage = ChatMessage.friendRequestReceived(
+    appStore.dispatch(SaveChatMessageAction(
       senderPubkeyHex: senderHex,
       recipientPubkeyHex: myHex,
+      content: block.message ?? 'Wants to be friends',
+      isOutgoing: false,
+      messageType: ChatMessageType.friendRequestReceived.index,
       libp2pAddress: block.fullAddress,
-      message: block.message,
-    );
-    await _messageStore.saveMessage(chatMessage);
+    ));
 
     // Show notification if friendship is new
-    if (friendship.status == FriendshipStatus.received) {
+    if (friendship?.status == FriendshipStatus.received) {
       await _showFriendRequestNotification(senderHex, senderName);
     }
   }
@@ -514,79 +514,77 @@ class _BitchatHomeState extends State<BitchatHome>
     FriendshipAcceptBlock block,
     String senderName,
   ) async {
-    debugPrint('🤝 _handleFriendshipAccept from $senderName ($senderHex)');
-    debugPrint('🤝 hostId: ${block.hostId}');
-    debugPrint('🤝 hostAddrs: ${block.hostAddrs}');
+    try {
+      debugPrint('🤝 _handleFriendshipAccept from $senderName ($senderHex)');
+      debugPrint('🤝 hostId: ${block.hostId}');
+      debugPrint('🤝 hostAddrs: ${block.hostAddrs}');
 
-    // Try to connect to the accepter using their host info
-    String? successfulAddress;
-    if (_bitchat != null && block.hostId.isNotEmpty && block.hostAddrs.isNotEmpty) {
-      debugPrint('🤝 Attempting libp2p connection...');
-      successfulAddress = await _bitchat!.connectToLibp2pHost(
-        hostId: block.hostId,
-        hostAddrs: block.hostAddrs,
-      );
-      if (successfulAddress != null) {
-        debugPrint('🤝 Successfully connected to friend $senderName via libp2p at $successfulAddress');
-      } else {
-        debugPrint('🤝 Could not connect to peer $senderHex via libp2p (will use BLE)');
+      // Try to connect to the accepter using their host info
+      String? successfulAddress;
+      if (_bitchat != null && block.hostId.isNotEmpty && block.hostAddrs.isNotEmpty) {
+        debugPrint('🤝 Attempting libp2p connection...');
+        successfulAddress = await _bitchat!.connectToLibp2pHost(
+          hostId: block.hostId,
+          hostAddrs: block.hostAddrs,
+        );
+        if (successfulAddress != null) {
+          debugPrint('🤝 Successfully connected to friend $senderName via libp2p at $successfulAddress');
+        } else {
+          debugPrint('🤝 Could not connect to peer $senderHex via libp2p (will use BLE)');
+        }
       }
+
+      // Use the successful address if available, otherwise fall back to fullAddress
+      final libp2pAddress = successfulAddress != null
+          ? '$successfulAddress/p2p/${block.hostId}'
+          : block.fullAddress;
+
+      debugPrint('🤝 Dispatching ProcessFriendshipAcceptAction...');
+      // Update friendship status with host info
+      appStore.dispatch(ProcessFriendshipAcceptAction(
+        peerPubkeyHex: senderHex,
+        libp2pAddress: libp2pAddress,
+        libp2pHostId: block.hostId,
+        libp2pHostAddrs: block.hostAddrs,
+        nickname: senderName,
+      ));
+      debugPrint('🤝 Friendship status updated with address: $libp2pAddress');
+
+      debugPrint('🤝 Dispatching FriendEstablishedAction...');
+      // Establish friendship in Redux store with libp2p host info
+      final pubkey = ChatMessage.hexToPubkey(senderHex);
+      appStore.dispatch(FriendEstablishedAction(
+        publicKey: pubkey,
+        libp2pHostId: block.hostId,
+        libp2pHostAddrs: block.hostAddrs,
+        nickname: senderName,
+      ));
+      debugPrint('🤝 FriendEstablishedAction dispatched');
+
+      // Save as a chat message
+      appStore.dispatch(SaveChatMessageAction(
+        senderPubkeyHex: senderHex,
+        recipientPubkeyHex: myHex,
+        content: 'Accepted your friend request',
+        isOutgoing: false,
+        messageType: ChatMessageType.friendRequestAccepted.index,
+        libp2pAddress: libp2pAddress,
+      ));
+      debugPrint('🤝 Chat message saved - DONE');
+    } catch (e, stack) {
+      debugPrint('🤝 ERROR in _handleFriendshipAccept: $e');
+      debugPrint('🤝 Stack: $stack');
+      rethrow;
     }
-
-    // Use the successful address if available, otherwise fall back to fullAddress
-    final libp2pAddress = successfulAddress != null
-        ? '$successfulAddress/p2p/${block.hostId}'
-        : block.fullAddress;
-
-    // Update friendship status with host info
-    await _friendshipStore.processFriendshipAccept(
-      peerPubkeyHex: senderHex,
-      libp2pAddress: libp2pAddress,
-      libp2pHostId: block.hostId,
-      libp2pHostAddrs: block.hostAddrs,
-      nickname: senderName,
-    );
-    debugPrint('🤝 Friendship status updated with address: $libp2pAddress');
-
-    // Establish friendship in Redux store with libp2p host info
-    final pubkey = ChatMessage.hexToPubkey(senderHex);
-    appStore.dispatch(FriendEstablishedAction(
-      publicKey: pubkey,
-      libp2pHostId: block.hostId,
-      libp2pHostAddrs: block.hostAddrs,
-      nickname: senderName,
-    ));
-
-    // Save as a chat message
-    final chatMessage = ChatMessage.friendRequestAccepted(
-      senderPubkeyHex: senderHex,
-      recipientPubkeyHex: myHex,
-      libp2pAddress: libp2pAddress,
-    );
-    await _messageStore.saveMessage(chatMessage);
-    debugPrint('🤝 Chat message saved');
-  }
-
-  Future<void> _handleFriendAnnounce(
-      String senderHex, FriendAnnounceBlock block) async {
-    // Update friend's online status
-    await _friendshipStore.updateOnlineStatus(
-      peerPubkeyHex: senderHex,
-      isOnline: block.isOnline,
-      libp2pAddress: block.libp2pAddress,
-      nickname: block.nickname,
-    );
   }
 
   /// Handle being unfriended by someone
   Future<void> _handleFriendshipRevoke(String senderHex) async {
-    // Silently remove them from our friend list
-    await _friendshipStore.handleUnfriendedBy(senderHex);
-
-    // Remove friendship from Redux store
+    // Silently remove them from our friend list (Redux handles both friendships and peers)
+    appStore.dispatch(HandleUnfriendedByAction(senderHex));
     final pubkey = ChatMessage.hexToPubkey(senderHex);
     appStore.dispatch(FriendRemovedAction(pubkey));
-    
+
     // We don't show any notification to the user - they will just
     // notice the person is no longer in their friends list
   }
@@ -594,17 +592,15 @@ class _BitchatHomeState extends State<BitchatHome>
   /// Unfriend someone - removes them from our list and notifies them
   Future<void> _unfriend(String peerHex) async {
     if (_bitchat == null) return;
-    
+
     final pubkey = ChatMessage.hexToPubkey(peerHex);
-    
+
     // Send the revoke message so they remove us too
     final block = FriendshipRevokeBlock();
     await _bitchat!.send(pubkey, block.serialize());
-    
-    // Remove from our friend list
-    await _friendshipStore.unfriend(peerHex);
 
-    // Remove friendship from Redux store
+    // Remove from our friend list (Redux handles both friendships and peers)
+    appStore.dispatch(RemoveFriendshipAction(peerHex));
     appStore.dispatch(FriendRemovedAction(pubkey));
     
     if (mounted) {
@@ -683,8 +679,7 @@ class _BitchatHomeState extends State<BitchatHome>
           peer: peer,
           bitchat: _bitchat!,
           myPubkey: _identity!.publicKey,
-          messageStore: _messageStore,
-          friendshipStore: _friendshipStore,
+          store: appStore,
           onSendFriendRequest: () => _sendFriendRequest(peer),
           onAcceptFriendRequest: () => _acceptFriendRequest(peer),
           onUnfriend: () => _unfriend(peerHex),
@@ -710,13 +705,13 @@ class _BitchatHomeState extends State<BitchatHome>
     final peerHex = peer.pubkeyHex;
     final myHex = ChatMessage.pubkeyToHex(_identity!.publicKey);
 
-    // Create and record the friend request
-    await _friendshipStore.createFriendRequest(
+    // Create and record the friend request in Redux
+    appStore.dispatch(CreateFriendRequestAction(
       peerPubkeyHex: peerHex,
       nickname: peer.displayName,
-    );
+    ));
 
-    // Create the friendship offer block with our host info
+    // Create the friendship offer block with our host info!
     final block = FriendshipOfferBlock(
       hostId: _myLibp2pHostId!,
       hostAddrs: _myLibp2pHostAddrs,
@@ -726,13 +721,15 @@ class _BitchatHomeState extends State<BitchatHome>
     // Send via Bitchat
     await _bitchat!.send(peer.publicKey, block.serialize());
 
-    // Save as a chat message
-    final chatMessage = ChatMessage.friendRequestSent(
+    // Save as a chat message in Redux
+    appStore.dispatch(SaveChatMessageAction(
       senderPubkeyHex: myHex,
       recipientPubkeyHex: peerHex,
+      content: 'Sent a friend request',
+      isOutgoing: true,
+      messageType: ChatMessageType.friendRequestSent.index,
       libp2pAddress: _myLibp2pAddress!,
-    );
-    await _messageStore.saveMessage(chatMessage);
+    ));
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -760,14 +757,11 @@ class _BitchatHomeState extends State<BitchatHome>
     final peerHex = peer.pubkeyHex;
     final myHex = ChatMessage.pubkeyToHex(_identity!.publicKey);
 
-    // Accept the friend request in the store FIRST
-    await _friendshipStore.acceptFriendRequest(
-      peerPubkeyHex: peerHex,
-      myLibp2pAddress: _myLibp2pAddress!,
-    );
+    // Accept the friend request in Redux FIRST
+    appStore.dispatch(AcceptFriendRequestAction(peerHex));
 
     // Get friendship info to establish in Redux BEFORE sending
-    final friendship = _friendshipStore.getFriendship(peerHex);
+    final friendship = appStore.state.friendships.getFriendship(peerHex);
     if (friendship != null && friendship.libp2pHostId != null && friendship.libp2pHostAddrs != null) {
       // Establish friendship in Redux FIRST so send() has the libp2p address
       appStore.dispatch(FriendEstablishedAction(
@@ -786,17 +780,19 @@ class _BitchatHomeState extends State<BitchatHome>
 
     // Send via Bitchat (works over BLE or libp2p)
     // Now the peer has libp2pAddress set from FriendEstablishedAction above
-    final sendSuccess = await _bitchat!.send(peer.publicKey, block.serialize());
-    if (!sendSuccess) {
+    final messageId = await _bitchat!.send(peer.publicKey, block.serialize());
+    if (messageId == null) {
       debugPrint('⚠️ Failed to send friendship accept to ${peer.displayName}');
     }
 
-    // Save as a chat message
-    final chatMessage = ChatMessage.friendRequestAcceptedByUs(
+    // Save as a chat message in Redux
+    appStore.dispatch(SaveChatMessageAction(
       senderPubkeyHex: myHex,
       recipientPubkeyHex: peerHex,
-    );
-    await _messageStore.saveMessage(chatMessage);
+      content: 'You accepted the friend request',
+      isOutgoing: true,
+      messageType: ChatMessageType.friendRequestAcceptedByUs.index,
+    ));
 
     // Try to connect to the requester using their host info (best effort)
     if (friendship != null && friendship.libp2pHostId != null && friendship.libp2pHostAddrs != null) {
@@ -807,11 +803,11 @@ class _BitchatHomeState extends State<BitchatHome>
       if (successfulAddress != null) {
         debugPrint('Successfully connected to friend ${peer.displayName} via libp2p at $successfulAddress');
         final fullAddress = '$successfulAddress/p2p/${friendship.libp2pHostId}';
-        await _friendshipStore.updateOnlineStatus(
+        // Update friendship with libp2p address in Redux
+        appStore.dispatch(UpdateFriendshipLibp2pInfoAction(
           peerPubkeyHex: peerHex,
-          isOnline: true,
           libp2pAddress: fullAddress,
-        );
+        ));
       } else {
         debugPrint('Could not connect to peer $peerHex via libp2p (will use BLE)');
       }
@@ -835,7 +831,7 @@ class _BitchatHomeState extends State<BitchatHome>
   }
 
   Future<void> _declineFriendRequest(String peerHex) async {
-    await _friendshipStore.declineFriendRequest(peerHex);
+    appStore.dispatch(DeclineFriendRequestAction(peerHex));
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1007,18 +1003,13 @@ class _BitchatHomeState extends State<BitchatHome>
   }
 
   int _getTotalUnreadCount() {
-    int total = 0;
-    for (final peer in _peers.values) {
-      final peerHex = ChatMessage.pubkeyToHex(peer.publicKey);
-      total += _messageStore.getUnreadCount(peerHex);
-    }
-    return total;
+    return appStore.state.messages.totalUnreadCount;
   }
 
   // ===== CHATS TAB =====
   Widget _buildChatsTab() {
     final chatsWithMessages = _getChatsWithMessages();
-    final pendingRequests = _friendshipStore.pendingIncoming;
+    final pendingRequests = appStore.state.friendships.pendingIncoming;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1099,7 +1090,7 @@ class _BitchatHomeState extends State<BitchatHome>
     );
   }
 
-  Widget _buildFriendRequestCard(Friendship request) {
+  Widget _buildFriendRequestCard(FriendshipState request) {
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 4),
       color: const Color(0xFF1B3D2F),
@@ -1178,11 +1169,11 @@ class _BitchatHomeState extends State<BitchatHome>
     final myHex =
         _identity != null ? ChatMessage.pubkeyToHex(_identity!.publicKey) : '';
 
-    // Get all conversation partners from message store
-    final conversations = _messageStore.getConversations(myHex);
+    // Get all conversation partners from Redux store
+    final conversations = appStore.state.messages.conversationPeers;
 
     for (final peerHex in conversations) {
-      final messages = _messageStore.getMessages(peerHex);
+      final messages = appStore.state.messages.getConversation(peerHex);
       if (messages.isEmpty) continue;
 
       final lastMessage = messages.last;
@@ -1194,7 +1185,7 @@ class _BitchatHomeState extends State<BitchatHome>
         peerHex: peerHex,
         peer: peer,
         lastMessage: lastMessage,
-        unreadCount: _messageStore.getUnreadCount(peerHex),
+        unreadCount: appStore.state.messages.getUnreadCount(peerHex),
       ));
     }
 
@@ -1288,7 +1279,7 @@ class _BitchatHomeState extends State<BitchatHome>
 
   // ===== AROUND TAB =====
   Widget _buildAroundTab() {
-    final onlineFriends = _friendshipStore.onlineFriends;
+    final onlineFriends = appStore.state.peers.onlineFriends;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1371,7 +1362,7 @@ class _BitchatHomeState extends State<BitchatHome>
           ),
           const SizedBox(height: 8),
           SizedBox(
-            height: 80,
+            height: 100,
             child: ListView.builder(
               scrollDirection: Axis.horizontal,
               padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -1441,18 +1432,10 @@ class _BitchatHomeState extends State<BitchatHome>
     );
   }
 
-  Widget _buildOnlineFriendChip(Friendship friend) {
+  Widget _buildOnlineFriendChip(PeerState friend) {
     return GestureDetector(
       onTap: () {
-        // Find peer for this friend
-        var peer = _peers.values
-            .where((p) =>
-                ChatMessage.pubkeyToHex(p.publicKey) == friend.peerPubkeyHex)
-            .firstOrNull;
-
-        if (peer != null) {
-          _openChat(peer);
-        }
+        _openChat(friend);
       },
       child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 4),
@@ -1506,10 +1489,10 @@ class _BitchatHomeState extends State<BitchatHome>
 
   Widget _buildPeerListItem(PeerState peer) {
     final peerHex = peer.pubkeyHex;
-    final unreadCount = _messageStore.getUnreadCount(peerHex);
-    final friendship = _friendshipStore.getFriendship(peerHex);
+    final unreadCount = appStore.state.messages.getUnreadCount(peerHex);
+    final friendship = appStore.state.friendships.getFriendship(peerHex);
     final isFriend = friendship?.isAccepted ?? false;
-    final hasPendingRequest = _friendshipStore.hasPendingRequest(peerHex);
+    final hasPendingRequest = appStore.state.friendships.hasPendingRequest(peerHex);
 
     // RSSI signal strength indicator
     IconData signalIcon;
@@ -1911,17 +1894,17 @@ class _BitchatHomeState extends State<BitchatHome>
               icon: Icons.bluetooth,
               iconColor: Colors.blue,
               name: 'Bluetooth',
-              enabled: _transportSettingsStore.bluetoothEnabled,
+              enabled: appStore.state.settings.bluetoothEnabled,
               available: _bleAvailable,
             ),
             const SizedBox(height: 8),
-            
+
             // libp2p status
             _buildTransportStatusRow(
               icon: Icons.public,
               iconColor: Colors.green,
               name: 'Internet (libp2p)',
-              enabled: _transportSettingsStore.libp2pEnabled,
+              enabled: appStore.state.settings.libp2pEnabled,
               available: _libp2pAvailable,
             ),
             
@@ -2002,7 +1985,7 @@ class _BitchatHomeState extends State<BitchatHome>
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (context) => SettingsScreen(
-          settingsStore: _transportSettingsStore,
+          store: appStore,
           bleAvailable: _bleAvailable,
           libp2pAvailable: _libp2pAvailable,
           onSettingsChanged: () {
@@ -2197,7 +2180,7 @@ class _NicknameChange {
 class _ChatPreview {
   final String peerHex;
   final PeerState? peer;
-  final ChatMessage lastMessage;
+  final ChatMessageState lastMessage;
   final int unreadCount;
 
   _ChatPreview({
