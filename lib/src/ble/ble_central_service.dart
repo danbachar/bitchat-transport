@@ -11,7 +11,7 @@ class DiscoveredDevice {
   final int rssi;
   final DateTime discoveredAt;
   final BluetoothDevice device;
-  
+
   DiscoveredDevice({
     required this.deviceId,
     this.name,
@@ -28,7 +28,7 @@ class ConnectedPeer {
   final BluetoothCharacteristic characteristic;
   final int rssi;
   DateTime lastActivity;
-  
+
   ConnectedPeer({
     required this.deviceId,
     required this.device,
@@ -47,50 +47,50 @@ typedef DeviceDiscoveredCallback = void Function(DiscoveredDevice device);
 typedef CentralConnectionCallback = void Function(String deviceId, bool connected);
 
 /// BLE Central service - scans for and connects to peripherals.
-/// 
+///
 /// Scans for devices advertising our service UUID pattern and
 /// connects to them for mesh communication.
 class BleCentralService {
   final Logger _log = Logger();
-  
+
   /// Our service UUID (to filter scan results and identify peers)
   final String serviceUuid;
-  
+
   /// Characteristic UUID (must match peripheral)
   static const String characteristicUuid = '0000ff01-0000-1000-8000-00805f9b34fb';
-  
+
   /// Scan timeout
   static const Duration scanTimeout = Duration(seconds: 10);
-  
+
   /// Connection timeout
   static const Duration connectionTimeout = Duration(seconds: 15);
-  
+
   /// Discovered devices, keyed by device ID
   final Map<String, DiscoveredDevice> _discovered = {};
-  
+
   /// Connected peripherals, keyed by device ID
   final Map<String, ConnectedPeer> _connected = {};
-  
+
   /// Stream subscriptions
   final List<StreamSubscription> _subscriptions = [];
-  
+
   /// Callback when data is received
   CentralDataCallback? onDataReceived;
-  
+
   /// Callback when a device is discovered
   DeviceDiscoveredCallback? onDeviceDiscovered;
-  
+
   /// Callback for connection changes
   CentralConnectionCallback? onConnectionChanged;
-  
+
   BleCentralService({required this.serviceUuid});
-  
+
   /// Whether scanning is active
   bool get isScanning => FlutterBluePlus.isScanningNow;
-  
+
   /// Number of connected peripherals
   int get connectedCount => _connected.length;
-  
+
   /// Get discovered devices sorted by RSSI (strongest signal first)
   List<DiscoveredDevice> get discoveredDevices {
     final devices = _discovered.values.toList();
@@ -98,48 +98,48 @@ class BleCentralService {
     devices.sort((a, b) => b.rssi.compareTo(a.rssi));
     return devices;
   }
-  
+
   /// Get connected peers sorted by RSSI (strongest signal first)
   List<ConnectedPeer> get connectedPeers {
     final peers = _connected.values.toList();
     peers.sort((a, b) => b.rssi.compareTo(a.rssi));
     return peers;
   }
-  
+
   /// Initialize the central service
   Future<void> initialize() async {
     _log.i('Initializing BLE central service');
-    
+
     // Check if Bluetooth is available
     if (!await FlutterBluePlus.isSupported) {
       throw UnsupportedError('Bluetooth not supported on this device');
     }
-    
+
     // Wait for Bluetooth to be on
     final state = await FlutterBluePlus.adapterState.first;
     if (state != BluetoothAdapterState.on) {
       _log.w('Bluetooth is not on: $state');
       // Could prompt user to enable Bluetooth
     }
-    
+
     _log.i('BLE central initialized');
   }
-  
+
   /// Start scanning for peers
   Future<void> startScan({Duration? timeout}) async {
     if (isScanning) {
       // _log.w('Already scanning');
       return;
     }
-    
+
     // _log.i('Starting BLE scan');
-    
+
     try {
       // Listen for scan results
       _subscriptions.add(
         FlutterBluePlus.scanResults.listen(_onScanResults),
       );
-      
+
       // Start scanning
       // Note: We scan for all devices and filter manually because
       // some platforms have issues with service UUID filtering
@@ -147,7 +147,7 @@ class BleCentralService {
         timeout: timeout ?? scanTimeout,
         androidScanMode: AndroidScanMode.lowLatency,
       );
-      
+
       // Wait for scan to actually complete by listening to isScanning stream
       await FlutterBluePlus.isScanning.firstWhere((scanning) => !scanning);
       // _log.i('Scan completed');
@@ -156,15 +156,15 @@ class BleCentralService {
       rethrow;
     }
   }
-  
+
   /// Stop scanning
   Future<void> stopScan() async {
     if (!isScanning) return;
-    
+
     await FlutterBluePlus.stopScan();
     _log.i('Scan stopped');
   }
-  
+
   /// Connect to a discovered device
   Future<bool> connectToDevice(String deviceId) async {
     final discovered = _discovered[deviceId];
@@ -172,20 +172,20 @@ class BleCentralService {
       // _log.w('Device not found: $deviceId');
       return false;
     }
-    
+
     if (_connected.containsKey(deviceId)) {
       // _log.w('Already connected to: $deviceId');
       return true;
     }
-    
+
     // _log.i('Connecting to: $deviceId');
-    
+
     try {
       final device = discovered.device;
-      
+
       // Connect with timeout
       await device.connect(timeout: connectionTimeout);
-      
+
       // Listen for disconnection
       _subscriptions.add(
         device.connectionState.listen((state) {
@@ -194,26 +194,26 @@ class BleCentralService {
           }
         }),
       );
-      
+
       // Discover services
       final services = await device.discoverServices();
-      
+
       // Find our service
       BluetoothService? targetService;
       for (final service in services) {
-        if (service.uuid.toString().toLowerCase() == 
+        if (service.uuid.toString().toLowerCase() ==
             discovered.serviceUuid.toLowerCase()) {
           targetService = service;
           break;
         }
       }
-      
+
       if (targetService == null) {
         // _log.w("Service not found on device: $deviceId");
         await device.disconnect();
         return false;
       }
-      
+
       // Find our characteristic
       // Note: flutter_blue_plus may return short-form UUIDs (e.g., "ff01")
       // while we define full 128-bit UUIDs, so we need to compare the short form
@@ -228,7 +228,7 @@ class BleCentralService {
           break;
         }
       }
-      
+
       if (targetChar == null) {
         await device.disconnect();
         return false;
@@ -236,14 +236,14 @@ class BleCentralService {
 
       // Enable notifications to receive data
       await targetChar.setNotifyValue(true);
-      
+
       // Listen for incoming data
       _subscriptions.add(
         targetChar.onValueReceived.listen((data) {
           _onDataReceived(deviceId, Uint8List.fromList(data));
         }),
       );
-      
+
       // Store connection with RSSI from discovery
       _connected[deviceId] = ConnectedPeer(
         deviceId: deviceId,
@@ -251,17 +251,17 @@ class BleCentralService {
         characteristic: targetChar,
         rssi: discovered.rssi,
       );
-      
+
       // _log.i('Connected to: $deviceId');
       onConnectionChanged?.call(deviceId, true);
-      
+
       return true;
     } catch (e) {
       // _log.e('Failed to connect to $deviceId: $e');
       return false;
     }
   }
-  
+
   /// Disconnect from a device
   Future<void> disconnectFromDevice(String deviceId) async {
     final peer = _connected[deviceId];
@@ -278,25 +278,35 @@ class BleCentralService {
 
   /// Disconnect from all connected devices
   Future<void> disconnectAll() async {
+    _log.i('Disconnecting all ${_connected.length} connected devices');
+
+    // Clear callbacks first to stop receiving data
+    // This prevents processing packets after BLE is disabled
+    onDataReceived = null;
+    onConnectionChanged = null;
+    onDeviceDiscovered = null;
+
     if (_connected.isEmpty) return;
 
-    _log.i('Disconnecting all ${_connected.length} connected devices');
     final deviceIds = _connected.keys.toList();
-
     for (final deviceId in deviceIds) {
       await disconnectFromDevice(deviceId);
     }
   }
 
-  /// Send data to a connected peripheral
+  /// Send data to a connected peripheral.
+  /// Uses write-without-response to avoid GATT busy errors from queued writes.
   Future<bool> sendData(String deviceId, Uint8List data) async {
     final peer = _connected[deviceId];
     if (peer == null) {
       _log.w('Cannot send to disconnected device: $deviceId');
       return false;
     }
-    
+
     try {
+      // Use write-without-response to avoid ERROR_GATT_WRITE_REQUEST_BUSY.
+      // Android only allows one write-with-response at a time, and rapid
+      // consecutive writes cause timeouts and busy errors.
       await peer.characteristic.write(data, withoutResponse: true);
       peer.lastActivity = DateTime.now();
       return true;
@@ -305,21 +315,21 @@ class BleCentralService {
       return false;
     }
   }
-  
+
   /// Send data to all connected peripherals (sorted by signal strength)
   Future<void> broadcastData(Uint8List data, {String? excludeDevice}) async {
     // Sort by RSSI descending (strongest signal first)
     final peers = _connected.values.toList();
     peers.sort((a, b) => b.rssi.compareTo(a.rssi));
-    
+
     for (final peer in peers) {
       if (peer.deviceId == excludeDevice) continue;
       await sendData(peer.deviceId, data);
     }
   }
-  
+
   // ===== Event handlers =====
-  
+
   void _onScanResults(List<ScanResult> results) {
     for (final result in results) {
       // Check if this device advertises any service UUID
@@ -328,7 +338,7 @@ class BleCentralService {
       if (result.advertisementData.serviceUuids.isNotEmpty) {
         final uuidStr = result.advertisementData.serviceUuids.first.toString().toLowerCase();
         final deviceId = result.device.remoteId.str;
-        
+
         final existing = _discovered[deviceId];
         if (existing == null) {
           // New device discovered
@@ -339,7 +349,7 @@ class BleCentralService {
             rssi: result.rssi,
             device: result.device,
           );
-          
+
           _discovered[deviceId] = discovered;
           // _log.d('Discovered: $deviceId (${result.advertisementData.advName})');
           onDeviceDiscovered?.call(discovered);
@@ -354,17 +364,17 @@ class BleCentralService {
             device: result.device,
           );
           _discovered[deviceId] = updated;
-          
+
           // Notify with updated RSSI (callback can decide to update UI)
           onDeviceDiscovered?.call(updated);
         }
       }
     }
   }
-  
+
   void _onDataReceived(String deviceId, Uint8List data) {
     _log.d('Data received from $deviceId: ${data.length} bytes');
-    
+
     final peer = _connected[deviceId];
     if (peer != null) {
       peer.lastActivity = DateTime.now();
@@ -374,28 +384,28 @@ class BleCentralService {
       _log.w('Data received from unknown device: $deviceId');
     }
   }
-  
+
   void _onDeviceDisconnected(String deviceId) {
     _connected.remove(deviceId);
     _log.i('Disconnected from: $deviceId');
     onConnectionChanged?.call(deviceId, false);
   }
-  
+
   /// Clean up resources
   Future<void> dispose() async {
     await stopScan();
-    
+
     // Disconnect all
     for (final peer in _connected.values.toList()) {
       try {
         await peer.device.disconnect();
       } catch (_) {}
     }
-    
+
     for (final sub in _subscriptions) {
       await sub.cancel();
     }
-    
+
     _subscriptions.clear();
     _connected.clear();
     _discovered.clear();

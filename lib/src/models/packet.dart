@@ -19,11 +19,14 @@ enum PacketType {
   /// Final fragment
   fragmentEnd(0x05),
   
-  /// Delivery acknowledgment
+  /// Delivery acknowledgment (for libp2p transport)
   ack(0x06),
-  
+
   /// Negative acknowledgment / request for data
-  nack(0x07);
+  nack(0x07),
+
+  /// Read receipt (recipient has read the message)
+  readReceipt(0x08);
   
   final int value;
   const PacketType(this.value);

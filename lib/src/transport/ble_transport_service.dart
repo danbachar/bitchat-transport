@@ -72,16 +72,25 @@ class BleTransportService extends TransportService {
   /// Current transport state
   TransportState _state = TransportState.uninitialized;
 
+  /// Flag to block packet processing after stop() is called
+  /// This prevents race conditions where packets were already in the event queue
+  bool _stopped = false;
+
   /// Stream controllers
   final _stateController = StreamController<TransportState>.broadcast();
   final _dataController = StreamController<TransportDataEvent>.broadcast();
   final _connectionController = StreamController<TransportConnectionEvent>.broadcast();
 
   // ===== Public callbacks =====
-  
-  /// Called when an application message is received
-  void Function(Uint8List senderPubkey, Uint8List payload)? onMessageReceived;
-  
+
+  /// Called when an application message is received.
+  /// Parameters: messageId, senderPubkey, payload
+  void Function(String messageId, Uint8List senderPubkey, Uint8List payload)?
+      onMessageReceived;
+
+  /// Called when a read receipt is received (message was read by recipient)
+  void Function(String messageId)? onReadReceiptReceived;
+
   /// Called when a new peer connects (after ANNOUNCE)
   void Function(Peer peer)? onPeerConnected;
   
@@ -209,6 +218,9 @@ class BleTransportService extends TransportService {
 
     _log.i('Starting BLE transport');
 
+    // Clear stopped flag to allow packet processing
+    _stopped = false;
+
     // Start advertising first (so others can find us)
     await _peripheral.startAdvertising(localName: localName);
 
@@ -222,6 +234,9 @@ class BleTransportService extends TransportService {
   @override
   Future<void> stop() async {
     _log.i('Stopping BLE transport');
+
+    // Set stopped flag FIRST to block any packets in the event queue
+    _stopped = true;
 
     // Stop scanning for new devices
     await _central.stopScan();
@@ -368,9 +383,40 @@ class BleTransportService extends TransportService {
     }
   }
 
+  /// Send a read receipt for a message.
+  /// The messageId is encoded in the payload.
+  Future<bool> sendReadReceipt({
+    required String messageId,
+    required Uint8List recipientPubkey,
+  }) async {
+    final peerId = getPeerIdForPubkey(recipientPubkey);
+    if (peerId == null) {
+      _log.w('Cannot send read receipt: peer not found');
+      return false;
+    }
+
+    // Encode messageId as payload
+    final payload = Uint8List.fromList(messageId.codeUnits);
+    final packet = BitchatPacket(
+      type: PacketType.readReceipt,
+      senderPubkey: identity.publicKey,
+      recipientPubkey: recipientPubkey,
+      payload: payload,
+      signature: Uint8List(64),
+    );
+
+    return await sendToPeer(peerId, packet.serialize());
+  }
+
   /// Create ANNOUNCE payload
-  Uint8List createAnnouncePayload() {
+  ///
+  /// Format: [pubkey(32) + version(2) + nickLen(1) + nick + addrLen(2) + addr]
+  ///
+  /// The address field is only populated when sending to friends.
+  /// For non-friends or broadcast, addrLen is 0.
+  Uint8List createAnnouncePayload({String? address}) {
     final nicknameBytes = Uint8List.fromList(identity.nickname.codeUnits);
+    final addressBytes = address != null ? Uint8List.fromList(address.codeUnits) : Uint8List(0);
     final buffer = BytesBuilder();
 
     // Pubkey (32 bytes)
@@ -384,6 +430,14 @@ class BleTransportService extends TransportService {
     // Nickname length (1 byte) + nickname
     buffer.addByte(nicknameBytes.length);
     buffer.add(nicknameBytes);
+
+    // Address length (2 bytes) + address
+    final addrLenBytes = ByteData(2);
+    addrLenBytes.setUint16(0, addressBytes.length, Endian.big);
+    buffer.add(addrLenBytes.buffer.asUint8List());
+    if (addressBytes.isNotEmpty) {
+      buffer.add(addressBytes);
+    }
 
     return buffer.toBytes();
   }
@@ -464,6 +518,13 @@ class BleTransportService extends TransportService {
 
   /// Process an incoming packet
   void onPacketReceived(Uint8List data, {String? fromDeviceId, required int rssi}) {
+    // Block processing if BLE has been stopped
+    // This prevents race conditions where packets were already in the event queue
+    if (_stopped) {
+      _log.d('Ignoring packet received after BLE stopped');
+      return;
+    }
+
     try {
       final packet = BitchatPacket.deserialize(data);
       _processPacket(packet, fromDeviceId: fromDeviceId, rssi: rssi);
@@ -498,25 +559,34 @@ class BleTransportService extends TransportService {
 
       case PacketType.ack:
       case PacketType.nack:
-        // ACK/NACK handled by GSG layer
-        onMessageReceived?.call(packet.senderPubkey, packet.payload);
+        // ACK/NACK passed to GSG layer
+        onMessageReceived?.call(
+            packet.packetId, packet.senderPubkey, packet.payload);
+        break;
+
+      case PacketType.readReceipt:
+        // Extract messageId from payload and notify
+        if (packet.payload.isNotEmpty) {
+          final messageId = String.fromCharCodes(packet.payload);
+          onReadReceiptReceived?.call(messageId);
+        }
         break;
     }
   }
 
   void _handleAnnounce(BitchatPacket packet, {String? fromDeviceId, required int rssi}) {
-    final (pubkey, nickname, version) = _decodeAnnounce(packet.payload);
-    
+    final (pubkey, nickname, version, address) = _decodeAnnounce(packet.payload);
+
     // Determine RSSI: prefer our own scanned RSSI over the one from the connection
     // Since both devices run as Central+Peripheral, we likely scanned them too
     int effectiveRssi = rssi;
-    
+
     // First try: lookup by device ID (works when we connected to them)
     DiscoveredPeerState? discoveredPeer;
     if (fromDeviceId != null) {
       discoveredPeer = _peersState.getDiscoveredBlePeer(fromDeviceId);
     }
-    
+
     // Second try: lookup by service UUID (works when they connected to us on iOS)
     // Derive their service UUID from their pubkey
     if (discoveredPeer == null) {
@@ -526,19 +596,17 @@ class BleTransportService extends TransportService {
         _log.d('Found peer by service UUID: $theirServiceUuid');
       }
     }
-    
+
     if (discoveredPeer != null) {
       effectiveRssi = discoveredPeer.rssi;
-      // _log.d('Using our scanned RSSI ($effectiveRssi) instead of connection RSSI ($rssi)');
-    } else {
-      // _log.d('No scanned peer found, using connection RSSI: $rssi');
     }
-    
+
     // Check if peer already exists
     final existingPeer = _peersState.getPeerByPubkey(pubkey);
     final isNew = existingPeer == null;
 
     // Dispatch action to Redux store
+    // If address is provided in ANNOUNCE, it's a friend sharing their libp2p address
     store.dispatch(PeerAnnounceReceivedAction(
       publicKey: pubkey,
       nickname: nickname,
@@ -546,6 +614,7 @@ class BleTransportService extends TransportService {
       rssi: effectiveRssi,
       transport: PeerTransport.bleDirect,
       bleDeviceId: fromDeviceId,
+      libp2pAddress: address,
     ));
 
     // Associate BLE device ID with pubkey
@@ -553,7 +622,7 @@ class BleTransportService extends TransportService {
       associatePeerWithPubkey(fromDeviceId, pubkey);
     }
 
-    _log.i('Peer ${isNew ? "connected" : "updated"}: $nickname at RSSI $effectiveRssi');
+    _log.i('Peer ${isNew ? "connected" : "updated"}: $nickname at RSSI $effectiveRssi${address != null ? " (addr: $address)" : ""}');
 
     // Get the updated peer from store for callbacks
     final updatedPeer = _peersState.getPeerByPubkey(pubkey);
@@ -572,7 +641,8 @@ class BleTransportService extends TransportService {
     // Direct delivery only - no forwarding
     if (_isForUs(packet)) {
       // _log.d('Message received for us');
-      onMessageReceived?.call(packet.senderPubkey, packet.payload);
+      onMessageReceived?.call(
+          packet.packetId, packet.senderPubkey, packet.payload);
     } else {
       // NOT for us - drop it (no forwarding in this layer)
       _log.d('Message not for us, dropping (no forwarding)');
@@ -584,7 +654,7 @@ class BleTransportService extends TransportService {
 
     if (reassembled != null && _isForUs(packet)) {
       _log.d('Fragmented message reassembled');
-      onMessageReceived?.call(packet.senderPubkey, reassembled);
+      onMessageReceived?.call(packet.packetId, packet.senderPubkey, reassembled);
     }
     // If not for us, drop it (no forwarding)
   }
@@ -596,13 +666,40 @@ class BleTransportService extends TransportService {
     return _pubkeyToHex(packet.recipientPubkey!) == _pubkeyToHex(identity.publicKey);
   }
 
-  (Uint8List, String, int) _decodeAnnounce(Uint8List data) {
-    final pubkey = data.sublist(0, 32);
-    final version = ByteData.view(data.buffer, data.offsetInBytes + 32, 2)
+  /// Decode ANNOUNCE payload
+  ///
+  /// Format: [pubkey(32) + version(2) + nickLen(1) + nick + addrLen(2) + addr]
+  /// Returns: (pubkey, nickname, version, address?)
+  (Uint8List, String, int, String?) _decodeAnnounce(Uint8List data) {
+    var offset = 0;
+
+    // Pubkey (32 bytes)
+    final pubkey = data.sublist(offset, offset + 32);
+    offset += 32;
+
+    // Version (2 bytes)
+    final version = ByteData.view(data.buffer, data.offsetInBytes + offset, 2)
         .getUint16(0, Endian.big);
-    final nicknameLength = data[34];
-    final nickname = String.fromCharCodes(data.sublist(35, 35 + nicknameLength));
-    return (Uint8List.fromList(pubkey), nickname, version);
+    offset += 2;
+
+    // Nickname length (1 byte) + nickname
+    final nicknameLength = data[offset];
+    offset += 1;
+    final nickname = String.fromCharCodes(data.sublist(offset, offset + nicknameLength));
+    offset += nicknameLength;
+
+    // Address length (2 bytes) + address (optional - may not exist in old payloads)
+    String? address;
+    if (offset + 2 <= data.length) {
+      final addrLength = ByteData.view(data.buffer, data.offsetInBytes + offset, 2)
+          .getUint16(0, Endian.big);
+      offset += 2;
+      if (addrLength > 0 && offset + addrLength <= data.length) {
+        address = String.fromCharCodes(data.sublist(offset, offset + addrLength));
+      }
+    }
+
+    return (Uint8List.fromList(pubkey), nickname, version, address);
   }
 
   // ===== Peer Management =====

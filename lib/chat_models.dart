@@ -1,22 +1,8 @@
 import 'package:flutter/foundation.dart';
+import 'package:bitchat_transport/src/store/messages_state.dart';
 
-/// Type of chat message content
-enum ChatMessageType {
-  /// Regular text message
-  text,
-
-  /// Friend request sent
-  friendRequestSent,
-
-  /// Friend request received
-  friendRequestReceived,
-
-  /// Friend request accepted by them
-  friendRequestAccepted,
-
-  /// Friend request accepted by us
-  friendRequestAcceptedByUs,
-}
+// Re-export ChatMessageType from messages_state for backwards compatibility
+export 'package:bitchat_transport/src/store/messages_state.dart' show ChatMessageType;
 
 /// A chat message model for the demo app
 class ChatMessage {
@@ -30,6 +16,9 @@ class ChatMessage {
   /// For friendship messages: the libp2p address involved
   final String? libp2pAddress;
 
+  /// Message ID for tracking delivery/read status (outgoing messages only)
+  final String? messageId;
+
   ChatMessage({
     required this.senderPubkeyHex,
     required this.recipientPubkeyHex,
@@ -37,6 +26,7 @@ class ChatMessage {
     required this.isOutgoing,
     this.messageType = ChatMessageType.text,
     this.libp2pAddress,
+    this.messageId,
     DateTime? timestamp,
   }) : timestamp = timestamp ?? DateTime.now();
 

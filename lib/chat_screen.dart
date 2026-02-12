@@ -1,16 +1,18 @@
+import 'dart:async';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:bitchat_transport/bitchat_transport.dart';
+import 'package:redux/redux.dart';
 import 'chat_models.dart';
+import 'package:logger/logger.dart';
 
 /// Chat screen for a conversation with a specific peer
 class ChatScreen extends StatefulWidget {
   final Bitchat bitchat;
   final PeerState peer;
   final Uint8List myPubkey;
-  final MessageStore messageStore;
-  final FriendshipStore? friendshipStore;
+  final Store<AppState> store;
   final VoidCallback? onSendFriendRequest;
   final VoidCallback? onAcceptFriendRequest;
   final VoidCallback? onUnfriend;
@@ -21,8 +23,7 @@ class ChatScreen extends StatefulWidget {
     required this.bitchat,
     required this.peer,
     required this.myPubkey,
-    required this.messageStore,
-    this.friendshipStore,
+    required this.store,
     this.onSendFriendRequest,
     this.onAcceptFriendRequest,
     this.onUnfriend,
@@ -34,14 +35,17 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
+  final Logger _log = Logger();
+
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
+  StreamSubscription<AppState>? _storeSubscription;
 
   String get _peerHex => ChatMessage.pubkeyToHex(widget.peer.publicKey);
   String get _myHex => ChatMessage.pubkeyToHex(widget.myPubkey);
 
-  Friendship? get _friendship =>
-      widget.friendshipStore?.getFriendship(_peerHex);
+  FriendshipState? get _friendship =>
+      widget.store.state.friendships.getFriendship(_peerHex);
   bool get _isFriend => _friendship?.isAccepted ?? false;
   bool get _hasPendingIncoming => _friendship?.isPendingIncoming ?? false;
   bool get _hasPendingOutgoing => _friendship?.isPendingOutgoing ?? false;
@@ -49,28 +53,44 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
-    widget.messageStore.addListener(_onMessagesChanged);
-    widget.friendshipStore?.addListener(_onFriendshipsChanged);
-    // Mark messages as read when opening chat
-    widget.messageStore.markAsRead(_peerHex);
+    // Listen to Redux store for all state updates
+    _storeSubscription =
+        widget.store.onChange.listen((_) => _onStoreChanged());
+    // Mark messages as read and send read receipts when opening chat
+    widget.store.dispatch(MarkMessagesReadAction(_peerHex));
+    _sendReadReceipts();
+  }
+
+  /// Send read receipts for all unread incoming messages
+  void _sendReadReceipts() {
+    final messages = widget.store.state.messages.getConversation(_peerHex);
+    final senderPubkey = widget.peer.publicKey;
+
+    for (final message in messages) {
+      // Only send read receipts for incoming messages with a messageId
+      if (!message.isOutgoing && message.messageId != null) {
+        widget.bitchat.sendReadReceipt(
+          messageId: message.messageId!,
+          senderPubkey: senderPubkey,
+        );
+      }
+    }
   }
 
   @override
   void dispose() {
-    widget.messageStore.removeListener(_onMessagesChanged);
-    widget.friendshipStore?.removeListener(_onFriendshipsChanged);
+    _storeSubscription?.cancel();
     _messageController.dispose();
     _scrollController.dispose();
     super.dispose();
   }
 
-  void _onMessagesChanged() {
-    setState(() {});
-    _scrollToBottom();
-  }
-
-  void _onFriendshipsChanged() {
-    setState(() {});
+  void _onStoreChanged() {
+    // Rebuild to update messages, friendships, and status checkmarks
+    if (mounted) {
+      setState(() {});
+      _scrollToBottom();
+    }
   }
 
   void _sendMessage() async {
@@ -79,20 +99,20 @@ class _ChatScreenState extends State<ChatScreen> {
 
     _messageController.clear();
 
-    // Create outgoing message
-    final message = ChatMessage(
+    // Send via Bitchat using SayBlock - get messageId for tracking
+    final block = SayBlock(content: text);
+    _log.i("Sending '$text' to peer ${widget.peer.displayName}");
+    final messageId =
+        await widget.bitchat.send(widget.peer.publicKey, block.serialize());
+
+    // Save outgoing message to Redux store with messageId for status tracking
+    widget.store.dispatch(SaveChatMessageAction(
       senderPubkeyHex: _myHex,
       recipientPubkeyHex: _peerHex,
       content: text,
       isOutgoing: true,
-    );
-
-    // Store locally and in message store
-    await widget.messageStore.saveMessage(message);
-
-    // Send via Bitchat using SayBlock
-    final block = SayBlock(content: text);
-    await widget.bitchat.send(widget.peer.publicKey, block.serialize());
+      messageId: messageId,
+    ));
 
     _scrollToBottom();
   }
@@ -109,7 +129,7 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
-  void _copyMessage(ChatMessage message) {
+  void _copyMessage(ChatMessageState message) {
     Clipboard.setData(ClipboardData(text: message.content));
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
@@ -119,7 +139,7 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  void _forwardMessage(ChatMessage message) {
+  void _forwardMessage(ChatMessageState message) {
     // Show dialog to select a peer to forward to
     final peers = widget.bitchat.connectedPeers;
 
@@ -149,14 +169,13 @@ class _ChatScreenState extends State<ChatScreen> {
             Uint8List.fromList(message.content.codeUnits),
           );
 
-          // Also save to message store as outgoing
-          final forwardedMessage = ChatMessage(
+          // Also save to Redux store as outgoing
+          widget.store.dispatch(SaveChatMessageAction(
             senderPubkeyHex: _myHex,
             recipientPubkeyHex: ChatMessage.pubkeyToHex(peer.publicKey),
             content: message.content,
             isOutgoing: true,
-          );
-          await widget.messageStore.saveMessage(forwardedMessage);
+          ));
 
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
@@ -171,7 +190,7 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  void _showMessageOptions(ChatMessage message, Offset tapPosition) {
+  void _showMessageOptions(ChatMessageState message, Offset tapPosition) {
     showMenu(
       context: context,
       position: RelativeRect.fromLTRB(
@@ -238,16 +257,18 @@ class _ChatScreenState extends State<ChatScreen> {
           // Friend request banner if pending incoming
           if (_hasPendingIncoming) _buildFriendRequestBanner(),
           Expanded(
-            child: ListView.builder(
-              controller: _scrollController,
-              padding: const EdgeInsets.all(16),
-              itemCount: widget.messageStore.getMessages(_peerHex).length,
-              itemBuilder: (context, index) {
-                final message =
-                    widget.messageStore.getMessages(_peerHex)[index];
-                return _buildMessageWidget(message);
-              },
-            ),
+            child: Builder(builder: (context) {
+              final messages = widget.store.state.messages.getConversation(_peerHex);
+              return ListView.builder(
+                controller: _scrollController,
+                padding: const EdgeInsets.all(16),
+                itemCount: messages.length,
+                itemBuilder: (context, index) {
+                  final message = messages[index];
+                  return _buildMessageWidget(message);
+                },
+              );
+            }),
           ),
           _buildMessageInput(),
         ],
@@ -371,7 +392,7 @@ class _ChatScreenState extends State<ChatScreen> {
           TextButton(
             onPressed: () {
               // Decline
-              widget.friendshipStore?.declineFriendRequest(_peerHex);
+              widget.store.dispatch(DeclineFriendRequestAction(_peerHex));
             },
             child: const Text('Decline'),
           ),
@@ -388,7 +409,7 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _buildMessageWidget(ChatMessage message) {
+  Widget _buildMessageWidget(ChatMessageState message) {
     if (message.isFriendshipMessage) {
       return _FriendshipMessageBubble(
         message: message,
@@ -398,7 +419,38 @@ class _ChatScreenState extends State<ChatScreen> {
     return _MessageBubble(
       message: message,
       onLongPress: (position) => _showMessageOptions(message, position),
+      messagesState: widget.store.state.messages,
+      onResend: message.isOutgoing ? () => _resendMessage(message) : null,
     );
+  }
+
+  Future<void> _resendMessage(ChatMessageState message) async {
+    _log.i("Resending '${message.content}' to peer ${widget.peer.displayName}");
+
+    // Send via Bitchat using SayBlock
+    final block = SayBlock(content: message.content);
+    final messageId =
+        await widget.bitchat.send(widget.peer.publicKey, block.serialize());
+
+    if (!mounted) return;
+
+    if (messageId != null) {
+      // Update the old message's status would be complex, so we just log success
+      _log.i("Resend successful with new messageId: $messageId");
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Message resent'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Failed to resend message'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
   }
 
   void _showPeerInfo() {
@@ -502,12 +554,16 @@ class _ChatScreenState extends State<ChatScreen> {
 }
 
 class _MessageBubble extends StatelessWidget {
-  final ChatMessage message;
+  final ChatMessageState message;
   final void Function(Offset position)? onLongPress;
+  final MessagesState? messagesState;
+  final VoidCallback? onResend;
 
   const _MessageBubble({
     required this.message,
     this.onLongPress,
+    this.messagesState,
+    this.onResend,
   });
 
   @override
@@ -541,23 +597,82 @@ class _MessageBubble extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 4),
-              Text(
-                _formatTime(message.timestamp),
-                style: TextStyle(
-                  fontSize: 10,
-                  color: message.isOutgoing
-                      ? Colors.white70
-                      : Theme.of(context)
-                          .colorScheme
-                          .onSurface
-                          .withOpacity(0.5),
-                ),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    _formatTime(message.timestamp),
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: message.isOutgoing
+                          ? Colors.white70
+                          : Theme.of(context)
+                              .colorScheme
+                              .onSurface
+                              .withValues(alpha: 0.5),
+                    ),
+                  ),
+                  if (message.isOutgoing) ...[
+                    const SizedBox(width: 4),
+                    _buildStatusIcon(context),
+                  ],
+                ],
               ),
             ],
           ),
         ),
       ),
     );
+  }
+
+  Widget _buildStatusIcon(BuildContext context) {
+    // Get message status from store
+    MessageStatus status = MessageStatus.sent;
+    if (message.messageId != null && messagesState != null) {
+      final outgoing = messagesState!.getOutgoingMessage(message.messageId!);
+      status = outgoing?.status ?? MessageStatus.sent;
+    }
+
+    switch (status) {
+      case MessageStatus.sending:
+        // Clock icon (sending)
+        return const Icon(
+          Icons.access_time,
+          size: 14,
+          color: Colors.white70,
+        );
+      case MessageStatus.failed:
+        // Red exclamation (failed) - clickable for resend
+        return GestureDetector(
+          onTap: onResend,
+          child: const Icon(
+            Icons.error_outline,
+            size: 14,
+            color: Colors.redAccent,
+          ),
+        );
+      case MessageStatus.sent:
+        // 1 check (sent)
+        return const Icon(
+          Icons.check,
+          size: 14,
+          color: Colors.white70,
+        );
+      case MessageStatus.delivered:
+        // 2 checks (delivered)
+        return const Icon(
+          Icons.done_all,
+          size: 14,
+          color: Colors.white70,
+        );
+      case MessageStatus.read:
+        // 2 blue checks (read)
+        return const Icon(
+          Icons.done_all,
+          size: 14,
+          color: Colors.blueAccent,
+        );
+    }
   }
 
   String _formatTime(DateTime time) {
@@ -569,7 +684,7 @@ class _MessageBubble extends StatelessWidget {
 
 /// Bottom sheet for selecting a peer to forward message to
 class _ForwardSheet extends StatelessWidget {
-  final ChatMessage message;
+  final ChatMessageState message;
   final List<PeerState> peers;
   final void Function(PeerState peer) onForward;
 
@@ -680,7 +795,7 @@ class _ForwardSheet extends StatelessWidget {
 
 /// Special message bubble for friendship-related messages
 class _FriendshipMessageBubble extends StatelessWidget {
-  final ChatMessage message;
+  final ChatMessageState message;
   final VoidCallback? onAccept;
 
   const _FriendshipMessageBubble({

@@ -46,6 +46,7 @@ dependencies:
   public_ip_address: ^1.2.1
   dart_libp2p: ^0.5.3
   http: ^1.6.0
+  connectivity_plus: ^7.0.0
 
 dev_dependencies:
   flutter_test:

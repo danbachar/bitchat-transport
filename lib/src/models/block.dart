@@ -2,6 +2,9 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 /// Block types for the Bitchat protocol
+///
+/// Note: FriendAnnounce (0x04) was removed - presence is now handled at
+/// the transport layer via unified ANNOUNCE messages.
 enum BlockType {
   /// Regular text message
   say(0x01),
@@ -30,7 +33,9 @@ enum BlockType {
 
   /// Check if value is a valid block type
   static bool isValidType(int value) {
-    return value >= 0x01 && value <= 0x05;
+    // Valid types: 0x01 (say), 0x02 (friendshipOffer), 0x03 (friendshipAccept),
+    // 0x04 (friendAnnounce), 0x05 (friendshipRevoke)
+    return value == 0x01 || value == 0x02 || value == 0x03 || value == 0x04 || value == 0x05;
   }
 }
 
@@ -76,14 +81,20 @@ abstract class Block {
   static Block? tryDeserialize(Uint8List data) {
     try {
       // Check if first byte is a valid block type
-      if (data.isEmpty) return null;
+      if (data.isEmpty) {
+        print('[GEVER]############# 📨 Data is empty!!');
+
+        return null;
+      }
       final typeValue = data[0];
       if (!BlockType.isValidType(typeValue)) {
         // Not a block - treat as legacy plain text
+        print('[GEVER]############# 📨 Data is not a valid block type: $typeValue');
         return null;
       }
       return deserialize(data);
     } catch (e) {
+      print("[GEVER]############# 📨 Failed to deserialize block: $e");
       return null;
     }
   }

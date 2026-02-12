@@ -316,22 +316,22 @@ PeersState peersReducer(PeersState state, dynamic action) {
       final timeSinceLastSeen = now.difference(peer.lastSeen!);
       if (timeSinceLastSeen > action.staleThreshold) {
         if (peer.isFriend) {
-          // Friends are never removed — just clear BLE device (out of range)
+          // Friends are marked as disconnected when stale (no ANNOUNCE received).
+          // Keep libp2pHostId/libp2pHostAddrs for reconnection when they come back.
+          // Clear bleDeviceId (out of BLE range) and libp2pAddress (active connection).
           newMap[key] = PeerState(
             publicKey: peer.publicKey,
             nickname: peer.nickname,
-            connectionState: peer.libp2pAddress != null
-                ? PeerConnectionState.connected
-                : PeerConnectionState.disconnected,
+            connectionState: PeerConnectionState.disconnected,
             transport: peer.transport,
             rssi: -100,
             protocolVersion: peer.protocolVersion,
             lastSeen: peer.lastSeen,
             bleDeviceId: null,
-            libp2pAddress: peer.libp2pAddress,
+            libp2pAddress: null,  // Clear active connection address
             isFriend: true,
-            libp2pHostId: peer.libp2pHostId,
-            libp2pHostAddrs: peer.libp2pHostAddrs,
+            libp2pHostId: peer.libp2pHostId,  // Keep for reconnection
+            libp2pHostAddrs: peer.libp2pHostAddrs,  // Keep for reconnection
           );
         } else {
           staleKeys.add(key);
@@ -423,14 +423,20 @@ PeersState peersReducer(PeersState state, dynamic action) {
     final pubkeyHex = _pubkeyToHex(action.publicKey);
     final existing = state.peers[pubkeyHex];
     if (existing != null) {
-      // Construct directly to clear nullable fields
+      // If peer has no BLE connection, remove them entirely
+      // (they were only reachable via libp2p friendship)
+      if (existing.bleDeviceId == null) {
+        final newMap = Map<String, PeerState>.from(state.peers);
+        newMap.remove(pubkeyHex);
+        return state.copyWith(peers: newMap);
+      }
+
+      // Peer is still nearby via BLE - keep them but clear friend status
       final updated = PeerState(
         publicKey: existing.publicKey,
         nickname: existing.nickname,
-        connectionState: existing.bleDeviceId != null
-            ? existing.connectionState
-            : PeerConnectionState.disconnected,
-        transport: existing.transport,
+        connectionState: PeerConnectionState.connected,
+        transport: PeerTransport.bleDirect, // Reset to BLE
         rssi: existing.rssi,
         protocolVersion: existing.protocolVersion,
         lastSeen: existing.lastSeen,
