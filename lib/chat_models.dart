@@ -50,7 +50,7 @@ class ChatMessage {
   factory ChatMessage.friendRequestSent({
     required String senderPubkeyHex,
     required String recipientPubkeyHex,
-    required String libp2pAddress,
+    String? libp2pAddress,
     String? message,
   }) =>
       ChatMessage(
@@ -66,7 +66,7 @@ class ChatMessage {
   factory ChatMessage.friendRequestReceived({
     required String senderPubkeyHex,
     required String recipientPubkeyHex,
-    required String libp2pAddress,
+    String? libp2pAddress,
     String? message,
   }) =>
       ChatMessage(
@@ -82,7 +82,7 @@ class ChatMessage {
   factory ChatMessage.friendRequestAccepted({
     required String senderPubkeyHex,
     required String recipientPubkeyHex,
-    required String libp2pAddress,
+    String? libp2pAddress,
   }) =>
       ChatMessage(
         senderPubkeyHex: senderPubkeyHex,

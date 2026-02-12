@@ -162,7 +162,10 @@ class Bitchat {
   
   /// Called when transport status changes
   void Function(TransportStatus status)? onStatusChanged;
-  
+
+  /// Called when libp2p transport becomes available
+  void Function()? onLibp2pInitialized;
+
   // ===== Convenience accessors for Redux state =====
   
   PeersState get _peersState => store.state.peers;
@@ -354,9 +357,10 @@ class Bitchat {
       
       // Wire up callbacks
       _setupLibp2pServiceCallbacks();
-      
+
       _libp2pAvailable = true;
       _log.i('libp2p transport initialized successfully');
+      onLibp2pInitialized?.call();
       return true;
     } catch (e, stack) {
       _log.e('Failed to initialize libp2p transport: $e');

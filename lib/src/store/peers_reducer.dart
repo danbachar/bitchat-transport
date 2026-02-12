@@ -366,7 +366,23 @@ PeersState peersReducer(PeersState state, dynamic action) {
     final pubkeyHex = _pubkeyToHex(action.publicKey);
     final existing = state.peers[pubkeyHex];
     if (existing != null) {
-      final updated = existing.copyWith(libp2pAddress: action.address);
+      // Parse address to extract hostId and baseAddr
+      String? libp2pHostId;
+      List<String>? libp2pHostAddrs;
+
+      if (action.address.isNotEmpty) {
+        final parts = action.address.split('/p2p/');
+        if (parts.length == 2) {
+          libp2pHostId = parts[1];
+          libp2pHostAddrs = [parts[0]];
+        }
+      }
+
+      final updated = existing.copyWith(
+        libp2pAddress: action.address.isEmpty ? null : action.address,
+        libp2pHostId: libp2pHostId,
+        libp2pHostAddrs: libp2pHostAddrs,
+      );
       return state.copyWith(
         peers: Map.from(state.peers)..[pubkeyHex] = updated,
       );
@@ -379,17 +395,10 @@ PeersState peersReducer(PeersState state, dynamic action) {
   if (action is FriendEstablishedAction) {
     final pubkeyHex = _pubkeyToHex(action.publicKey);
     final existing = state.peers[pubkeyHex];
-    final libp2pAddress = action.libp2pHostAddrs.isNotEmpty
-        ? '${action.libp2pHostAddrs.first}/p2p/${action.libp2pHostId}'
-        : null;
 
     if (existing != null) {
       final updated = existing.copyWith(
         isFriend: true,
-        libp2pHostId: action.libp2pHostId,
-        libp2pHostAddrs: action.libp2pHostAddrs,
-        libp2pAddress: libp2pAddress ?? existing.libp2pAddress,
-        connectionState: PeerConnectionState.connected,
         nickname: action.nickname ?? existing.nickname,
       );
       return state.copyWith(
@@ -400,13 +409,9 @@ PeersState peersReducer(PeersState state, dynamic action) {
       final newPeer = PeerState(
         publicKey: action.publicKey,
         nickname: action.nickname ?? '',
-        connectionState: PeerConnectionState.connected,
-        transport: PeerTransport.libp2p,
+        connectionState: PeerConnectionState.discovered,
         lastSeen: DateTime.now(),
         isFriend: true,
-        libp2pHostId: action.libp2pHostId,
-        libp2pHostAddrs: action.libp2pHostAddrs,
-        libp2pAddress: libp2pAddress,
       );
       return state.copyWith(
         peers: Map.from(state.peers)..[pubkeyHex] = newPeer,

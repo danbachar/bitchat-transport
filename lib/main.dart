@@ -270,6 +270,8 @@ class _BitchatHomeState extends State<BitchatHome>
         _handleIncomingMessage(senderPubkey, payload);
       };
 
+      bitchat.onLibp2pInitialized = _onLibp2pBecameAvailable;
+
       // bitchat.onPeerConnected = (peer) {
       //   print('Peer connected: ${peer.displayName}');
       //   // PeerStore already has the peer - just track nickname changes
@@ -314,24 +316,45 @@ class _BitchatHomeState extends State<BitchatHome>
   }
 
   /// Hydrate Redux store with friends from persistent FriendshipStore
-  /// and attempt to reconnect to each friend via libp2p.
+  /// and attempt to reconnect to each friend via libp2p if available.
   Future<void> _hydrateFriendsFromStore() async {
     for (final friendship in _friendshipStore.friends) {
-      if (friendship.libp2pHostId != null) {
-        final pubkey = ChatMessage.hexToPubkey(friendship.peerPubkeyHex);
-        appStore.dispatch(FriendEstablishedAction(
+      final pubkey = ChatMessage.hexToPubkey(friendship.peerPubkeyHex);
+
+      // Establish friendship in Redux
+      appStore.dispatch(FriendEstablishedAction(
+        publicKey: pubkey,
+        nickname: friendship.nickname,
+      ));
+
+      // If friend has libp2p info, associate it and attempt connection
+      if (friendship.libp2pAddress != null && friendship.libp2pAddress!.isNotEmpty) {
+        appStore.dispatch(AssociateLibp2pAddressAction(
           publicKey: pubkey,
-          libp2pHostId: friendship.libp2pHostId!,
-          libp2pHostAddrs: friendship.libp2pHostAddrs ?? [],
-          nickname: friendship.nickname,
+          address: friendship.libp2pAddress!,
         ));
-        // Reconnect to each friend (best effort)
-        await _bitchat?.connectToLibp2pHost(
-          hostId: friendship.libp2pHostId!,
-          hostAddrs: friendship.libp2pHostAddrs ?? [],
-        );
+
+        // Attempt to reconnect if libp2p is available
+        if (friendship.libp2pHostId != null && friendship.libp2pHostAddrs != null) {
+          await _bitchat?.connectToLibp2pHost(
+            hostId: friendship.libp2pHostId!,
+            hostAddrs: friendship.libp2pHostAddrs!,
+          );
+        }
       }
     }
+  }
+
+  /// Called when libp2p becomes available (initialized or toggled on)
+  Future<void> _onLibp2pBecameAvailable() async {
+    _log.i('libp2p initialized - broadcasting address to friends');
+
+    // Send immediate FriendAnnounce with our new libp2p address
+    // (instead of waiting for the next 10-second cycle)
+    // The _myLibp2pAddress getter will automatically get the new address from _bitchat
+    await _announceToFriends();
+
+    // Friends will receive FriendAnnounce with libp2pAddress and connect
   }
 
   /// Start periodic announcements to friends
@@ -346,33 +369,24 @@ class _BitchatHomeState extends State<BitchatHome>
   }
 
   /// Send FriendAnnounce block to all friends
+  /// Always sends announce, with or without libp2p address
   Future<void> _announceToFriends() async {
-    if (_bitchat == null || _identity == null || _myLibp2pAddress == null)
-      return;
+    if (_bitchat == null || _identity == null) return;
 
     final friends = _friendshipStore.friends;
     if (friends.isEmpty) return;
 
+    // Create announce block - libp2pAddress is null if libp2p unavailable
     final block = FriendAnnounceBlock(
-      libp2pAddress: _myLibp2pAddress!,
+      libp2pAddress: _myLibp2pAddress,  // Can be null
       nickname: _identity!.nickname,
-      isOnline: true,
     );
     final data = block.serialize();
 
     for (final friend in friends) {
       final pubkey = ChatMessage.hexToPubkey(friend.peerPubkeyHex);
-      // Try to send via BLE if peer is nearby
-      final peer = _peers.values
-          .where((p) =>
-              ChatMessage.pubkeyToHex(p.publicKey) == friend.peerPubkeyHex)
-          .firstOrNull;
-
-      if (peer != null &&
-          peer.connectionState == PeerConnectionState.connected) {
-        await _bitchat!.send(pubkey, data);
-      }
-      // TODO: Also send via libp2p if friend has libp2p address
+      // Try to send via BLE first, then libp2p
+      await _bitchat!.send(pubkey, data);
     }
   }
 
@@ -460,36 +474,20 @@ class _BitchatHomeState extends State<BitchatHome>
     FriendshipOfferBlock block,
     String senderName,
   ) async {
-    // Record the friend request with host info for later connection
+    // Record the friend request
     final friendship = await _friendshipStore.receiveFriendRequest(
       peerPubkeyHex: senderHex,
-      libp2pAddress: block.fullAddress,
-      libp2pHostId: block.hostId,
-      libp2pHostAddrs: block.hostAddrs,
       nickname: senderName,
       message: block.message,
     );
 
     final pubkey = ChatMessage.hexToPubkey(senderHex);
 
-    if (friendship.isAccepted && block.hostId.isNotEmpty) {
-      // Auto-accepted (mutual friend requests) — establish friendship in Redux
+    // If auto-accepted (mutual friend requests), establish friendship in Redux
+    if (friendship.isAccepted) {
       appStore.dispatch(FriendEstablishedAction(
         publicKey: pubkey,
-        libp2pHostId: block.hostId,
-        libp2pHostAddrs: block.hostAddrs,
         nickname: senderName,
-      ));
-      // Connect to the peer
-      await _bitchat?.connectToLibp2pHost(
-        hostId: block.hostId,
-        hostAddrs: block.hostAddrs,
-      );
-    } else {
-      // Not yet accepted — just associate the address if peer exists in Redux
-      appStore.dispatch(AssociateLibp2pAddressAction(
-        publicKey: pubkey,
-        address: block.fullAddress,
       ));
     }
 
@@ -497,7 +495,6 @@ class _BitchatHomeState extends State<BitchatHome>
     final chatMessage = ChatMessage.friendRequestReceived(
       senderPubkeyHex: senderHex,
       recipientPubkeyHex: myHex,
-      libp2pAddress: block.fullAddress,
       message: block.message,
     );
     await _messageStore.saveMessage(chatMessage);
@@ -506,6 +503,8 @@ class _BitchatHomeState extends State<BitchatHome>
     if (friendship.status == FriendshipStatus.received) {
       await _showFriendRequestNotification(senderHex, senderName);
     }
+
+    // libp2p connection will be established when FriendAnnounce is received
   }
 
   Future<void> _handleFriendshipAccept(
@@ -515,45 +514,18 @@ class _BitchatHomeState extends State<BitchatHome>
     String senderName,
   ) async {
     debugPrint('🤝 _handleFriendshipAccept from $senderName ($senderHex)');
-    debugPrint('🤝 hostId: ${block.hostId}');
-    debugPrint('🤝 hostAddrs: ${block.hostAddrs}');
 
-    // Try to connect to the accepter using their host info
-    String? successfulAddress;
-    if (_bitchat != null && block.hostId.isNotEmpty && block.hostAddrs.isNotEmpty) {
-      debugPrint('🤝 Attempting libp2p connection...');
-      successfulAddress = await _bitchat!.connectToLibp2pHost(
-        hostId: block.hostId,
-        hostAddrs: block.hostAddrs,
-      );
-      if (successfulAddress != null) {
-        debugPrint('🤝 Successfully connected to friend $senderName via libp2p at $successfulAddress');
-      } else {
-        debugPrint('🤝 Could not connect to peer $senderHex via libp2p (will use BLE)');
-      }
-    }
-
-    // Use the successful address if available, otherwise fall back to fullAddress
-    final libp2pAddress = successfulAddress != null
-        ? '$successfulAddress/p2p/${block.hostId}'
-        : block.fullAddress;
-
-    // Update friendship status with host info
+    // Update friendship status
     await _friendshipStore.processFriendshipAccept(
       peerPubkeyHex: senderHex,
-      libp2pAddress: libp2pAddress,
-      libp2pHostId: block.hostId,
-      libp2pHostAddrs: block.hostAddrs,
       nickname: senderName,
     );
-    debugPrint('🤝 Friendship status updated with address: $libp2pAddress');
+    debugPrint('🤝 Friendship status updated');
 
-    // Establish friendship in Redux store with libp2p host info
+    // Establish friendship in Redux store
     final pubkey = ChatMessage.hexToPubkey(senderHex);
     appStore.dispatch(FriendEstablishedAction(
       publicKey: pubkey,
-      libp2pHostId: block.hostId,
-      libp2pHostAddrs: block.hostAddrs,
       nickname: senderName,
     ));
 
@@ -561,21 +533,66 @@ class _BitchatHomeState extends State<BitchatHome>
     final chatMessage = ChatMessage.friendRequestAccepted(
       senderPubkeyHex: senderHex,
       recipientPubkeyHex: myHex,
-      libp2pAddress: libp2pAddress,
     );
     await _messageStore.saveMessage(chatMessage);
     debugPrint('🤝 Chat message saved');
+
+    // libp2p connection will be established when FriendAnnounce is received
   }
 
   Future<void> _handleFriendAnnounce(
       String senderHex, FriendAnnounceBlock block) async {
-    // Update friend's online status
+    final pubkey = ChatMessage.hexToPubkey(senderHex);
+
+    // Update friend's online status and libp2p address in persistent storage
     await _friendshipStore.updateOnlineStatus(
       peerPubkeyHex: senderHex,
-      isOnline: block.isOnline,
-      libp2pAddress: block.libp2pAddress,
+      isOnline: true,  // Receiving announce means they're online
+      libp2pAddress: block.libp2pAddress,  // Can be null
       nickname: block.nickname,
     );
+
+    // Update Redux state - ALWAYS, not just when there's an address
+    final peerState = appStore.state.peers.getPeerByPubkey(pubkey);
+    if (peerState != null && peerState.isFriend) {
+      if (block.libp2pAddress != null) {
+        // Friend has libp2p address - update Redux and establish connection
+        appStore.dispatch(AssociateLibp2pAddressAction(
+          publicKey: pubkey,
+          address: block.libp2pAddress!,
+        ));
+
+        // Parse address and attempt connection
+        final libp2pParts = _parseLibp2pAddress(block.libp2pAddress!);
+        if (libp2pParts != null && _bitchat != null) {
+          final (hostId, baseAddr) = libp2pParts;
+          await _bitchat!.connectToLibp2pHost(
+            hostId: hostId,
+            hostAddrs: [baseAddr],
+          );
+        }
+      } else {
+        // Friend no longer has libp2p address (disabled libp2p)
+        // Clear the address and disconnect if connected via libp2p
+        appStore.dispatch(AssociateLibp2pAddressAction(
+          publicKey: pubkey,
+          address: '',  // Empty string clears
+        ));
+
+        // TODO: Disconnect libp2p connection if one exists
+        // _bitchat?.disconnectFromLibp2pHost(hostId);
+      }
+    }
+  }
+
+  /// Parse libp2p multiaddress into (hostId, baseAddr)
+  /// Example: /ip6/::1/udp/12345/p2p/QmHostId → (QmHostId, /ip6/::1/udp/12345)
+  (String, String)? _parseLibp2pAddress(String libp2pAddress) {
+    final parts = libp2pAddress.split('/p2p/');
+    if (parts.length == 2) {
+      return (parts[1], parts[0]);
+    }
+    return null;
   }
 
   /// Handle being unfriended by someone
@@ -695,11 +712,11 @@ class _BitchatHomeState extends State<BitchatHome>
   }
 
   Future<void> _sendFriendRequest(PeerState peer) async {
-    if (_bitchat == null || _identity == null || !_hasLibp2pHost) {
+    if (_bitchat == null || _identity == null) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Cannot send friend request: LibP2P not ready'),
+            content: Text('Cannot send friend request'),
             duration: Duration(seconds: 2),
           ),
         );
@@ -716,10 +733,8 @@ class _BitchatHomeState extends State<BitchatHome>
       nickname: peer.displayName,
     );
 
-    // Create the friendship offer block with our host info
+    // Create the friendship offer block (no libp2p info)
     final block = FriendshipOfferBlock(
-      hostId: _myLibp2pHostId!,
-      hostAddrs: _myLibp2pHostAddrs,
       message: 'Hey, let\'s be friends!',
     );
 
@@ -730,7 +745,7 @@ class _BitchatHomeState extends State<BitchatHome>
     final chatMessage = ChatMessage.friendRequestSent(
       senderPubkeyHex: myHex,
       recipientPubkeyHex: peerHex,
-      libp2pAddress: _myLibp2pAddress!,
+      libp2pAddress: _myLibp2pAddress,  // Can be null
     );
     await _messageStore.saveMessage(chatMessage);
 
@@ -745,11 +760,11 @@ class _BitchatHomeState extends State<BitchatHome>
   }
 
   Future<void> _acceptFriendRequest(PeerState peer) async {
-    if (_bitchat == null || _identity == null || !_hasLibp2pHost) {
+    if (_bitchat == null || _identity == null) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Cannot accept friend request: LibP2P not ready'),
+            content: Text('Cannot accept friend request'),
             duration: Duration(seconds: 2),
           ),
         );
@@ -760,32 +775,21 @@ class _BitchatHomeState extends State<BitchatHome>
     final peerHex = peer.pubkeyHex;
     final myHex = ChatMessage.pubkeyToHex(_identity!.publicKey);
 
-    // Accept the friend request in the store FIRST
+    // Accept the friend request in the store
     await _friendshipStore.acceptFriendRequest(
       peerPubkeyHex: peerHex,
-      myLibp2pAddress: _myLibp2pAddress!,
     );
 
-    // Get friendship info to establish in Redux BEFORE sending
-    final friendship = _friendshipStore.getFriendship(peerHex);
-    if (friendship != null && friendship.libp2pHostId != null && friendship.libp2pHostAddrs != null) {
-      // Establish friendship in Redux FIRST so send() has the libp2p address
-      appStore.dispatch(FriendEstablishedAction(
-        publicKey: peer.publicKey,
-        libp2pHostId: friendship.libp2pHostId!,
-        libp2pHostAddrs: friendship.libp2pHostAddrs!,
-        nickname: peer.displayName,
-      ));
-    }
+    // Establish friendship in Redux
+    appStore.dispatch(FriendEstablishedAction(
+      publicKey: peer.publicKey,
+      nickname: peer.displayName,
+    ));
 
-    // Create the friendship accept block with our host info
-    final block = FriendshipAcceptBlock(
-      hostId: _myLibp2pHostId!,
-      hostAddrs: _myLibp2pHostAddrs,
-    );
+    // Create the friendship accept block (no libp2p info)
+    final block = FriendshipAcceptBlock();
 
-    // Send via Bitchat (works over BLE or libp2p)
-    // Now the peer has libp2pAddress set from FriendEstablishedAction above
+    // Send via Bitchat (works over BLE)
     final sendSuccess = await _bitchat!.send(peer.publicKey, block.serialize());
     if (!sendSuccess) {
       debugPrint('⚠️ Failed to send friendship accept to ${peer.displayName}');
@@ -798,40 +802,7 @@ class _BitchatHomeState extends State<BitchatHome>
     );
     await _messageStore.saveMessage(chatMessage);
 
-    // Try to connect to the requester using their host info (best effort)
-    if (friendship != null && friendship.libp2pHostId != null && friendship.libp2pHostAddrs != null) {
-      final successfulAddress = await _bitchat!.connectToLibp2pHost(
-        hostId: friendship.libp2pHostId!,
-        hostAddrs: friendship.libp2pHostAddrs!,
-      );
-      if (successfulAddress != null) {
-        debugPrint('Successfully connected to friend ${peer.displayName} via libp2p at $successfulAddress');
-        final fullAddress = '$successfulAddress/p2p/${friendship.libp2pHostId}';
-        await _friendshipStore.updateOnlineStatus(
-          peerPubkeyHex: peerHex,
-          isOnline: true,
-          libp2pAddress: fullAddress,
-        );
-      } else {
-        debugPrint('Could not connect to peer $peerHex via libp2p (will use BLE)');
-      }
-    }
-
-    // if (mounted) {
-    //   ScaffoldMessenger.of(context).showSnackBar(
-    //     SnackBar(
-    //       content: Row(
-    //         children: [
-    //           const Icon(Icons.check_circle, color: Colors.green),
-    //           const SizedBox(width: 8),
-    //           Expanded(
-    //               child: Text('You are now friends with ${peer.displayName}!')),
-    //         ],
-    //       ),
-    //       duration: const Duration(seconds: 2),
-    //     ),
-    //   );
-    // }
+    // libp2p connection will be established when FriendAnnounce is received
   }
 
   Future<void> _declineFriendRequest(String peerHex) async {

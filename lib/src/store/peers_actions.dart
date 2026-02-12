@@ -192,17 +192,13 @@ class AssociateLibp2pAddressAction extends PeerAction {
 
 // ===== Friendship Actions =====
 
-/// A friendship has been established - mark peer as friend with libp2p info
+/// A friendship has been established - mark peer as friend
 class FriendEstablishedAction extends PeerAction {
   final Uint8List publicKey;
-  final String libp2pHostId;
-  final List<String> libp2pHostAddrs;
   final String? nickname;
 
   FriendEstablishedAction({
     required this.publicKey,
-    required this.libp2pHostId,
-    required this.libp2pHostAddrs,
     this.nickname,
   });
 }
