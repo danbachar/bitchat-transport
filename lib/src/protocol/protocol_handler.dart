@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:typed_data';
+import 'package:cryptography/cryptography.dart';
 import 'package:bitchat_transport/src/models/identity.dart';
 import 'package:bitchat_transport/src/models/packet.dart';
 
@@ -60,7 +61,7 @@ class ProtocolHandler {
       senderPubkey: identity.publicKey,
       recipientPubkey: recipientPubkey,
       payload: payload,
-      signature: Uint8List(64), // TODO: Sign packet
+      signature: Uint8List(64), // Caller must sign before sending
     );
   }
 
@@ -75,7 +76,7 @@ class ProtocolHandler {
       senderPubkey: identity.publicKey,
       recipientPubkey: recipientPubkey,
       payload: payload,
-      signature: Uint8List(64), // TODO: Sign packet
+      signature: Uint8List(64), // Caller must sign before sending
     );
   }
 
@@ -127,17 +128,52 @@ class ProtocolHandler {
     return utf8.decode(payload);
   }
 
-  // ===== Validation (TODO) =====
-
-  /// Verify packet signature
-  Future<bool> verifyPacket(BitchatPacket packet) async {
-    // TODO: Implement signature verification when encryption is added
-    return true;
+  /// Create ACK packet (for delivery confirmation)
+  BitchatPacket createAckPacket({
+    required String messageId,
+    Uint8List? recipientPubkey,
+  }) {
+    final payload = utf8.encode(messageId);
+    return BitchatPacket(
+      type: PacketType.ack,
+      senderPubkey: identity.publicKey,
+      recipientPubkey: recipientPubkey,
+      payload: payload,
+      signature: Uint8List(64), // Caller must sign before sending
+    );
   }
 
-  /// Sign packet
+  // ===== Signing & Verification =====
+
+  /// Sign a packet with the identity's Ed25519 private key.
+  ///
+  /// Mutates [packet.signature] in place.
   Future<void> signPacket(BitchatPacket packet) async {
-    // TODO: Implement packet signing when encryption is added
+    final algorithm = Ed25519();
+    final signableBytes = packet.getSignableBytes();
+    final signature = await algorithm.sign(signableBytes, keyPair: identity.keyPair);
+    packet.signature = Uint8List.fromList(signature.bytes);
+  }
+
+  /// Verify a packet's Ed25519 signature against the sender's public key.
+  ///
+  /// Returns true if the signature is valid.
+  Future<bool> verifyPacket(BitchatPacket packet) async {
+    try {
+      final algorithm = Ed25519();
+      final signableBytes = packet.getSignableBytes();
+      final publicKey = SimplePublicKey(
+        packet.senderPubkey,
+        type: KeyPairType.ed25519,
+      );
+      final signature = Signature(
+        packet.signature,
+        publicKey: publicKey,
+      );
+      return await algorithm.verify(signableBytes, signature: signature);
+    } catch (e) {
+      return false;
+    }
   }
 }
 

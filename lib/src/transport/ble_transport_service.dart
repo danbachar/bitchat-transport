@@ -11,7 +11,6 @@ import '../models/identity.dart';
 import '../models/packet.dart';
 import '../models/peer.dart';
 import '../store/store.dart';
-import '../mesh/bloom_filter.dart';  // TODO: Move to utils/
 
 /// Default display info for BLE transport
 const _defaultBleDisplayInfo = TransportDisplayInfo(
@@ -50,7 +49,7 @@ class BleTransportService extends TransportService {
 
   /// Our identity
   final BitchatIdentity identity;
-  
+
   /// Redux store for state management
   final Store<AppState> store;
 
@@ -59,15 +58,6 @@ class BleTransportService extends TransportService {
 
   /// Peripheral service (advertiser)
   late final BlePeripheralService _peripheral;
-
-  /// Bloom filter for packet deduplication
-  final BloomFilter _seenPackets = BloomFilter();
-
-  /// Fragment handler for large messages
-  final _SimpleFragmentHandler _fragmentHandler = _SimpleFragmentHandler();
-
-  /// Protocol version for ANNOUNCE
-  static const int protocolVersion = 1;
 
   /// Current transport state
   TransportState _state = TransportState.uninitialized;
@@ -83,21 +73,12 @@ class BleTransportService extends TransportService {
 
   // ===== Public callbacks =====
 
-  /// Called when an application message is received.
-  /// Parameters: messageId, senderPubkey, payload
-  void Function(String messageId, Uint8List senderPubkey, Uint8List payload)?
-      onMessageReceived;
+  /// Called when a BLE packet is deserialized and ready for routing.
+  /// The coordinator wires this to MessageRouter.processPacket().
+  void Function(BitchatPacket packet, {String? bleDeviceId, int rssi})?
+      onBlePacketReceived;
 
-  /// Called when a read receipt is received (message was read by recipient)
-  void Function(String messageId)? onReadReceiptReceived;
-
-  /// Called when a new peer connects (after ANNOUNCE)
-  void Function(Peer peer)? onPeerConnected;
-  
-  /// Called when an existing peer sends an ANNOUNCE update
-  void Function(Peer peer)? onPeerUpdated;
-  
-  /// Called when a peer disconnects
+  /// Called when a peer disconnects at the BLE level.
   void Function(Peer peer)? onPeerDisconnected;
   
   // ===== Convenience getters for Redux state =====
@@ -134,18 +115,6 @@ class BleTransportService extends TransportService {
 
   @override
   Stream<TransportConnectionEvent> get connectionStream => _connectionController.stream;
-
-  /// @deprecated Use store.state.peers.discoveredBlePeersList instead
-  @override
-  Stream<TransportDiscoveryEvent> get discoveryStream => const Stream.empty();
-
-  /// @deprecated Use store.state.peers.discoveredBlePeersList instead
-  @override
-  List<TransportPeer> get peers => [];
-
-  /// @deprecated Use store.state.peers.connectedPeers instead
-  @override
-  List<TransportPeer> get connectedPeers => [];
 
   @override
   int get connectedCount => _central.connectedCount + _peripheral.connectedCount;
@@ -321,8 +290,6 @@ class BleTransportService extends TransportService {
     await _central.dispose();
     await _peripheral.dispose();
 
-    _fragmentHandler.dispose();
-
     await _stateController.close();
     await _dataController.close();
     await _connectionController.close();
@@ -330,196 +297,12 @@ class BleTransportService extends TransportService {
     _setState(TransportState.disposed);
   }
 
-  // ===== Messaging =====
-
-  /// Send a message directly to a specific peer.
+  /// Process an incoming raw BLE packet.
   ///
-  /// Returns true if sent successfully, false if peer is offline.
-  /// NO forwarding - direct delivery only.
-  Future<bool> sendMessage({
-    required Uint8List payload,
-    required Uint8List recipientPubkey,
-  }) async {
-    // Create packet and check if serialized size exceeds BLE MTU
-    final packet = _createMessagePacket(payload, recipientPubkey);
-    final serialized = packet.serialize();
-
-    if (serialized.length > _SimpleFragmentHandler.bleMaxPacketSize) {
-      return _sendFragmented(payload: payload, recipientPubkey: recipientPubkey);
-    }
-
-    return _sendPacket(packet, recipientPubkey);
-  }
-
-  /// Broadcast a message to all connected peers.
-  Future<void> broadcastMessage({required Uint8List payload}) async {
-    final packet = _createMessagePacket(payload, null);
-    final serialized = packet.serialize();
-
-    if (serialized.length > _SimpleFragmentHandler.bleMaxPacketSize) {
-      await _broadcastFragmented(payload: payload);
-      return;
-    }
-
-    _seenPackets.add(packet.packetId);
-    await broadcast(serialized);
-  }
-
-  /// Send ANNOUNCE to a specific peer
-  Future<void> sendAnnounce(Uint8List peerPubkey) async {
-    final payload = createAnnouncePayload();
-    final packet = BitchatPacket(
-      type: PacketType.announce,
-      senderPubkey: identity.publicKey,
-      recipientPubkey: peerPubkey,
-      payload: payload,
-      signature: Uint8List(64),
-    );
-
-    final peerId = getPeerIdForPubkey(peerPubkey);
-    if (peerId != null) {
-      final data = packet.serialize();
-      await sendToPeer(peerId, data);
-    }
-  }
-
-  /// Send a read receipt for a message.
-  /// The messageId is encoded in the payload.
-  Future<bool> sendReadReceipt({
-    required String messageId,
-    required Uint8List recipientPubkey,
-  }) async {
-    final peerId = getPeerIdForPubkey(recipientPubkey);
-    if (peerId == null) {
-      _log.w('Cannot send read receipt: peer not found');
-      return false;
-    }
-
-    // Encode messageId as payload
-    final payload = Uint8List.fromList(messageId.codeUnits);
-    final packet = BitchatPacket(
-      type: PacketType.readReceipt,
-      senderPubkey: identity.publicKey,
-      recipientPubkey: recipientPubkey,
-      payload: payload,
-      signature: Uint8List(64),
-    );
-
-    return await sendToPeer(peerId, packet.serialize());
-  }
-
-  /// Create ANNOUNCE payload
-  ///
-  /// Format: [pubkey(32) + version(2) + nickLen(1) + nick + addrLen(2) + addr]
-  ///
-  /// The address field is only populated when sending to friends.
-  /// For non-friends or broadcast, addrLen is 0.
-  Uint8List createAnnouncePayload({String? address}) {
-    final nicknameBytes = Uint8List.fromList(identity.nickname.codeUnits);
-    final addressBytes = address != null ? Uint8List.fromList(address.codeUnits) : Uint8List(0);
-    final buffer = BytesBuilder();
-
-    // Pubkey (32 bytes)
-    buffer.add(identity.publicKey);
-
-    // Protocol version (2 bytes)
-    final versionBytes = ByteData(2);
-    versionBytes.setUint16(0, protocolVersion, Endian.big);
-    buffer.add(versionBytes.buffer.asUint8List());
-
-    // Nickname length (1 byte) + nickname
-    buffer.addByte(nicknameBytes.length);
-    buffer.add(nicknameBytes);
-
-    // Address length (2 bytes) + address
-    final addrLenBytes = ByteData(2);
-    addrLenBytes.setUint16(0, addressBytes.length, Endian.big);
-    buffer.add(addrLenBytes.buffer.asUint8List());
-    if (addressBytes.isNotEmpty) {
-      buffer.add(addressBytes);
-    }
-
-    return buffer.toBytes();
-  }
-
-  // ===== Internal Packet Handling =====
-
-  BitchatPacket _createMessagePacket(Uint8List payload, Uint8List? recipientPubkey) {
-    return BitchatPacket(
-      type: PacketType.message,
-      senderPubkey: identity.publicKey,
-      recipientPubkey: recipientPubkey,
-      payload: payload,
-      signature: Uint8List(64), // TODO: Sign packet
-    );
-  }
-
-  Future<bool> _sendPacket(BitchatPacket packet, Uint8List recipientPubkey) async {
-    _seenPackets.add(packet.packetId);
-
-    if (!isPeerReachable(recipientPubkey)) {
-      _log.d('Peer offline, cannot send message');
-      return false;
-    }
-
-    final peerId = getPeerIdForPubkey(recipientPubkey);
-    if (peerId == null) {
-      _log.w('No peer ID found for pubkey');
-      return false;
-    }
-
-    final data = packet.serialize();
-    return await sendToPeer(peerId, data);
-  }
-
-  Future<bool> _sendFragmented({
-    required Uint8List payload,
-    required Uint8List recipientPubkey,
-  }) async {
-    final fragments = _fragmentHandler.fragment(
-      payload: payload,
-      senderPubkey: identity.publicKey,
-      recipientPubkey: recipientPubkey,
-    );
-
-    final peerId = getPeerIdForPubkey(recipientPubkey);
-    if (peerId == null) {
-      _log.w('No peer ID found for pubkey, cannot send fragments');
-      return false;
-    }
-
-    var success = true;
-    for (final fragment in fragments) {
-      _seenPackets.add(fragment.packetId);
-
-      final data = fragment.serialize();
-      final sent = await sendToPeer(peerId, data);
-      if (!sent) success = false;
-
-      await Future.delayed(_SimpleFragmentHandler.fragmentDelay);
-    }
-
-    return success;
-  }
-
-  Future<void> _broadcastFragmented({required Uint8List payload}) async {
-    final fragments = _fragmentHandler.fragment(
-      payload: payload,
-      senderPubkey: identity.publicKey,
-    );
-
-    for (final fragment in fragments) {
-      _seenPackets.add(fragment.packetId);
-      final data = fragment.serialize();
-      await broadcast(data);
-      await Future.delayed(_SimpleFragmentHandler.fragmentDelay);
-    }
-  }
-
-  /// Process an incoming packet
+  /// Deserializes and forwards to the MessageRouter via [onBlePacketReceived].
+  /// The router handles dedup, ANNOUNCE processing, message targeting, etc.
   void onPacketReceived(Uint8List data, {String? fromDeviceId, required int rssi}) {
     // Block processing if BLE has been stopped
-    // This prevents race conditions where packets were already in the event queue
     if (_stopped) {
       _log.d('Ignoring packet received after BLE stopped');
       return;
@@ -527,179 +310,10 @@ class BleTransportService extends TransportService {
 
     try {
       final packet = BitchatPacket.deserialize(data);
-      _processPacket(packet, fromDeviceId: fromDeviceId, rssi: rssi);
+      onBlePacketReceived?.call(packet, bleDeviceId: fromDeviceId, rssi: rssi);
     } catch (e) {
       _log.e('Failed to deserialize packet: $e');
     }
-  }
-
-  void _processPacket(BitchatPacket packet, {String? fromDeviceId, required int rssi}) {
-    // Deduplication (except ANNOUNCE)
-    if (packet.type != PacketType.announce) {
-      if (_seenPackets.checkAndAdd(packet.packetId)) {
-        _log.d('Duplicate packet dropped: ${packet.packetId}');
-        return;
-      }
-    }
-
-    switch (packet.type) {
-      case PacketType.announce:
-        _handleAnnounce(packet, fromDeviceId: fromDeviceId, rssi: rssi);
-        break;
-
-      case PacketType.message:
-        _handleMessage(packet);
-        break;
-
-      case PacketType.fragmentStart:
-      case PacketType.fragmentContinue:
-      case PacketType.fragmentEnd:
-        _handleFragment(packet);
-        break;
-
-      case PacketType.ack:
-      case PacketType.nack:
-        // ACK/NACK passed to GSG layer
-        onMessageReceived?.call(
-            packet.packetId, packet.senderPubkey, packet.payload);
-        break;
-
-      case PacketType.readReceipt:
-        // Extract messageId from payload and notify
-        if (packet.payload.isNotEmpty) {
-          final messageId = String.fromCharCodes(packet.payload);
-          onReadReceiptReceived?.call(messageId);
-        }
-        break;
-    }
-  }
-
-  void _handleAnnounce(BitchatPacket packet, {String? fromDeviceId, required int rssi}) {
-    final (pubkey, nickname, version, address) = _decodeAnnounce(packet.payload);
-
-    // Determine RSSI: prefer our own scanned RSSI over the one from the connection
-    // Since both devices run as Central+Peripheral, we likely scanned them too
-    int effectiveRssi = rssi;
-
-    // First try: lookup by device ID (works when we connected to them)
-    DiscoveredPeerState? discoveredPeer;
-    if (fromDeviceId != null) {
-      discoveredPeer = _peersState.getDiscoveredBlePeer(fromDeviceId);
-    }
-
-    // Second try: lookup by service UUID (works when they connected to us on iOS)
-    // Derive their service UUID from their pubkey
-    if (discoveredPeer == null) {
-      final theirServiceUuid = _deriveServiceUuidFromPubkey(pubkey);
-      discoveredPeer = _peersState.findDiscoveredBlePeerByServiceUuid(theirServiceUuid);
-      if (discoveredPeer != null) {
-        _log.d('Found peer by service UUID: $theirServiceUuid');
-      }
-    }
-
-    if (discoveredPeer != null) {
-      effectiveRssi = discoveredPeer.rssi;
-    }
-
-    // Check if peer already exists
-    final existingPeer = _peersState.getPeerByPubkey(pubkey);
-    final isNew = existingPeer == null;
-
-    // Dispatch action to Redux store
-    // If address is provided in ANNOUNCE, it's a friend sharing their libp2p address
-    store.dispatch(PeerAnnounceReceivedAction(
-      publicKey: pubkey,
-      nickname: nickname,
-      protocolVersion: version,
-      rssi: effectiveRssi,
-      transport: PeerTransport.bleDirect,
-      bleDeviceId: fromDeviceId,
-      libp2pAddress: address,
-    ));
-
-    // Associate BLE device ID with pubkey
-    if (fromDeviceId != null) {
-      associatePeerWithPubkey(fromDeviceId, pubkey);
-    }
-
-    _log.i('Peer ${isNew ? "connected" : "updated"}: $nickname at RSSI $effectiveRssi${address != null ? " (addr: $address)" : ""}');
-
-    // Get the updated peer from store for callbacks
-    final updatedPeer = _peersState.getPeerByPubkey(pubkey);
-    if (updatedPeer != null) {
-      // Convert PeerState to Peer for legacy callbacks
-      final legacyPeer = _peerStateToLegacyPeer(updatedPeer);
-      if (isNew) {
-        onPeerConnected?.call(legacyPeer);
-      } else {
-        onPeerUpdated?.call(legacyPeer);
-      }
-    }
-  }
-
-  void _handleMessage(BitchatPacket packet) {
-    // Direct delivery only - no forwarding
-    if (_isForUs(packet)) {
-      // _log.d('Message received for us');
-      onMessageReceived?.call(
-          packet.packetId, packet.senderPubkey, packet.payload);
-    } else {
-      // NOT for us - drop it (no forwarding in this layer)
-      _log.d('Message not for us, dropping (no forwarding)');
-    }
-  }
-
-  void _handleFragment(BitchatPacket packet) {
-    final reassembled = _fragmentHandler.processFragment(packet);
-
-    if (reassembled != null && _isForUs(packet)) {
-      _log.d('Fragmented message reassembled');
-      onMessageReceived?.call(packet.packetId, packet.senderPubkey, reassembled);
-    }
-    // If not for us, drop it (no forwarding)
-  }
-
-  bool _isForUs(BitchatPacket packet) {
-    if (packet.isBroadcast) return true;
-    if (packet.recipientPubkey == null) return true;
-    
-    return _pubkeyToHex(packet.recipientPubkey!) == _pubkeyToHex(identity.publicKey);
-  }
-
-  /// Decode ANNOUNCE payload
-  ///
-  /// Format: [pubkey(32) + version(2) + nickLen(1) + nick + addrLen(2) + addr]
-  /// Returns: (pubkey, nickname, version, address?)
-  (Uint8List, String, int, String?) _decodeAnnounce(Uint8List data) {
-    var offset = 0;
-
-    // Pubkey (32 bytes)
-    final pubkey = data.sublist(offset, offset + 32);
-    offset += 32;
-
-    // Version (2 bytes)
-    final version = ByteData.view(data.buffer, data.offsetInBytes + offset, 2)
-        .getUint16(0, Endian.big);
-    offset += 2;
-
-    // Nickname length (1 byte) + nickname
-    final nicknameLength = data[offset];
-    offset += 1;
-    final nickname = String.fromCharCodes(data.sublist(offset, offset + nicknameLength));
-    offset += nicknameLength;
-
-    // Address length (2 bytes) + address (optional - may not exist in old payloads)
-    String? address;
-    if (offset + 2 <= data.length) {
-      final addrLength = ByteData.view(data.buffer, data.offsetInBytes + offset, 2)
-          .getUint16(0, Endian.big);
-      offset += 2;
-      if (addrLength > 0 && offset + addrLength <= data.length) {
-        address = String.fromCharCodes(data.sublist(offset, offset + addrLength));
-      }
-    }
-
-    return (Uint8List.fromList(pubkey), nickname, version, address);
   }
 
   // ===== Peer Management =====
@@ -798,19 +412,6 @@ class BleTransportService extends TransportService {
       if (success) {
         _log.i('Successfully connected to $deviceId');
         store.dispatch(BleDeviceConnectedAction(deviceId));
-        
-        // Send ANNOUNCE so peer learns our identity
-        final announcePayload = createAnnouncePayload();
-        final packet = BitchatPacket(
-          type: PacketType.announce,
-          senderPubkey: identity.publicKey,
-          recipientPubkey: null, // broadcast to this peer
-          payload: announcePayload,
-          signature: Uint8List(64),
-        );
-        await sendToPeer(deviceId, packet.serialize());
-        // _log.d('Sent ANNOUNCE to $deviceId');
-        
         return true;
       } else {
         // _log.w('Failed to connect to $deviceId');
@@ -859,26 +460,7 @@ class BleTransportService extends TransportService {
     return centralConnected || peripheralConnected;
   }
 
-  /// Derive BLE Service UUID from a public key.
-  /// Same algorithm as BitchatIdentity.bleServiceUuid
-  String _deriveServiceUuidFromPubkey(Uint8List pubkey) {
-    // Take last 16 bytes of the 32-byte public key
-    final uuidBytes = pubkey.sublist(16, 32);
-    
-    // Format as UUID string: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-    final hex = uuidBytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-    return '${hex.substring(0, 8)}-'
-           '${hex.substring(8, 12)}-'
-           '${hex.substring(12, 16)}-'
-           '${hex.substring(16, 20)}-'
-           '${hex.substring(20, 32)}';
-  }
-
-  String _pubkeyToHex(Uint8List pubkey) {
-    return pubkey.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-  }
-  
-  /// Convert PeerState to legacy Peer for backwards compatibility with callbacks
+  /// Convert PeerState to Peer for callbacks
   Peer _peerStateToLegacyPeer(PeerState state) {
     return Peer(
       publicKey: state.publicKey,
@@ -890,167 +472,5 @@ class BleTransportService extends TransportService {
       rssi: state.rssi,
       protocolVersion: state.protocolVersion,
     );
-  }
-}
-
-
-// ===== Simple Fragment Handler (no TTL, direct P2P) =====
-
-/// Simple fragment handler for large messages.
-/// Used when payload exceeds BLE MTU (512 bytes).
-class _SimpleFragmentHandler {
-  /// Max BLE packet size (withoutResponse mode)
-  static const int bleMaxPacketSize = 512;
-
-  /// Max chunk size per fragment (512 - 152 header - ~20 metadata)
-  static const int maxFragmentPayload = 340;
-  static const Duration fragmentDelay = Duration(milliseconds: 20);
-
-  final Map<String, _ReassemblyState> _reassemblyBuffer = {};
-
-  List<BitchatPacket> fragment({
-    required Uint8List payload,
-    required Uint8List senderPubkey,
-    Uint8List? recipientPubkey,
-  }) {
-
-    final messageId = DateTime.now().millisecondsSinceEpoch.toString();
-    final fragments = <BitchatPacket>[];
-    final totalFragments = (payload.length / maxFragmentPayload).ceil();
-
-    for (var i = 0; i < totalFragments; i++) {
-      final start = i * maxFragmentPayload;
-      final end = (start + maxFragmentPayload).clamp(0, payload.length);
-      final chunk = payload.sublist(start, end);
-
-      final PacketType type;
-      final Uint8List fragmentPayload;
-
-      if (i == 0) {
-        type = PacketType.fragmentStart;
-        fragmentPayload = _encodeFragmentStart(messageId, totalFragments, payload.length, chunk);
-      } else if (i == totalFragments - 1) {
-        type = PacketType.fragmentEnd;
-        fragmentPayload = _encodeFragmentContinue(messageId, i, chunk);
-      } else {
-        type = PacketType.fragmentContinue;
-        fragmentPayload = _encodeFragmentContinue(messageId, i, chunk);
-      }
-
-      fragments.add(BitchatPacket(
-        type: type,
-        senderPubkey: senderPubkey,
-        recipientPubkey: recipientPubkey,
-        payload: fragmentPayload,
-        signature: Uint8List(64),
-      ));
-    }
-
-    return fragments;
-  }
-
-  Uint8List? processFragment(BitchatPacket packet) {
-    if (packet.type == PacketType.fragmentStart) {
-      final (messageId, totalFragments, totalSize, chunk) = _decodeFragmentStart(packet.payload);
-      _reassemblyBuffer[messageId] = _ReassemblyState(
-        messageId: messageId,
-        totalFragments: totalFragments,
-        totalSize: totalSize,
-        senderPubkey: packet.senderPubkey,
-      );
-      _reassemblyBuffer[messageId]!.addChunk(0, chunk);
-    } else {
-      final (messageId, fragmentIndex, chunk) = _decodeFragmentContinue(packet.payload);
-      final state = _reassemblyBuffer[messageId];
-      if (state != null) {
-        state.addChunk(fragmentIndex, chunk);
-        if (state.isComplete) {
-          final result = state.reassemble();
-          _reassemblyBuffer.remove(messageId);
-          return result;
-        }
-      }
-    }
-    return null;
-  }
-
-  Uint8List _encodeFragmentStart(String messageId, int totalFragments, int totalSize, Uint8List chunk) {
-    final buffer = BytesBuilder();
-    final msgIdBytes = Uint8List.fromList(messageId.codeUnits);
-    buffer.addByte(msgIdBytes.length);
-    buffer.add(msgIdBytes);
-    buffer.addByte(totalFragments);
-    final sizeBytes = ByteData(4)..setUint32(0, totalSize, Endian.big);
-    buffer.add(sizeBytes.buffer.asUint8List());
-    buffer.add(chunk);
-    return buffer.toBytes();
-  }
-
-  Uint8List _encodeFragmentContinue(String messageId, int fragmentIndex, Uint8List chunk) {
-    final buffer = BytesBuilder();
-    final msgIdBytes = Uint8List.fromList(messageId.codeUnits);
-    buffer.addByte(msgIdBytes.length);
-    buffer.add(msgIdBytes);
-    buffer.addByte(fragmentIndex);
-    buffer.add(chunk);
-    return buffer.toBytes();
-  }
-
-  (String, int, int, Uint8List) _decodeFragmentStart(Uint8List data) {
-    var offset = 0;
-    final msgIdLen = data[offset++];
-    final messageId = String.fromCharCodes(data.sublist(offset, offset + msgIdLen));
-    offset += msgIdLen;
-    final totalFragments = data[offset++];
-    final totalSize = ByteData.view(data.buffer, data.offsetInBytes + offset, 4).getUint32(0, Endian.big);
-    offset += 4;
-    final chunk = data.sublist(offset);
-    return (messageId, totalFragments, totalSize, chunk);
-  }
-
-  (String, int, Uint8List) _decodeFragmentContinue(Uint8List data) {
-    var offset = 0;
-    final msgIdLen = data[offset++];
-    final messageId = String.fromCharCodes(data.sublist(offset, offset + msgIdLen));
-    offset += msgIdLen;
-    final fragmentIndex = data[offset++];
-    final chunk = data.sublist(offset);
-    return (messageId, fragmentIndex, chunk);
-  }
-
-  void dispose() {
-    _reassemblyBuffer.clear();
-  }
-}
-
-class _ReassemblyState {
-  final String messageId;
-  final int totalFragments;
-  final int totalSize;
-  final Map<int, Uint8List> receivedChunks = {};
-  final Uint8List senderPubkey;
-
-  _ReassemblyState({
-    required this.messageId,
-    required this.totalFragments,
-    required this.totalSize,
-    required this.senderPubkey,
-  });
-
-  bool get isComplete => receivedChunks.length == totalFragments;
-
-  void addChunk(int index, Uint8List data) {
-    receivedChunks[index] = data;
-  }
-
-  Uint8List? reassemble() {
-    if (!isComplete) return null;
-    final result = BytesBuilder();
-    for (var i = 0; i < totalFragments; i++) {
-      final chunk = receivedChunks[i];
-      if (chunk == null) return null;
-      result.add(chunk);
-    }
-    return result.toBytes();
   }
 }

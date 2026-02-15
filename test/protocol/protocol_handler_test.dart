@@ -250,6 +250,145 @@ void main() {
       });
     });
 
+    group('createAckPacket', () {
+      test('creates ACK with message ID', () {
+        final messageId = 'ack-msg-1';
+        final recipientPubkey = Uint8List.fromList(List.generate(32, (i) => 50 + i));
+        final packet = handler.createAckPacket(
+          messageId: messageId,
+          recipientPubkey: recipientPubkey,
+        );
+
+        expect(packet.type, equals(PacketType.ack));
+        expect(packet.senderPubkey, equals(testIdentity.publicKey));
+        expect(packet.recipientPubkey, equals(recipientPubkey));
+        expect(utf8.decode(packet.payload), equals(messageId));
+      });
+
+      test('creates broadcast ACK when no recipient', () {
+        final packet = handler.createAckPacket(messageId: 'ack-bcast');
+
+        expect(packet.type, equals(PacketType.ack));
+        expect(packet.isBroadcast, isTrue);
+      });
+    });
+
+    group('signPacket and verifyPacket', () {
+      test('signed packet verifies successfully', () async {
+        final packet = handler.createMessagePacket(
+          payload: utf8.encode('Hello'),
+          recipientPubkey: Uint8List(32),
+        );
+
+        await handler.signPacket(packet);
+        final isValid = await handler.verifyPacket(packet);
+
+        expect(isValid, isTrue);
+      });
+
+      test('unsigned packet (all-zero signature) fails verification', () async {
+        final packet = handler.createMessagePacket(
+          payload: utf8.encode('Hello'),
+        );
+        // signature is Uint8List(64) — all zeros
+
+        final isValid = await handler.verifyPacket(packet);
+
+        expect(isValid, isFalse);
+      });
+
+      test('tampered payload fails verification', () async {
+        final packet = handler.createMessagePacket(
+          payload: utf8.encode('Original'),
+          recipientPubkey: Uint8List(32),
+        );
+
+        await handler.signPacket(packet);
+
+        // Tamper with payload after signing
+        packet.payload[0] = packet.payload[0] ^ 0xFF;
+
+        final isValid = await handler.verifyPacket(packet);
+        expect(isValid, isFalse);
+      });
+
+      test('tampered signature fails verification', () async {
+        final packet = handler.createMessagePacket(
+          payload: utf8.encode('Data'),
+          recipientPubkey: Uint8List(32),
+        );
+
+        await handler.signPacket(packet);
+
+        // Tamper with signature
+        packet.signature[0] = packet.signature[0] ^ 0xFF;
+
+        final isValid = await handler.verifyPacket(packet);
+        expect(isValid, isFalse);
+      });
+
+      test('packet signed by different identity fails verification', () async {
+        // Create a different identity
+        final otherKeyPair = await Ed25519().newKeyPair();
+        final otherIdentity = await BitchatIdentity.create(
+          keyPair: otherKeyPair,
+          nickname: 'Other',
+        );
+        final otherHandler = ProtocolHandler(identity: otherIdentity);
+
+        // Create packet claiming to be from testIdentity
+        final packet = handler.createMessagePacket(
+          payload: utf8.encode('Forged'),
+        );
+
+        // Sign with otherIdentity's key (but senderPubkey is testIdentity's)
+        await otherHandler.signPacket(packet);
+
+        // Verification should fail: signature doesn't match senderPubkey
+        final isValid = await handler.verifyPacket(packet);
+        expect(isValid, isFalse);
+      });
+
+      test('sign and verify works for all packet types', () async {
+        final packets = [
+          handler.createMessagePacket(payload: utf8.encode('msg')),
+          handler.createReadReceiptPacket(
+            messageId: 'rcpt-1',
+            recipientPubkey: Uint8List(32),
+          ),
+          handler.createAckPacket(messageId: 'ack-1'),
+          BitchatPacket(
+            type: PacketType.announce,
+            senderPubkey: testIdentity.publicKey,
+            payload: handler.createAnnouncePayload(),
+            signature: Uint8List(64),
+          ),
+        ];
+
+        for (final packet in packets) {
+          await handler.signPacket(packet);
+          final isValid = await handler.verifyPacket(packet);
+          expect(isValid, isTrue, reason: 'Failed for ${packet.type}');
+        }
+      });
+
+      test('sign and verify survives serialization round-trip', () async {
+        final packet = handler.createMessagePacket(
+          payload: utf8.encode('Round trip test'),
+          recipientPubkey: Uint8List.fromList(List.generate(32, (i) => i)),
+        );
+
+        await handler.signPacket(packet);
+
+        // Serialize and deserialize
+        final bytes = packet.serialize();
+        final restored = BitchatPacket.deserialize(bytes);
+
+        final isValid = await handler.verifyPacket(restored);
+        expect(isValid, isTrue);
+      });
+    });
+
     group('round-trip encoding/decoding', () {
       test('announce payload round-trip', () {
         final originalPayload = handler.createAnnouncePayload(
@@ -258,12 +397,6 @@ void main() {
         final decoded = handler.decodeAnnounce(originalPayload);
 
         // Re-encode with decoded data
-        final algorithm = Ed25519();
-        final keyPair = SimpleKeyPairData(
-          testIdentity.privateKey.sublist(0, 32),
-          publicKey: SimplePublicKey(decoded.publicKey, type: KeyPairType.ed25519),
-          type: KeyPairType.ed25519,
-        );
         final reEncodedIdentity = BitchatIdentity.fromMap({
           'publicKey': decoded.publicKey,
           'privateKey': testIdentity.privateKey,

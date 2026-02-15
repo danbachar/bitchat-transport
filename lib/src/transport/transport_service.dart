@@ -60,60 +60,6 @@ enum TransportState {
   disposed,
 }
 
-/// Represents a discovered peer on a transport layer.
-///
-/// This is transport-agnostic - each transport implementation maps
-/// its native peer representation to this common format.
-class TransportPeer {
-  /// Unique identifier for this peer on this transport.
-  /// For BLE: device ID (MAC/UUID)
-  /// For WebRTC: peer connection ID
-  final String peerId;
-
-  /// Transport type this peer was discovered on
-  final TransportType transport;
-
-  /// Public key if known (after handshake/announce)
-  Uint8List? publicKey;
-
-  /// Human-readable name if available
-  String? displayName;
-
-  /// Signal quality indicator (0.0 - 1.0, if available)
-  /// For BLE: derived from RSSI
-  /// For WebRTC: derived from connection stats
-  double? signalQuality;
-
-  /// Transport-specific metadata
-  final Map<String, dynamic> metadata;
-
-  /// When this peer was first discovered
-  final DateTime discoveredAt;
-
-  /// When we last heard from this peer
-  DateTime lastSeen;
-
-  TransportPeer({
-    required this.peerId,
-    required this.transport,
-    this.publicKey,
-    this.displayName,
-    this.signalQuality,
-    Map<String, dynamic>? metadata,
-    DateTime? discoveredAt,
-    DateTime? lastSeen,
-  })  : metadata = metadata ?? {},
-        discoveredAt = discoveredAt ?? DateTime.now(),
-        lastSeen = lastSeen ?? DateTime.now();
-
-  /// Whether we know this peer's public key
-  bool get isIdentified => publicKey != null;
-
-  @override
-  String toString() =>
-      'TransportPeer($peerId, $transport, identified: $isIdentified)';
-}
-
 /// Event emitted when data is received from a peer
 class TransportDataEvent {
   /// The peer that sent the data
@@ -158,20 +104,6 @@ class TransportConnectionEvent {
   });
 }
 
-/// Event emitted when a new peer is discovered
-class TransportDiscoveryEvent {
-  /// The discovered peer
-  final TransportPeer peer;
-
-  /// Whether this is a new discovery or an update
-  final bool isNew;
-
-  TransportDiscoveryEvent({
-    required this.peer,
-    this.isNew = true,
-  });
-}
-
 /// Abstract interface for transport services.
 ///
 /// This interface defines the contract that all transport implementations
@@ -210,15 +142,6 @@ abstract class TransportService {
 
   /// Stream of connection events
   Stream<TransportConnectionEvent> get connectionStream;
-
-  /// Stream of peer discovery events
-  Stream<TransportDiscoveryEvent> get discoveryStream;
-
-  /// All currently known peers on this transport
-  List<TransportPeer> get peers;
-
-  /// All currently connected peers
-  List<TransportPeer> get connectedPeers;
 
   /// Number of connected peers
   int get connectedCount;

@@ -1,17 +1,12 @@
 import 'dart:async';
 import 'dart:typed_data';
-import 'package:bitchat_transport/bitchat_transport.dart' show Block;
 import 'package:flutter/material.dart';
 import 'package:logger/logger.dart';
-import 'package:uuid/uuid.dart';
-import 'dart:convert';
-import 'dart:io';
-
 import 'package:redux/redux.dart';
 
 import '../transport/transport_service.dart';
 import '../models/identity.dart';
-import '../models/peer.dart';
+import '../protocol/protocol_handler.dart';
 import '../store/store.dart';
 
 import 'package:dart_libp2p/dart_libp2p.dart';
@@ -77,8 +72,8 @@ class LibP2PTransportService extends TransportService {
   /// Redux store for peer state
   final Store<AppState> store;
 
-  /// Protocol version
-  static const int protocolVersion = 1;
+  /// Protocol handler for encoding/decoding
+  final ProtocolHandler protocolHandler;
 
   /// LibP2P host instance
   Host? _host;
@@ -99,25 +94,16 @@ class LibP2PTransportService extends TransportService {
   final _connectionController =
       StreamController<TransportConnectionEvent>.broadcast();
 
-  // ===== Application-level callbacks =====
+  // ===== Public callbacks =====
 
-  /// Called when an application message is received.
-  /// Parameters: messageId, senderPubkey, payload
-  void Function(String messageId, Uint8List senderPubkey, Uint8List payload)?
-      onMessageReceived;
-
-  /// Called when a new peer connects (after ANNOUNCE)
-  void Function(Peer peer)? onPeerConnected;
-
-  /// Called when a peer sends an ANNOUNCE update
-  void Function(Peer peer)? onPeerUpdated;
-
-  /// Called when a peer disconnects
-  void Function(Peer peer)? onPeerDisconnected;
+  /// Called when libp2p data is received and ready for routing.
+  /// The coordinator deserializes as BitchatPacket and routes via MessageRouter.processPacket().
+  void Function(String peerId, Uint8List data)? onLibp2pDataReceived;
 
   LibP2PTransportService({
     required this.identity,
     required this.store,
+    required this.protocolHandler,
     this.config = const LibP2PConfig(),
   });
 
@@ -142,20 +128,8 @@ class LibP2PTransportService extends TransportService {
   Stream<TransportConnectionEvent> get connectionStream =>
       _connectionController.stream;
 
-  /// @deprecated Use PeerStore.discoveredLibp2pPeers instead - the PeerStore is the single source of truth
   @override
-  Stream<TransportDiscoveryEvent> get discoveryStream => const Stream.empty();
-
-  /// @deprecated Use PeerStore.libp2pPeers instead
-  @override
-  List<TransportPeer> get peers => [];
-
-  /// @deprecated Use PeerStore.connectedPeers instead
-  @override
-  List<TransportPeer> get connectedPeers => [];
-
-  @override
-  int get connectedCount => connectedPeers.length;
+  int get connectedCount => store.state.peers.libp2pPeers.length;
 
   @override
   bool get isActive => _state == TransportState.active;
@@ -321,9 +295,10 @@ class LibP2PTransportService extends TransportService {
 
   @override
   Future<void> broadcast(Uint8List data, {String? excludePeerId}) async {
-    for (final peer in connectedPeers) {
-      if (peer.peerId != excludePeerId) {
-        await sendToPeer(peer.peerId, data);
+    for (final peer in store.state.peers.libp2pPeers) {
+      final hostId = peer.libp2pHostId;
+      if (hostId != null && hostId != excludePeerId) {
+        await sendToPeer(hostId, data);
       }
     }
   }
@@ -364,47 +339,10 @@ class LibP2PTransportService extends TransportService {
     _setState(TransportState.disposed);
   }
 
-  // ===== Messaging API (same as BleTransportService) =====
-
-  /// Send a message directly to a peer by pubkey.
-  /// Returns true if sent successfully.
-  Future<bool> sendMessage({
-    required Uint8List payload,
-    required Uint8List recipientPubkey,
-    required String messageId,
-  }) async {
-    if (_host == null) {
-      _log.w('Cannot send: host not initialized');
-      return false;
-    }
-
-    // Look up peer in Redux store
-    final peer = store.state.peers.getPeerByPubkey(recipientPubkey);
-    if (peer == null) {
-      _log.w('No peer found for pubkey');
-      return false;
-    }
-
-    final hostId = peer.libp2pHostId;
-    final hostAddrs = peer.libp2pHostAddrs;
-
-    if (hostId == null || hostId.isEmpty) {
-      _log.w('Peer has no libp2p host ID');
-      return false;
-    }
-
-    // Ensure addresses are in peerstore before dialing
-    if (hostAddrs != null && hostAddrs.isNotEmpty) {
-      await _ensureAddressesInPeerstore(hostId, hostAddrs);
-    }
-
-    // Create message envelope with ID and send
-    final envelope = _createMessageEnvelope(payload, messageId: messageId);
-    return await sendToPeer(hostId, envelope);
-  }
+  // ===== Peerstore Management =====
 
   /// Ensure peer addresses are in the libp2p peerstore
-  Future<void> _ensureAddressesInPeerstore(
+  Future<void> ensureAddressesInPeerstore(
       String hostId, List<String> hostAddrs) async {
     if (_host == null) return;
 
@@ -432,71 +370,12 @@ class LibP2PTransportService extends TransportService {
     }
   }
 
-  /// Broadcast a message to all connected peers
-  Future<void> broadcastMessage({required Uint8List payload}) async {
-    // Generate a message ID for broadcast (same ID for all recipients)
-    final messageId = const Uuid().v4().substring(0, 8);
-    final envelope = _createMessageEnvelope(payload, messageId: messageId);
-    await broadcast(envelope);
-  }
-
-  /// Send our ANNOUNCE to all connected peers
-  Future<void> sendAnnounce() async {
-    final payload = createAnnouncePayload();
-    await broadcast(payload);
-  }
-
-  /// Create ANNOUNCE payload using envelope format
-  ///
-  /// Envelope: [type(1) + messageId(8) + pubkey(32)]
-  /// Payload:  [version(2) + nickLen(1) + nick + addrLen(2) + addr]
-  ///
-  /// The address field is only populated when sending to friends.
-  /// For non-friends or broadcast, addrLen is 0.
-  Uint8List createAnnouncePayload({String? address}) {
-    final nicknameBytes = Uint8List.fromList(identity.nickname.codeUnits);
-    final addressBytes = address != null ? Uint8List.fromList(address.codeUnits) : Uint8List(0);
-    final buffer = BytesBuilder();
-
-    // Type byte (1 byte)
-    buffer.addByte(_msgTypeAnnounce);
-
-    // MessageId (8 bytes) - zeros for ANNOUNCE
-    buffer.add(Uint8List(8));
-
-    // Pubkey (32 bytes)
-    buffer.add(identity.publicKey);
-
-    // Payload: version + nickname + address
-    // Protocol version (2 bytes)
-    final versionBytes = ByteData(2);
-    versionBytes.setUint16(0, protocolVersion, Endian.big);
-    buffer.add(versionBytes.buffer.asUint8List());
-
-    // Nickname length (1 byte) + nickname
-    buffer.addByte(nicknameBytes.length);
-    buffer.add(nicknameBytes);
-
-    // Address length (2 bytes) + address
-    final addrLenBytes = ByteData(2);
-    addrLenBytes.setUint16(0, addressBytes.length, Endian.big);
-    buffer.add(addrLenBytes.buffer.asUint8List());
-    if (addressBytes.isNotEmpty) {
-      buffer.add(addressBytes);
-    }
-
-    return buffer.toBytes();
-  }
-
   // ===== Packet Processing =====
 
-  /// Callback for ACK received (message delivered to recipient)
-  void Function(String messageId)? onAckReceived;
-
-  /// Callback for read receipt received (message read by recipient)
-  void Function(String messageId)? onReadReceiptReceived;
-
-  /// Process incoming data from a peer
+  /// Process incoming data from a peer.
+  ///
+  /// Forwards raw bytes to the coordinator via [onLibp2pDataReceived].
+  /// The coordinator deserializes as BitchatPacket and routes to MessageRouter.
   void onDataReceived(String peerId, Uint8List data, {int rssi = 0}) {
     _log.d('Data received from peer $peerId: ${data.length} bytes');
 
@@ -512,135 +391,8 @@ class LibP2PTransportService extends TransportService {
       return;
     }
 
-    // All messages use the same envelope format - handle uniformly
-    _tryHandleEnvelope(peerId, data);
-  }
-
-  /// Handle all envelope messages (ANNOUNCE, MESSAGE, ACK, READ_RECEIPT).
-  /// Format: [type(1) + messageId(8) + pubkey(32) + payload?]
-  void _tryHandleEnvelope(String peerId, Uint8List data) {
-    // Minimum envelope size: 1 (type) + 8 (msgId) + 32 (pubkey) = 41 bytes
-    if (data.length < 41) {
-      _log.w('Envelope too short: ${data.length} bytes');
-      return;
-    }
-
-    final msgType = data[0];
-    final messageId = String.fromCharCodes(data.sublist(1, 9));
-    final senderPubkey = Uint8List.fromList(data.sublist(9, 41));
-    final payload = data.length > 41 ? data.sublist(41) : Uint8List(0);
-
-    switch (msgType) {
-      case _msgTypeAnnounce:
-        _handleAnnouncePayload(peerId, senderPubkey, payload);
-        _log.d("libp2p: Received ANNOUNCE from peer");
-      case _msgTypeMessage:
-        _log.d('libp2p: Received message $messageId from peer');
-        onMessageReceived?.call(messageId, senderPubkey, payload);
-        // Send ACK back to sender
-        _sendAckToPeer(peerId, messageId);
-
-      case _msgTypeAck:
-        _log.d('libp2p: Received ACK for message $messageId');
-        onAckReceived?.call(messageId);
-
-      case _msgTypeReadReceipt:
-        _log.d('libp2p: Received read receipt for message $messageId');
-        onReadReceiptReceived?.call(messageId);
-
-      default:
-        _log.w('libp2p: Unknown message type: 0x${msgType.toRadixString(16)}');
-    }
-  }
-
-  /// Send ACK back to sender
-  Future<void> _sendAckToPeer(String peerId, String messageId) async {
-    final envelope = _createAckEnvelope(messageId);
-    await sendToPeer(peerId, envelope);
-  }
-
-  /// Send a read receipt for a message
-  Future<bool> sendReadReceipt({
-    required String messageId,
-    required Uint8List recipientPubkey,
-  }) async {
-    if (_host == null) {
-      _log.w('Cannot send read receipt: host not initialized');
-      return false;
-    }
-
-    final peer = store.state.peers.getPeerByPubkey(recipientPubkey);
-    if (peer == null) {
-      _log.w('No peer found for pubkey');
-      return false;
-    }
-
-    final hostId = peer.libp2pHostId;
-    if (hostId == null || hostId.isEmpty) {
-      _log.w('Peer has no libp2p host ID');
-      return false;
-    }
-
-    final envelope = _createReadReceiptEnvelope(messageId);
-    return await sendToPeer(hostId, envelope);
-  }
-
-  /// Handle ANNOUNCE payload (after envelope parsing)
-  ///
-  /// Payload format: [version(2) + nickLen(1) + nick + addrLen(2) + addr]
-  void _handleAnnouncePayload(String peerId, Uint8List senderPubkey, Uint8List payload) {
-    // Minimum payload: version(2) + nickLen(1) = 3 bytes
-    if (payload.length < 3) {
-      _log.w('ANNOUNCE payload too short: ${payload.length} bytes');
-      return;
-    }
-
-    var offset = 0;
-
-    // Version (2 bytes)
-    final version = ByteData.view(payload.buffer, payload.offsetInBytes + offset, 2)
-        .getUint16(0, Endian.big);
-    offset += 2;
-
-    // Nickname length (1 byte) + nickname
-    final nicknameLength = payload[offset];
-    offset += 1;
-
-    if (payload.length < offset + nicknameLength) {
-      _log.w('ANNOUNCE payload too short for nickname');
-      return;
-    }
-
-    final nickname = String.fromCharCodes(payload.sublist(offset, offset + nicknameLength));
-    offset += nicknameLength;
-
-    // Address length (2 bytes) + address (optional - may not exist in old payloads)
-    String? address;
-    if (offset + 2 <= payload.length) {
-      final addrLength = ByteData.view(payload.buffer, payload.offsetInBytes + offset, 2)
-          .getUint16(0, Endian.big);
-      offset += 2;
-      if (addrLength > 0 && offset + addrLength <= payload.length) {
-        address = String.fromCharCodes(payload.sublist(offset, offset + addrLength));
-      }
-    }
-
-    // Check if peer already exists in Redux store
-    final existingPeer = store.state.peers.getPeerByPubkey(senderPubkey);
-    final isNew = existingPeer == null;
-
-    // Update Redux store via ANNOUNCE action
-    // Use the address from payload if provided, otherwise use peerId as fallback
-    store.dispatch(PeerAnnounceReceivedAction(
-      publicKey: senderPubkey,
-      nickname: nickname,
-      protocolVersion: version,
-      rssi: 0,
-      transport: PeerTransport.libp2p,
-      libp2pAddress: address ?? peerId,
-    ));
-
-    _log.i('Peer ${isNew ? "connected" : "updated"}: $nickname${address != null ? " (addr: $address)" : ""}');
+    // Forward to coordinator for deserialization and routing
+    onLibp2pDataReceived?.call(peerId, data);
   }
 
   /// Called when a peer connects at the transport level
@@ -672,47 +424,7 @@ class LibP2PTransportService extends TransportService {
     ));
   }
 
-  // ===== Helper Methods =====
-
-  /// Libp2p message types
-  static const int _msgTypeAnnounce = 0x00;
-  static const int _msgTypeMessage = 0x01;
-  static const int _msgTypeAck = 0x02;
-  static const int _msgTypeReadReceipt = 0x03;
-
-  /// Create message envelope with ID for tracking.
-  /// Format:
-  /// [0]      : Message type (1 byte)
-  /// [1-8]    : Message ID (8 bytes, short UUID as ASCII)
-  /// [9-40]   : Sender pubkey (32 bytes)
-  /// [41-N]   : Payload
-  Uint8List _createMessageEnvelope(Uint8List payload,
-      {required String messageId}) {
-    final buffer = BytesBuilder();
-    buffer.addByte(_msgTypeMessage);
-    buffer.add(Uint8List.fromList(messageId.codeUnits)); // 8 bytes
-    buffer.add(identity.publicKey); // 32 bytes
-    buffer.add(payload);
-    return buffer.toBytes();
-  }
-
-  /// Create ACK envelope for delivery confirmation.
-  Uint8List _createAckEnvelope(String messageId) {
-    final buffer = BytesBuilder();
-    buffer.addByte(_msgTypeAck);
-    buffer.add(Uint8List.fromList(messageId.codeUnits)); // 8 bytes
-    buffer.add(identity.publicKey); // 32 bytes
-    return buffer.toBytes();
-  }
-
-  /// Create read receipt envelope.
-  Uint8List _createReadReceiptEnvelope(String messageId) {
-    final buffer = BytesBuilder();
-    buffer.addByte(_msgTypeReadReceipt);
-    buffer.add(Uint8List.fromList(messageId.codeUnits)); // 8 bytes
-    buffer.add(identity.publicKey); // 32 bytes
-    return buffer.toBytes();
-  }
+  // ===== Internal =====
 
   void _setState(TransportState newState) {
     if (_state != newState) {
