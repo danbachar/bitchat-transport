@@ -573,11 +573,11 @@ class Bitchat {
   ///
   /// Returns the message ID if sent successfully, null if failed.
   /// The message status can be tracked via store.state.messages.
-  Future<String?> send(Uint8List recipientPubkey, Uint8List payload) async {
+  Future<String?> send(Uint8List recipientPubkey, Uint8List payload, {String? messageId}) async {
     final peer = _peersState.getPeerByPubkey(recipientPubkey);
 
-    // Generate message ID (short UUID)
-    final messageId = _uuid.v4().substring(0, 8);
+    // Use provided message ID or generate one
+    messageId ??= _uuid.v4().substring(0, 8);
 
     // Determine which transport will be used
     MessageTransport? transport;
