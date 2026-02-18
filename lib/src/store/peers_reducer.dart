@@ -176,6 +176,8 @@ PeersState peersReducer(PeersState state, dynamic action) {
     final existing = state.peers[pubkeyHex];
     final now = DateTime.now();
     
+    final isBle = action.transport == PeerTransport.bleDirect;
+
     if (existing == null) {
       // New peer
       final newPeer = PeerState(
@@ -187,6 +189,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
         protocolVersion: action.protocolVersion,
         lastSeen: now,
         bleDeviceId: action.bleDeviceId,
+        lastBleSeen: isBle ? now : null,
         libp2pAddress: action.libp2pAddress,
       );
       return state.copyWith(
@@ -201,7 +204,9 @@ PeersState peersReducer(PeersState state, dynamic action) {
         rssi: action.rssi,
         protocolVersion: action.protocolVersion,
         lastSeen: now,
-        bleDeviceId: action.bleDeviceId ?? existing.bleDeviceId,
+        bleDeviceId: action.bleDeviceId, 
+        // bleDeviceId: action.bleDeviceId ?? existing.bleDeviceId, just removed!
+        lastBleSeen: isBle ? now : existing.lastBleSeen,
         libp2pAddress: action.libp2pAddress ?? existing.libp2pAddress,
       );
       return state.copyWith(
@@ -243,6 +248,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
         protocolVersion: existing.protocolVersion,
         lastSeen: existing.lastSeen,
         bleDeviceId: null,  // Clear BLE device ID
+        lastBleSeen: null,
         libp2pAddress: existing.libp2pAddress,
         isFriend: existing.isFriend,
         libp2pHostId: existing.libp2pHostId,
@@ -273,6 +279,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
         protocolVersion: existing.protocolVersion,
         lastSeen: existing.lastSeen,
         bleDeviceId: existing.bleDeviceId,
+        lastBleSeen: existing.lastBleSeen,
         libp2pAddress: null,  // Clear libp2p address
         isFriend: existing.isFriend,
         libp2pHostId: existing.libp2pHostId,
@@ -311,6 +318,33 @@ PeersState peersReducer(PeersState state, dynamic action) {
     final newMap = Map<String, PeerState>.from(state.peers);
     final staleKeys = <String>[];
     newMap.forEach((key, peer) {
+      // Clear stale bleDeviceId if no BLE ANNOUNCE received within threshold.
+      // Without this, a peer that keeps sending libp2p ANNOUNCEs retains a
+      // stale bleDeviceId forever via the ?? operator in
+      // PeerAnnounceReceivedAction, making them appear in "Nearby" instead of
+      // "Friends Online".
+      if (peer.bleDeviceId != null && peer.lastBleSeen != null) {
+        final timeSinceBleSeen = now.difference(peer.lastBleSeen!);
+        if (timeSinceBleSeen > action.staleThreshold) {
+          newMap[key] = PeerState(
+            publicKey: peer.publicKey,
+            nickname: peer.nickname,
+            connectionState: peer.connectionState,
+            transport: peer.transport,
+            rssi: peer.rssi,
+            protocolVersion: peer.protocolVersion,
+            lastSeen: peer.lastSeen,
+            bleDeviceId: null,
+            lastBleSeen: null,
+            libp2pAddress: peer.libp2pAddress,
+            isFriend: peer.isFriend,
+            libp2pHostId: peer.libp2pHostId,
+            libp2pHostAddrs: peer.libp2pHostAddrs,
+          );
+          return;
+        }
+      }
+
       if (peer.connectionState != PeerConnectionState.connected) return;
       if (peer.lastSeen == null) return;
       final timeSinceLastSeen = now.difference(peer.lastSeen!);
@@ -328,6 +362,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
             protocolVersion: peer.protocolVersion,
             lastSeen: peer.lastSeen,
             bleDeviceId: null,
+            lastBleSeen: null,
             libp2pAddress: null,  // Clear active connection address
             isFriend: true,
             libp2pHostId: peer.libp2pHostId,  // Keep for reconnection
@@ -441,6 +476,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
         protocolVersion: existing.protocolVersion,
         lastSeen: existing.lastSeen,
         bleDeviceId: existing.bleDeviceId,
+        lastBleSeen: existing.lastBleSeen,
         // Clear all libp2p/friend fields
         isFriend: false,
         libp2pAddress: null,

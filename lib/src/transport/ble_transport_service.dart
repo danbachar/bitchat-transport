@@ -290,11 +290,12 @@ class BleTransportService extends TransportService {
     await _central.dispose();
     await _peripheral.dispose();
 
+    // Set state before closing controllers
+    _setState(TransportState.disposed);
+
     await _stateController.close();
     await _dataController.close();
     await _connectionController.close();
-
-    _setState(TransportState.disposed);
   }
 
   /// Process an incoming raw BLE packet.
@@ -380,10 +381,23 @@ class BleTransportService extends TransportService {
       store.dispatch(PeerRssiUpdatedAction(publicKey: pubkey, rssi: device.rssi));
     }
     
-    // Auto-connect if this is a new discovery
+    // Auto-connect if new device
     if (isNew) {
       _autoConnectToPeer(device.deviceId);
+      return;
     }
+
+    // Retry failed connections with backoff based on attempt count.
+    // Skip devices that are already connected or currently connecting.
+    if (existing.isConnected || existing.isConnecting) return;
+
+    // Back off: skip retry if too many recent attempts.
+    // After 3 failed attempts, only retry every 3rd scan cycle.
+    if (existing.connectionAttempts >= 3 && existing.connectionAttempts % 3 != 0) {
+      return;
+    }
+
+    _autoConnectToPeer(device.deviceId);
   }
   
   /// Automatically connect to a discovered peer and send ANNOUNCE
@@ -392,7 +406,8 @@ class BleTransportService extends TransportService {
     
     // Skip if already connected
     if (_isConnected(deviceId)) {
-      _log.d('Already connected to $deviceId, skipping auto-connect');
+      // TODO: why is autoConnectToPeer being called so many times?
+      // _log.d('Already connected to $deviceId, skipping auto-connect');
       return false;
     }
     
@@ -456,7 +471,7 @@ class BleTransportService extends TransportService {
 
   bool _isConnected(String peerId) {
     final centralConnected = _central.connectedPeers.any((p) => p.deviceId == peerId);
-    final peripheralConnected = _peripheral.connectedCount > 0;
+    final peripheralConnected = _peripheral.isDeviceConnected(peerId);
     return centralConnected || peripheralConnected;
   }
 

@@ -478,6 +478,12 @@ class Bitchat {
     // Handle BLE enable/disable
     if (_isBleEnabledInSettings && !_bleAvailable) {
       // BLE was enabled, try to initialize
+      // Dispose old service first to clean up native state (GATT server, subscriptions)
+      if (_bleService != null) {
+        _log.i('Disposing old BLE service before re-initialization');
+        await _bleService!.dispose();
+        _bleService = null;
+      }
       await _initializeBle();
       if (wasActive && _bleAvailable && _bleService != null) {
         await _bleService!.start();
@@ -760,6 +766,7 @@ class Bitchat {
     _messageRouter.onMessageReceived = (messageId, senderPubkey, payload) {
       // Determine transport from peer state
       final peer = store.state.peers.getPeerByPubkey(senderPubkey);
+      // TODO: why determine transport from peer state instead of passing it from the message?
       final transport = peer?.activeTransport == PeerTransport.libp2p
           ? MessageTransport.libp2p
           : MessageTransport.ble;

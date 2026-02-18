@@ -133,6 +133,10 @@ class PeerState {
   /// BLE device ID if connected via BLE
   final String? bleDeviceId;
 
+  /// When the last BLE ANNOUNCE was received from this peer.
+  /// Used to detect stale bleDeviceId (peer left BLE range but still on libp2p).
+  final DateTime? lastBleSeen;
+
   /// Libp2p address if connected via libp2p
   final String? libp2pAddress;
 
@@ -154,6 +158,7 @@ class PeerState {
     this.protocolVersion = 1,
     this.lastSeen,
     this.bleDeviceId,
+    this.lastBleSeen,
     this.libp2pAddress,
     this.isFriend = false,
     this.libp2pHostId,
@@ -196,6 +201,7 @@ class PeerState {
     int? protocolVersion,
     DateTime? lastSeen,
     String? bleDeviceId,
+    DateTime? lastBleSeen,
     String? libp2pAddress,
     bool? isFriend,
     String? libp2pHostId,
@@ -210,6 +216,7 @@ class PeerState {
       protocolVersion: protocolVersion ?? this.protocolVersion,
       lastSeen: lastSeen ?? this.lastSeen,
       bleDeviceId: bleDeviceId ?? this.bleDeviceId,
+      lastBleSeen: lastBleSeen ?? this.lastBleSeen,
       libp2pAddress: libp2pAddress ?? this.libp2pAddress,
       isFriend: isFriend ?? this.isFriend,
       libp2pHostId: libp2pHostId ?? this.libp2pHostId,
@@ -286,7 +293,7 @@ class PeersState {
       peers.values.where((p) => p.bleDeviceId != null).toList();
 
   /// Nearby peers - connected peers reachable via BLE (in physical proximity)
-  /// Use this for the "Nearby" section in UI.
+  /// Use this for the "Nearby" section in UI.s
   List<PeerState> get nearbyBlePeers =>
       peers.values.where((p) => p.isConnected && p.bleDeviceId != null).toList();
   
@@ -301,7 +308,7 @@ class PeersState {
   /// Online friends - friends connected via libp2p only (not nearby via BLE).
   /// Use this for the "Friends Online" section in UI.
   List<PeerState> get onlineFriends =>
-      peers.values.where((p) => p.isFriend && p.isConnected && p.bleDeviceId == null && p.libp2pAddress != null).toList();
+      peers.values.where((p) => p.isFriend && p.isConnected && p.libp2pAddress != null).toList();
   
   /// Count of connected peers
   int get connectedCount => connectedPeers.length;

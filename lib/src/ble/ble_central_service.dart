@@ -62,8 +62,8 @@ class BleCentralService {
   /// Scan timeout
   static const Duration scanTimeout = Duration(seconds: 10);
 
-  /// Connection timeout
-  static const Duration connectionTimeout = Duration(seconds: 15);
+  /// Connection timeout (kept short to avoid blocking connections to actual peers)
+  static const Duration connectionTimeout = Duration(seconds: 5);
 
   /// Discovered devices, keyed by device ID
   final Map<String, DiscoveredDevice> _discovered = {};
@@ -73,6 +73,9 @@ class BleCentralService {
 
   /// Stream subscriptions
   final List<StreamSubscription> _subscriptions = [];
+
+  /// Scan results subscription (tracked separately to avoid duplicates)
+  StreamSubscription? _scanSubscription;
 
   /// Callback when data is received
   CentralDataCallback? onDataReceived;
@@ -135,10 +138,16 @@ class BleCentralService {
     // _log.i('Starting BLE scan');
 
     try {
+      // Cancel previous scan subscription to prevent duplicate callbacks
+      if (_scanSubscription != null) {
+        await _scanSubscription!.cancel();
+        _subscriptions.remove(_scanSubscription);
+        _scanSubscription = null;
+      }
+
       // Listen for scan results
-      _subscriptions.add(
-        FlutterBluePlus.scanResults.listen(_onScanResults),
-      );
+      _scanSubscription = FlutterBluePlus.scanResults.listen(_onScanResults);
+      _subscriptions.add(_scanSubscription!);
 
       // Start scanning
       // Note: We scan for all devices and filter manually because
@@ -165,7 +174,11 @@ class BleCentralService {
     _log.i('Scan stopped');
   }
 
-  /// Connect to a discovered device
+  /// Connect to a discovered device.
+  ///
+  /// After connecting, searches ALL GATT services for the Bitchat characteristic
+  /// UUID (0000ff01-...). This correctly identifies Bitchat peers regardless of
+  /// their advertised service UUID.
   Future<bool> connectToDevice(String deviceId) async {
     final discovered = _discovered[deviceId];
     if (discovered == null) {
@@ -177,8 +190,6 @@ class BleCentralService {
       // _log.w('Already connected to: $deviceId');
       return true;
     }
-
-    // _log.i('Connecting to: $deviceId');
 
     try {
       final device = discovered.device;
@@ -198,38 +209,26 @@ class BleCentralService {
       // Discover services
       final services = await device.discoverServices();
 
-      // Find our service
-      BluetoothService? targetService;
-      for (final service in services) {
-        if (service.uuid.toString().toLowerCase() ==
-            discovered.serviceUuid.toLowerCase()) {
-          targetService = service;
-          break;
-        }
-      }
-
-      if (targetService == null) {
-        // _log.w("Service not found on device: $deviceId");
-        await device.disconnect();
-        return false;
-      }
-
-      // Find our characteristic
-      // Note: flutter_blue_plus may return short-form UUIDs (e.g., "ff01")
-      // while we define full 128-bit UUIDs, so we need to compare the short form
-      final shortCharUuid = characteristicUuid.substring(4, 8).toLowerCase(); // Extract "ff01" from "0000ff01-..."
+      // Search ALL services for the Bitchat characteristic UUID.
+      // Per architecture: we can't know if a device is a Bitchat peer until
+      // after connection and service discovery. The characteristic UUID is
+      // fixed across all Bitchat peers.
+      final shortCharUuid = characteristicUuid.substring(4, 8).toLowerCase(); // "ff01"
       BluetoothCharacteristic? targetChar;
-      for (final char in targetService.characteristics) {
-        final charUuidStr = char.uuid.toString().toLowerCase();
-        // Match either the full UUID or the short form
-        if (charUuidStr == characteristicUuid.toLowerCase() ||
-            charUuidStr == shortCharUuid) {
-          targetChar = char;
-          break;
+      for (final service in services) {
+        for (final char in service.characteristics) {
+          final charUuidStr = char.uuid.toString().toLowerCase();
+          if (charUuidStr == characteristicUuid.toLowerCase() ||
+              charUuidStr == shortCharUuid) {
+            targetChar = char;
+            break;
+          }
         }
+        if (targetChar != null) break;
       }
 
       if (targetChar == null) {
+        // Not a Bitchat peer (e.g., headphones, smartwatch)
         await device.disconnect();
         return false;
       }

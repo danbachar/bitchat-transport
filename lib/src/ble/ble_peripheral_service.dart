@@ -57,6 +57,9 @@ class BlePeripheralService {
   /// Number of connected centrals
   int get connectedCount => _connectedCentrals.length;
 
+  /// Whether a specific device is connected as a central
+  bool isDeviceConnected(String deviceId) => _connectedCentrals.contains(deviceId);
+
   /// Initialize the peripheral service
   Future<void> initialize() async {
     _log.i('Initializing BLE peripheral service');
@@ -72,6 +75,13 @@ class BlePeripheralService {
           _bleReadyCompleter.complete();
         }
       });
+
+      // If BLE hardware is available, it's likely already powered on
+      // (e.g. re-enabling after disable). Complete immediately to avoid
+      // waiting for a state change callback that won't fire.
+      if (await BlePeripheral.isSupported() && !_bleReadyCompleter.isCompleted) {
+        _bleReadyCompleter.complete();
+      }
 
       // Set up connection state callback (Android only, but safe to call on all platforms)
       BlePeripheral.setConnectionStateChangeCallback(_onConnectionStateChanged);
@@ -280,7 +290,7 @@ class BlePeripheralService {
       return WriteRequestResult();  // Acknowledge but ignore
     }
 
-    _log.d('Write request from $deviceId: ${value?.length ?? 0} bytes');
+    // _log.d('Write request from $deviceId: ${value?.length ?? 0} bytes');
 
     // Deliver data to callback
     if (value != null && value.isNotEmpty) {

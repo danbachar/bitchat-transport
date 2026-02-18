@@ -101,6 +101,7 @@ class MessageRouter {
       case PacketType.announce:
         return; // Already handled above
       case PacketType.message:
+      // TODO: why do messages have different types than packets?
         _handleMessage(packet, transport: transport, libp2pPeerId: libp2pPeerId);
       case PacketType.fragmentStart:
       case PacketType.fragmentContinue:
@@ -109,6 +110,7 @@ class MessageRouter {
       case PacketType.ack:
         _handleAck(packet);
       case PacketType.nack:
+        // TODO: handle this
         break;
       case PacketType.readReceipt:
         _handleReadReceipt(packet);
