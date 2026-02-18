@@ -249,6 +249,14 @@ class Bitchat {
   /// Get the libp2p host addresses - empty if not initialized
   List<String> get libp2pHostAddrs => _libp2pService?.hostAddrs ?? [];
 
+  /// Routable public multiaddr (public IPv6 + listen port) - null if unavailable
+  String? get publicLibp2pMultiaddr => _libp2pService?.publicMultiaddr;
+
+  /// Re-fetch the public IPv6 address (call after network connectivity changes)
+  Future<void> refreshLibp2pAddress() async {
+    await _libp2pService?.refreshPublicAddress();
+  }
+
   /// Connect to a libp2p peer using their host info
   /// Used when accepting a friend request or receiving acceptance
   /// Returns the successful address on success, null on failure
@@ -567,11 +575,11 @@ class Bitchat {
   ///
   /// Returns the message ID if sent successfully, null if failed.
   /// The message status can be tracked via store.state.messages.
-  Future<String?> send(Uint8List recipientPubkey, Uint8List payload) async {
+  Future<String?> send(Uint8List recipientPubkey, Uint8List payload, {String? messageId}) async {
     final peer = _peersState.getPeerByPubkey(recipientPubkey);
 
-    // Generate message ID (short UUID)
-    final messageId = _uuid.v4().substring(0, 8);
+    // Use provided message ID or generate one
+    messageId ??= _uuid.v4().substring(0, 8);
 
     // Determine which transport will be used
     MessageTransport? transport;
@@ -760,6 +768,7 @@ class Bitchat {
     _messageRouter.onMessageReceived = (messageId, senderPubkey, payload) {
       // Determine transport from peer state
       final peer = store.state.peers.getPeerByPubkey(senderPubkey);
+      // TODO: why determine transport from peer state instead of passing it from the message?
       final transport = peer?.activeTransport == PeerTransport.libp2p
           ? MessageTransport.libp2p
           : MessageTransport.ble;
@@ -971,9 +980,9 @@ class Bitchat {
   Future<void> _broadcastAnnounceViaLibp2p() async {
     if (_libp2pService == null || !_libp2pAvailable) return;
 
-    // Include our libp2p address so peers can connect to us
+    // Prefer public multiaddr (routable), fall back to local host addr
     final addrs = libp2pHostAddrs;
-    final addr = addrs.isNotEmpty ? addrs.first : null;
+    final addr = publicLibp2pMultiaddr ?? (addrs.isNotEmpty ? addrs.first : null);
     final payload = _protocolHandler.createAnnouncePayload(address: addr);
     final packet = BitchatPacket(
       type: PacketType.announce,

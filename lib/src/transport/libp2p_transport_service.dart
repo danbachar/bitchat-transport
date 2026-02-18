@@ -78,12 +78,40 @@ class LibP2PTransportService extends TransportService {
   /// LibP2P host instance
   Host? _host;
 
+  /// Cached public IPv6 address (fetched from external service)
+  String? _publicIpv6;
+
+  /// Cached listen port (extracted from host addrs after start)
+  int? _listenPort;
+
   /// Get the host ID (PeerId) as string - null if host not initialized
   String? get hostId => _host?.id.toString();
 
   /// Get the host addresses (list of multiaddrs) - empty if host not initialized
   List<String> get hostAddrs =>
       _host?.addrs.map((a) => a.toString()).toList() ?? [];
+
+  /// The last-known public IPv6 address
+  String? get publicIpv6 => _publicIpv6;
+
+  /// Routable public multiaddr constructed from public IPv6 + listen port
+  String? get publicMultiaddr {
+    if (_publicIpv6 == null || _listenPort == null) return null;
+    return '/ip6/$_publicIpv6/udp/$_listenPort/udx';
+  }
+
+  /// Re-fetch the public IPv6 address (call after network connectivity changes)
+  Future<void> refreshPublicAddress() async {
+    try {
+      final newIpv6 = await _getIPv6Address();
+      if (newIpv6 != _publicIpv6) {
+        _log.i('Public IPv6 changed: $_publicIpv6 → $newIpv6');
+        _publicIpv6 = newIpv6;
+      }
+    } catch (e) {
+      _log.e('Failed to refresh public IPv6 address: $e');
+    }
+  }
 
   /// Current transport state
   TransportState _state = TransportState.uninitialized;
@@ -148,13 +176,6 @@ class LibP2PTransportService extends TransportService {
       _host = await createHost();
       _log.i('Host: ${_host!.id} ${_host!.addrs}');
 
-      // DERP DERP
-      // TODO: Initialize dart_libp2p host here
-      // final keyPair = await crypto_ed25519.generateEd25519KeyPair();
-      // _host = await Libp2p.new_([...options...]);
-
-      // Sample Output : "2a05:dfc7:5::53"
-
       _setState(TransportState.ready);
       _log.i('LibP2P transport initialized successfully');
       return true;
@@ -176,6 +197,7 @@ class LibP2PTransportService extends TransportService {
 
     try {
       // TODO: Start libp2p host - await _host?.start();
+      // TODO: what is the difference between start and initialize?
       _setState(TransportState.active);
       _log.i('LibP2P transport started');
     } catch (e) {
@@ -189,9 +211,11 @@ class LibP2PTransportService extends TransportService {
     _log.i('Stopping LibP2P transport');
 
     try {
-      // TODO: Stop libp2p host - await _host?.stop();
       if (_state == TransportState.active) {
         _setState(TransportState.ready);
+      }
+      if (_host != null) {
+        await _host!.close();
       }
       _log.i('LibP2P transport stopped');
     } catch (e) {
@@ -280,15 +304,16 @@ class LibP2PTransportService extends TransportService {
     try {
       const duration = Duration(seconds: 10);
       final ctx = Context(timeout: duration);
-      P2PStream myStream = await _host!
+      P2PStream stream = await _host!
           .newStream(PeerId.fromString(peerId), ['/gever/1.0.0'], ctx);
-      await myStream.write(data);
-      await myStream.close();
+      await stream.write(data);
+      await stream.close();
 
       _log.d('Sent ${data.length} bytes to peer $peerId');
       return true;
     } catch (e) {
       _log.e('Failed to send to peer $peerId: $e');
+      _log.e("Message was: $data");
       return false;
     }
   }
@@ -452,6 +477,7 @@ class LibP2PTransportService extends TransportService {
     final connMgr = p2p_conn_manager.ConnectionManager();
 
     String ipv6 = await _getIPv6Address();
+    _publicIpv6 = ipv6;
     _log.i('Public IPv6 address: $ipv6');
 
     final options = <p2p_config.Option>[
@@ -471,10 +497,20 @@ class LibP2PTransportService extends TransportService {
     host.setStreamHandler('/gever/1.0.0', _handleGeverRequest);
     await host.start();
 
+    // Extract the dynamically-assigned UDP port from the resolved address
+    if (host.addrs.isNotEmpty) {
+      final parts = host.addrs.first.toString().split('/');
+      final udpIndex = parts.indexOf('udp');
+      if (udpIndex != -1 && udpIndex + 1 < parts.length) {
+        _listenPort = int.tryParse(parts[udpIndex + 1]);
+      }
+    }
+
     _log.i("Host has ${host.addrs.length} addresses");
     for (var addr in host.addrs) {
       _log.i('Listening on address: $addr');
     }
+    _log.i('Public multiaddr: $publicMultiaddr');
     return host;
   }
 

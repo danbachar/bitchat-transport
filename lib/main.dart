@@ -178,8 +178,10 @@ class _BitchatHomeState extends State<BitchatHome>
   /// Computed full multiaddress string combining first address with host ID
   String? get _myLibp2pAddress {
     final hostId = _myLibp2pHostId;
-    final addrs = _myLibp2pHostAddrs;
     if (hostId == null) return null;
+    final publicAddr = _bitchat?.publicLibp2pMultiaddr;
+    if (publicAddr != null) return '$publicAddr/p2p/$hostId';
+    final addrs = _myLibp2pHostAddrs;
     if (addrs.isNotEmpty) return '${addrs.first}/p2p/$hostId';
     return '/p2p/$hostId';
   }
@@ -213,8 +215,12 @@ class _BitchatHomeState extends State<BitchatHome>
     });
   }
 
-  void _onConnectivityChanged(List<ConnectivityResult> results) {
+  Future<void> _onConnectivityChanged(List<ConnectivityResult> results) async {
     _log.i('🌐 Connectivity changed: $results');
+
+    // Refresh the public IPv6 so the next friend announce has the current address
+    await _bitchat?.refreshLibp2pAddress();
+    await _announceToFriends();
   }
 
   void _checkPendingChat() {
@@ -550,20 +556,28 @@ class _BitchatHomeState extends State<BitchatHome>
     final peerState = appStore.state.peers.getPeerByPubkey(pubkey);
     if (peerState != null && peerState.isFriend) {
       if (block.libp2pAddress != null) {
-        // Friend has libp2p address - update Redux and establish connection
+        final previousAddress = peerState.libp2pAddress;
+        final addressChanged = previousAddress != block.libp2pAddress;
+
+        // Update Redux with the new address
         appStore.dispatch(AssociateLibp2pAddressAction(
           publicKey: pubkey,
           address: block.libp2pAddress!,
         ));
 
-        // Parse address and attempt connection
-        final libp2pParts = _parseLibp2pAddress(block.libp2pAddress!);
-        if (libp2pParts != null && _bitchat != null) {
-          final (hostId, baseAddr) = libp2pParts;
-          await _bitchat!.connectToLibp2pHost(
-            hostId: hostId,
-            hostAddrs: [baseAddr],
-          );
+        // Only (re)connect if the address changed or there's no existing connection
+        if (addressChanged) {
+          if (addressChanged && previousAddress != null && previousAddress.isNotEmpty) {
+            _log.i('Friend $senderHex libp2p address changed: $previousAddress → ${block.libp2pAddress}');
+          }
+          final libp2pParts = _parseLibp2pAddress(block.libp2pAddress!);
+          if (libp2pParts != null && _bitchat != null) {
+            final (hostId, baseAddr) = libp2pParts;
+            await _bitchat!.connectToLibp2pHost(
+              hostId: hostId,
+              hostAddrs: [baseAddr],
+            );
+          }
         }
       } else {
         // Friend no longer has libp2p address (disabled libp2p)
