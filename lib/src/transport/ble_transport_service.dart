@@ -366,6 +366,8 @@ class BleTransportService extends TransportService {
     // Check if this is a new discovery
     final existing = _peersState.getDiscoveredBlePeer(device.deviceId);
     final isNew = existing == null;
+
+    _log.i('DeviceDiscovered: ${device.deviceId}, isNew: $isNew, isConnected: ${existing?.isConnected}, isConnecting: ${existing?.isConnecting}');
     
     // Dispatch action to update Redux store
     store.dispatch(BleDeviceDiscoveredAction(
@@ -387,15 +389,8 @@ class BleTransportService extends TransportService {
       return;
     }
 
-    // Retry failed connections with backoff based on attempt count.
     // Skip devices that are already connected or currently connecting.
     if (existing.isConnected || existing.isConnecting) return;
-
-    // Back off: skip retry if too many recent attempts.
-    // After 3 failed attempts, only retry every 3rd scan cycle.
-    if (existing.connectionAttempts >= 3 && existing.connectionAttempts % 3 != 0) {
-      return;
-    }
 
     _autoConnectToPeer(device.deviceId);
   }

@@ -26,10 +26,7 @@ class DiscoveredPeerState {
   
   /// Whether we're currently connected (transport level)
   final bool isConnected;
-  
-  /// Number of connection attempts
-  final int connectionAttempts;
-  
+
   /// Last connection error, if any
   final String? lastError;
   
@@ -47,7 +44,6 @@ class DiscoveredPeerState {
     required this.lastSeen,
     this.isConnecting = false,
     this.isConnected = false,
-    this.connectionAttempts = 0,
     this.lastError,
     this.publicKey,
     this.serviceUuid,
@@ -71,7 +67,6 @@ class DiscoveredPeerState {
     DateTime? lastSeen,
     bool? isConnecting,
     bool? isConnected,
-    int? connectionAttempts,
     String? lastError,
     Uint8List? publicKey,
     String? serviceUuid,
@@ -84,7 +79,6 @@ class DiscoveredPeerState {
       lastSeen: lastSeen ?? this.lastSeen,
       isConnecting: isConnecting ?? this.isConnecting,
       isConnected: isConnected ?? this.isConnected,
-      connectionAttempts: connectionAttempts ?? this.connectionAttempts,
       lastError: lastError ?? this.lastError,
       publicKey: publicKey ?? this.publicKey,
       serviceUuid: serviceUuid ?? this.serviceUuid,
@@ -100,7 +94,6 @@ class DiscoveredPeerState {
           rssi == other.rssi &&
           isConnecting == other.isConnecting &&
           isConnected == other.isConnected &&
-          connectionAttempts == other.connectionAttempts &&
           lastError == other.lastError &&
           serviceUuid == other.serviceUuid;
 
@@ -110,7 +103,6 @@ class DiscoveredPeerState {
     rssi,
     isConnecting,
     isConnected,
-    connectionAttempts,
     lastError,
     serviceUuid,
   );

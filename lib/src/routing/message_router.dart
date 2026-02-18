@@ -138,7 +138,7 @@ class MessageRouter {
         discoveredPeer = _peersState.getDiscoveredBlePeer(bleDeviceId);
       }
       if (discoveredPeer == null) {
-        final theirServiceUuid = _deriveServiceUuidFromPubkey(pubkey);
+        final theirServiceUuid = BitchatIdentity.deriveServiceUuid(pubkey);
         discoveredPeer =
             _peersState.findDiscoveredBlePeerByServiceUuid(theirServiceUuid);
       }
@@ -223,18 +223,6 @@ class MessageRouter {
       if (a[i] != b[i]) return false;
     }
     return true;
-  }
-
-  /// Derive BLE Service UUID from a public key (last 16 bytes as UUID).
-  static String _deriveServiceUuidFromPubkey(Uint8List pubkey) {
-    final uuidBytes = pubkey.sublist(16, 32);
-    final hex =
-        uuidBytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-    return '${hex.substring(0, 8)}-'
-        '${hex.substring(8, 12)}-'
-        '${hex.substring(12, 16)}-'
-        '${hex.substring(16, 20)}-'
-        '${hex.substring(20, 32)}';
   }
 
   // ===== Deduplication API =====

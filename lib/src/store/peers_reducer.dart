@@ -61,7 +61,6 @@ PeersState peersReducer(PeersState state, dynamic action) {
     if (existing != null) {
       final updated = existing.copyWith(
         isConnecting: true,
-        connectionAttempts: existing.connectionAttempts + 1,
       );
       return state.copyWith(
         discoveredBlePeers: Map.from(state.discoveredBlePeers)

@@ -2,23 +2,21 @@ import 'dart:async';
 import 'dart:typed_data';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:logger/logger.dart';
+import '../models/identity.dart';
 
-/// Discovered BLE device info
+/// Discovered BLE device info (transient DTO for callbacks, not stored)
 class DiscoveredDevice {
   final String deviceId;
   final String? name;
   final String serviceUuid;
   final int rssi;
-  final DateTime discoveredAt;
-  final BluetoothDevice device;
 
   DiscoveredDevice({
     required this.deviceId,
     this.name,
     required this.serviceUuid,
     required this.rssi,
-    required this.device,
-  }) : discoveredAt = DateTime.now();
+  });
 }
 
 /// Connected peer via Central role
@@ -50,6 +48,10 @@ typedef CentralConnectionCallback = void Function(String deviceId, bool connecte
 ///
 /// Scans for devices advertising our service UUID pattern and
 /// connects to them for mesh communication.
+///
+/// Discovery state is managed externally via Redux. This service only
+/// holds connected peer state (with GATT handles) and delegates all
+/// discovery tracking to the caller via [onDeviceDiscovered].
 class BleCentralService {
   final Logger _log = Logger();
 
@@ -64,9 +66,6 @@ class BleCentralService {
 
   /// Connection timeout (kept short to avoid blocking connections to actual peers)
   static const Duration connectionTimeout = Duration(seconds: 5);
-
-  /// Discovered devices, keyed by device ID
-  final Map<String, DiscoveredDevice> _discovered = {};
 
   /// Connected peripherals, keyed by device ID
   final Map<String, ConnectedPeer> _connected = {};
@@ -93,14 +92,6 @@ class BleCentralService {
 
   /// Number of connected peripherals
   int get connectedCount => _connected.length;
-
-  /// Get discovered devices sorted by RSSI (strongest signal first)
-  List<DiscoveredDevice> get discoveredDevices {
-    final devices = _discovered.values.toList();
-    // Sort by RSSI descending (higher RSSI = stronger signal, e.g., -40 > -80)
-    devices.sort((a, b) => b.rssi.compareTo(a.rssi));
-    return devices;
-  }
 
   /// Get connected peers sorted by RSSI (strongest signal first)
   List<ConnectedPeer> get connectedPeers {
@@ -131,11 +122,8 @@ class BleCentralService {
   /// Start scanning for peers
   Future<void> startScan({Duration? timeout}) async {
     if (isScanning) {
-      // _log.w('Already scanning');
       return;
     }
-
-    // _log.i('Starting BLE scan');
 
     try {
       // Cancel previous scan subscription to prevent duplicate callbacks
@@ -159,7 +147,6 @@ class BleCentralService {
 
       // Wait for scan to actually complete by listening to isScanning stream
       await FlutterBluePlus.isScanning.firstWhere((scanning) => !scanning);
-      // _log.i('Scan completed');
     } catch (e) {
       _log.e('Failed to start scan: $e');
       rethrow;
@@ -174,25 +161,22 @@ class BleCentralService {
     _log.i('Scan stopped');
   }
 
-  /// Connect to a discovered device.
+  /// Connect to a device by its ID.
+  ///
+  /// Uses [BluetoothDevice.fromId] to obtain the device handle — no local
+  /// discovery cache is needed because Redux is the single source of truth
+  /// for discovery state.
   ///
   /// After connecting, searches ALL GATT services for the Bitchat characteristic
   /// UUID (0000ff01-...). This correctly identifies Bitchat peers regardless of
   /// their advertised service UUID.
   Future<bool> connectToDevice(String deviceId) async {
-    final discovered = _discovered[deviceId];
-    if (discovered == null) {
-      // _log.w('Device not found: $deviceId');
-      return false;
-    }
-
     if (_connected.containsKey(deviceId)) {
-      // _log.w('Already connected to: $deviceId');
       return true;
     }
 
     try {
-      final device = discovered.device;
+      final device = BluetoothDevice.fromId(deviceId);
 
       // Connect with timeout
       await device.connect(timeout: connectionTimeout);
@@ -243,20 +227,18 @@ class BleCentralService {
         }),
       );
 
-      // Store connection with RSSI from discovery
+      // Store connection (RSSI defaults to -100, will be updated on next scan)
       _connected[deviceId] = ConnectedPeer(
         deviceId: deviceId,
         device: device,
         characteristic: targetChar,
-        rssi: discovered.rssi,
+        rssi: -100,
       );
 
-      // _log.i('Connected to: $deviceId');
       onConnectionChanged?.call(deviceId, true);
 
       return true;
     } catch (e) {
-      // _log.e('Failed to connect to $deviceId: $e');
       return false;
     }
   }
@@ -331,42 +313,28 @@ class BleCentralService {
 
   void _onScanResults(List<ScanResult> results) {
     for (final result in results) {
-      // Check if this device advertises any service UUID
-      // Each Bitchat device advertises a unique UUID derived from its public key
-      // We discover all devices and filter after ANNOUNCE exchange
+      // Filter by Grassroots UUID prefix to only discover Grassroots devices.
+      // Each device advertises a UUID starting with a static 8-byte prefix
+      // (first 8 bytes of SHA-256("grassroots")), followed by 8 bytes from their pubkey.
       if (result.advertisementData.serviceUuids.isNotEmpty) {
         final uuidStr = result.advertisementData.serviceUuids.first.toString().toLowerCase();
-        final deviceId = result.device.remoteId.str;
-
-        final existing = _discovered[deviceId];
-        if (existing == null) {
-          // New device discovered
-          final discovered = DiscoveredDevice(
-            deviceId: deviceId,
-            name: result.advertisementData.advName,
-            serviceUuid: uuidStr,
-            rssi: result.rssi,
-            device: result.device,
-          );
-
-          _discovered[deviceId] = discovered;
-          // _log.d('Discovered: $deviceId (${result.advertisementData.advName})');
-          onDeviceDiscovered?.call(discovered);
-        } else {
-          // Already discovered - update RSSI and notify
-          // Create updated device with new RSSI
-          final updated = DiscoveredDevice(
-            deviceId: deviceId,
-            name: result.advertisementData.advName,
-            serviceUuid: uuidStr,
-            rssi: result.rssi,
-            device: result.device,
-          );
-          _discovered[deviceId] = updated;
-
-          // Notify with updated RSSI (callback can decide to update UI)
-          onDeviceDiscovered?.call(updated);
+        final uuidHex = uuidStr.replaceAll('-', '');
+        final isGrassrootsDevice = uuidHex.startsWith(BitchatIdentity.grassrootsUuidPrefix);
+        if (!isGrassrootsDevice) {
+          continue;
         }
+
+        final deviceId = result.device.remoteId.str;
+        _log.i('Scan: grassroots device $deviceId');
+
+        // Notify caller — Redux store is the single source of truth for
+        // discovery state; we don't cache anything locally.
+        onDeviceDiscovered?.call(DiscoveredDevice(
+          deviceId: deviceId,
+          name: result.advertisementData.advName,
+          serviceUuid: uuidStr,
+          rssi: result.rssi,
+        ));
       }
     }
   }
@@ -407,6 +375,5 @@ class BleCentralService {
 
     _subscriptions.clear();
     _connected.clear();
-    _discovered.clear();
   }
 }

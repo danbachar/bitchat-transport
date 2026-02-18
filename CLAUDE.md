@@ -1,7 +1,5 @@
 # Claude Instructions for Bitchat Transport
-
-## Critical: always be precise, critical, but helpful.
-
+## CRITICAL: always be precise, critical, but helpful. Prefer to ask rather than assume if you have unclarities
 ## CRITICAL: NO Legacy or Compatibility Code
 
 **IMPORTANT**: When refactoring, DO NOT keep old code "for legacy" or "for compatibility".
@@ -33,34 +31,29 @@ This is by design - the application layer (GSG) handles message persistence and 
 
 ## BLE Service UUID Architecture
 
-**IMPORTANT**: Each Bitchat device MUST advertise its own **unique** service UUID derived from its public key.
+**IMPORTANT**: Each device advertises a **unique** BLE service UUID composed of two parts:
+- **First 8 bytes**: Static Grassroots identifier (`84c40316-0871-e5ad`) — first 8 bytes of SHA-256("grassroots")
+- **Last 8 bytes**: Last 8 bytes of the device's Ed25519 public key
 
-### Why Unique UUIDs?
-
-1. **Identity**: The service UUID is derived from the device's Ed25519 public key (last 128 bits)
-2. **Security**: Provides cryptographic binding between BLE identity and cryptographic identity
-3. **Discovery**: Devices scan broadly and discover ALL devices with service UUIDs
-4. **Verification**: After connection, devices exchange ANNOUNCE packets containing full public keys and verify identity
+This allows identifying Grassroots devices **before connecting** by checking the advertised UUID prefix.
 
 ### How It Works
 
 1. **Advertising (Peripheral Mode)**:
-   - Each device advertises with UUID = `last_128_bits(publicKey)`
-   - Example: Device A with pubkey `0x1234...` advertises UUID `12345678-9abc-def0-1234-567890abcdef`
+   - Each device advertises with UUID = `grassroots_prefix + last_64_bits(publicKey)`
+   - The prefix `84c40316-0871-e5ad` identifies the device as a Grassroots peer
 
 2. **Scanning (Central Mode)**:
-   - Devices scan for ALL devices advertising ANY service UUID
-   - Do NOT filter by specific UUID during scan
-   - The scan is opportunistic - we discover any device that might be a peer
+   - Devices scan for all BLE devices advertising service UUIDs
+   - **Filter by Grassroots prefix**: only process devices whose UUID starts with `84c403160871e5ad`
+   - Non-Grassroots devices (headphones, smartwatches) are skipped immediately
 
 3. **Connection & Service Discovery**:
-   - After BLE connection established, perform GATT service discovery
-   - Check if device has the Bitchat GATT characteristic (UUID: `0000ff01-0000-1000-8000-00805f9b34fb`)
-   - If characteristic NOT found → disconnect (not a Bitchat peer, e.g., headphones)
-   - If characteristic found → it's a Bitchat peer, proceed to step 4
-   
-   **IMPORTANT**: We cannot know if a device is a Bitchat peer until AFTER connection and service discovery.
-   This is why we connect to all devices and disconnect from non-peers after discovery.
+   - Connect to Grassroots-prefixed devices
+   - Perform GATT service discovery as defense-in-depth
+   - Check for Bitchat characteristic (UUID: `0000ff01-0000-1000-8000-00805f9b34fb`)
+   - If characteristic NOT found → disconnect (spoofed prefix or corrupt device)
+   - If characteristic found → proceed to ANNOUNCE exchange
 
 4. **ANNOUNCE Exchange & Verification**:
    - After service discovery confirms Bitchat peer, exchange ANNOUNCE packets
@@ -74,15 +67,13 @@ This is by design - the application layer (GSG) handles message persistence and 
 
 ### DO NOT:
 - ❌ Use a single fixed service UUID for all devices
-- ❌ Filter scans to only look for specific UUIDs during discovery
-- ❌ Assume a device is a Bitchat peer before service discovery
-- ❌ Assume UUID uniqueness means peer uniqueness (verify via ANNOUNCE)
+- ❌ Skip the Grassroots prefix filter during scanning
+- ❌ Assume UUID prefix match means peer is verified (ANNOUNCE still required)
 
 ### DO:
-- ✅ Derive unique service UUID from each device's public key
-- ✅ Scan broadly for all devices with service UUIDs
-- ✅ Connect to devices, then perform service discovery to check for Bitchat characteristic
-- ✅ Disconnect from non-Bitchat devices after service discovery
+- ✅ Derive UUID from Grassroots prefix + last 8 bytes of public key
+- ✅ Filter scan results by Grassroots UUID prefix
+- ✅ Keep GATT characteristic check as defense-in-depth after connection
 - ✅ Exchange ANNOUNCE packets after confirming Bitchat peer
 - ✅ Maintain BLE Device ID ↔ Public Key mapping
 
@@ -156,7 +147,9 @@ Each peer can have both a BLE address and a libp2p address stored:
 
 ## Code References
 
-- Service UUID derivation: `lib/src/models/identity.dart` → `bleServiceUuid` getter
+- Service UUID derivation: `lib/src/models/identity.dart` → `deriveServiceUuid()` static method, `bleServiceUuid` getter
+- Grassroots UUID prefix: `lib/src/models/identity.dart` → `BitchatIdentity.grassrootsUuidPrefix`
+- Scan prefix filtering: `lib/src/ble/ble_central_service.dart` → `_onScanResults()`
 - Peripheral advertising: `lib/src/ble/ble_peripheral_service.dart` → `startAdvertising()`
 - Central scanning: `lib/src/ble/ble_central_service.dart` → `startScan()` and `_onScanResults()`
 - ANNOUNCE handling: `lib/src/transport/ble_transport_service.dart` → `_handleAnnounce()`
