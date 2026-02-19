@@ -7,6 +7,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
   // ===== BLE Discovery Actions =====
   
   if (action is BleDeviceDiscoveredAction) {
+    // TODO: why is nickname here? it comes in the announce
     final existing = state.discoveredBlePeers[action.deviceId];
     final now = DateTime.now();
     
@@ -20,11 +21,15 @@ PeersState peersReducer(PeersState state, dynamic action) {
         lastSeen: now,
         serviceUuid: action.serviceUuid,
       );
-      return state.copyWith(
+      print(state);
+      final newState = state.copyWith(
         discoveredBlePeers: Map.from(state.discoveredBlePeers)
           ..[action.deviceId] = newPeer,
       );
+      print(newState);
+      return newState;
     } else {
+      // TODO: this should be a different action, use update rssi
       // Update existing
       final updated = existing.copyWith(
         rssi: action.rssi,

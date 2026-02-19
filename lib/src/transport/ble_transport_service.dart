@@ -369,13 +369,15 @@ class BleTransportService extends TransportService {
 
     _log.i('DeviceDiscovered: ${device.deviceId}, isNew: $isNew, isConnected: ${existing?.isConnected}, isConnecting: ${existing?.isConnecting}');
     
-    // Dispatch action to update Redux store
-    store.dispatch(BleDeviceDiscoveredAction(
-      deviceId: device.deviceId,
-      displayName: device.name,
-      rssi: device.rssi,
-      serviceUuid: device.serviceUuid,
-    ));
+    // TODO: rename the action to new device discovered
+    if (isNew) {
+      store.dispatch(BleDeviceDiscoveredAction(
+        deviceId: device.deviceId,
+        displayName: device.name,
+        rssi: device.rssi,
+        serviceUuid: device.serviceUuid,
+      ));
+    }
     
     // Also update RSSI for connected Peers (those who have sent ANNOUNCE)
     final pubkey = getPubkeyForPeerId(device.deviceId);

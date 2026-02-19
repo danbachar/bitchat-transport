@@ -57,7 +57,6 @@ enum PacketType {
 /// Total header size: 152 bytes
 /// Max payload for single packet: ~350 bytes (with 500 byte MTU target)
 class BitchatPacket {
-  static final Logger _log = Logger();
   static const int headerSize = 152;
   static const int maxPayloadSize = 348; // 500 - 152
   static const int defaultTtl = 7;
@@ -228,7 +227,7 @@ class BitchatPacket {
     }
     final payload = Uint8List.fromList(data.sublist(offset, offset + payloadLength));
     
-    _log.i("Serialized packet of type $type with payload length $payloadLength");
+    // _log.i("Serialized packet of type $type with payload length $payloadLength");
     return BitchatPacket(
       packetId: packetId,
       type: type,

@@ -15,6 +15,7 @@ import 'package:cryptography/cryptography.dart';
 import 'chat_screen.dart';
 import 'chat_models.dart';
 import 'settings_screen.dart';
+import 'package:redux_remote_devtools/redux_remote_devtools.dart';
 
 // Global notification plugin instance
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
@@ -72,6 +73,57 @@ Future<BitchatIdentity> _initIdentity() async {
   return identity;
 }
 
+Map<String, dynamic> _serializeAppState(AppState state) {
+  return {
+    'connectionStatus': state.connectionStatus.name,
+    'errorMessage': state.errorMessage,
+    'peers': {
+      'discoveredBlePeers': {
+        for (final e in state.peers.discoveredBlePeers.entries)
+          e.key: {
+            'transportId': e.value.transportId,
+            'displayName': e.value.displayName,
+            'rssi': e.value.rssi,
+            'isConnecting': e.value.isConnecting,
+            'isConnected': e.value.isConnected,
+            'lastError': e.value.lastError,
+            'serviceUuid': e.value.serviceUuid,
+            'lastSeen': e.value.lastSeen.toIso8601String(),
+          },
+      },
+      'peers': {
+        for (final e in state.peers.peers.entries)
+          e.key: {
+            'nickname': e.value.nickname,
+            'connectionState': e.value.connectionState.name,
+            'transport': e.value.transport.name,
+            'activeTransport': e.value.activeTransport.name,
+            'rssi': e.value.rssi,
+            'bleDeviceId': e.value.bleDeviceId,
+            'libp2pAddress': e.value.libp2pAddress,
+            'isFriend': e.value.isFriend,
+            'lastSeen': e.value.lastSeen?.toIso8601String(),
+          },
+      },
+    },
+    'messages': {
+      'conversationCount': state.messages.conversations.length,
+      'unreadCounts': state.messages.unreadCounts,
+      'outgoingCount': state.messages.outgoingMessages.length,
+      'incomingCount': state.messages.incomingMessages.length,
+    },
+    'friendships': {
+      for (final e in state.friendships.friendships.entries)
+        e.key: {
+          'nickname': e.value.nickname,
+          'status': e.value.status.name,
+          'libp2pAddress': e.value.libp2pAddress,
+        },
+    },
+    'settings': state.settings.toJson(),
+  };
+}
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -80,6 +132,11 @@ void main() async {
   final friendships = await persistenceService.loadFriendships();
   final settings = await persistenceService.loadSettings();
   final (conversations, unreadCounts) = await persistenceService.loadConversations();
+
+  final remoteDevToolsMiddleware = RemoteDevToolsMiddleware<AppState>(
+    '132.69.202.151:8001',
+    stateEncoder: (state) => jsonEncode(_serializeAppState(state)),
+  );
 
   // Initialize redux store with hydrated state
   appStore = Store<AppState>(
@@ -92,7 +149,10 @@ void main() async {
         unreadCounts: unreadCounts,
       ),
     ),
+    middleware: [remoteDevToolsMiddleware]
   );
+  remoteDevToolsMiddleware.store = appStore;
+  remoteDevToolsMiddleware.connect();
 
   // Subscribe to persist changes (debounced)
   appStore.onChange.listen((state) => persistenceService.onStateChanged(state));

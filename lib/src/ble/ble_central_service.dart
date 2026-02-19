@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:typed_data';
+import 'package:collection/collection.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:logger/logger.dart';
 import '../models/identity.dart';
@@ -122,6 +123,7 @@ class BleCentralService {
   /// Start scanning for peers
   Future<void> startScan({Duration? timeout}) async {
     if (isScanning) {
+      _log.w('Already scanning, ignoring startScan call');
       return;
     }
 
@@ -310,31 +312,38 @@ class BleCentralService {
   }
 
   // ===== Event handlers =====
+  // Filter by Grassroots UUID prefix to only discover Grassroots devices.
+  // Each device advertises a UUID starting with a static 8-byte prefix
+  // (first 8 bytes of SHA-256("grassroots")), followed by 8 bytes from their pubkey.
+  Guid? findGrassrootsService(List<Guid> serviceUuids) {
+    return serviceUuids.firstWhereOrNull(
+      (uuid) {
+        final uuidStr = uuid.toString().toLowerCase();
+        final uuidHex = uuidStr.replaceAll('-', '');
+        return uuidHex.startsWith(BitchatIdentity.grassrootsUuidPrefix);
+      });
+  }
+  bool isGrassrootsDevice(ScanResult result) {
+    if (result.advertisementData.serviceUuids.isEmpty) return false;
+
+    final grassrootsService = findGrassrootsService(result.advertisementData.serviceUuids);
+    return grassrootsService != null;
+  }
 
   void _onScanResults(List<ScanResult> results) {
     for (final result in results) {
-      // Filter by Grassroots UUID prefix to only discover Grassroots devices.
-      // Each device advertises a UUID starting with a static 8-byte prefix
-      // (first 8 bytes of SHA-256("grassroots")), followed by 8 bytes from their pubkey.
-      if (result.advertisementData.serviceUuids.isNotEmpty) {
-        final uuidStr = result.advertisementData.serviceUuids.first.toString().toLowerCase();
-        final uuidHex = uuidStr.replaceAll('-', '');
-        final isGrassrootsDevice = uuidHex.startsWith(BitchatIdentity.grassrootsUuidPrefix);
-        if (!isGrassrootsDevice) {
-          continue;
-        }
-
+      final isGrassrootsPeer = isGrassrootsDevice(result);
+      if (isGrassrootsPeer) {
         final deviceId = result.device.remoteId.str;
-        _log.i('Scan: grassroots device $deviceId');
+        final uuidStr = findGrassrootsService(result.advertisementData.serviceUuids)!.toString().toLowerCase();
 
-        // Notify caller — Redux store is the single source of truth for
-        // discovery state; we don't cache anything locally.
         onDeviceDiscovered?.call(DiscoveredDevice(
           deviceId: deviceId,
           name: result.advertisementData.advName,
           serviceUuid: uuidStr,
           rssi: result.rssi,
         ));
+
       }
     }
   }
