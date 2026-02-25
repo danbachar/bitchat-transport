@@ -78,6 +78,9 @@ class LibP2PTransportService extends TransportService {
   /// LibP2P host instance
   Host? _host;
 
+  /// Network notifiee for connection events (registered on start, unregistered on stop)
+  NotifyBundle? _notifiee;
+
   /// Cached public IPv6 address (fetched from external service)
   String? _publicIpv6;
 
@@ -214,6 +217,13 @@ class LibP2PTransportService extends TransportService {
       if (_state == TransportState.active) {
         _setState(TransportState.ready);
       }
+
+      // Unregister connection event listener
+      if (_notifiee != null && _host != null) {
+        _host!.network.stopNotify(_notifiee!);
+        _notifiee = null;
+      }
+
       if (_host != null) {
         await _host!.close();
       }
@@ -449,6 +459,28 @@ class LibP2PTransportService extends TransportService {
     ));
   }
 
+  // ===== Notifiee Callbacks =====
+
+  void _onPeerConnected(Conn conn) {
+    final peerId = conn.remotePeer.toString();
+    _log.i('LibP2P peer connected: $peerId (${conn.stat.stats.direction})');
+    onPeerTransportConnected(peerId);
+  }
+
+  void _onPeerDisconnected(Network network, Conn conn) {
+    final remotePeer = conn.remotePeer;
+    final peerId = remotePeer.toString();
+
+    // Only treat as disconnected if no other connections remain to this peer
+    if (network.connectedness(remotePeer) == Connectedness.connected) {
+      _log.d('LibP2P connection closed to $peerId but peer still connected via other conn');
+      return;
+    }
+
+    _log.i('LibP2P peer disconnected: $peerId');
+    onPeerTransportDisconnected(peerId);
+  }
+
   // ===== Internal =====
 
   void _setState(TransportState newState) {
@@ -495,6 +527,14 @@ class LibP2PTransportService extends TransportService {
 
     final host = await p2p_config.Libp2p.new_(options);
     host.setStreamHandler('/gever/1.0.0', _handleGeverRequest);
+
+    // Register for connection lifecycle events
+    _notifiee = NotifyBundle(
+      connectedF: (network, conn) => _onPeerConnected(conn),
+      disconnectedF: (network, conn) => _onPeerDisconnected(network, conn),
+    );
+    host.network.notify(_notifiee!);
+
     await host.start();
 
     // Extract the dynamically-assigned UDP port from the resolved address
