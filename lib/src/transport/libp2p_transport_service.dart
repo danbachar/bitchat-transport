@@ -14,8 +14,10 @@ import 'package:dart_libp2p/config/config.dart' as p2p_config;
 import 'package:dart_libp2p/core/crypto/ed25519.dart' as crypto_ed25519;
 import 'package:dart_libp2p/p2p/security/noise/noise_protocol.dart';
 import 'package:dart_libp2p/p2p/transport/udx_transport.dart';
+import 'package:dart_libp2p/p2p/transport/tcp_transport.dart';
 import 'package:dart_libp2p/p2p/transport/connection_manager.dart'
     as p2p_conn_manager;
+import 'package:dart_libp2p/p2p/host/resource_manager/resource_manager_impl.dart';
 import 'package:dart_udx/dart_udx.dart';
 import 'package:http/http.dart' as http;
 
@@ -41,15 +43,40 @@ class LibP2PConfig {
   /// Enable DHT for peer routing and discovery
   final bool enableDht;
 
-  /// Enable relay for NAT traversal
+  /// Enable Circuit Relay v2 service (public peers act as relays for NATted peers)
   final bool enableRelay;
+
+  /// Enable AutoRelay (automatically discover and use relay servers when behind NAT)
+  final bool enableAutoRelay;
+
+  /// Enable AutoNAT v2 (detect NAT type and reachability)
+  final bool enableAutoNAT;
+
+  /// Enable hole punching (direct NAT traversal via DCUtR protocol)
+  final bool enableHolePunching;
+
+  /// Enable TCP transport (for interop with IPFS/libp2p ecosystem)
+  final bool enableTcp;
+
+  /// Explicit relay server multiaddrs (optional, AutoRelay can discover relays automatically)
+  final List<String> relayServers;
+
+  /// Default IPFS bootstrap peers (pre-resolved IPs since dart_libp2p lacks dnsaddr resolution)
+  static const defaultBootstrapPeers = [
+    '/ip4/104.131.131.82/tcp/4001/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ',
+  ];
 
   const LibP2PConfig({
     this.listenAddresses = const ['/ip4/0.0.0.0/tcp/0'],
-    this.bootstrapPeers = const [],
+    this.bootstrapPeers = defaultBootstrapPeers,
+    this.enableTcp = true,
     this.enableMdns = true,
     this.enableDht = false,
-    this.enableRelay = false,
+    this.enableRelay = true,
+    this.enableAutoRelay = true,
+    this.enableAutoNAT = true,
+    this.enableHolePunching = true,
+    this.relayServers = const [],
   });
 }
 
@@ -507,22 +534,36 @@ class LibP2PTransportService extends TransportService {
     final keyPair = await crypto_ed25519.generateEd25519KeyPair();
     final udx = UDX();
     final connMgr = p2p_conn_manager.ConnectionManager();
+    final resourceManager = ResourceManagerImpl();
 
     String ipv6 = await _getIPv6Address();
     _publicIpv6 = ipv6;
     _log.i('Public IPv6 address: $ipv6');
 
+    final listenAddrs = [
+      MultiAddr('/ip6/::/udp/0/udx'),
+      if (config.enableTcp) MultiAddr('/ip4/0.0.0.0/tcp/0'),
+    ];
+
     final options = <p2p_config.Option>[
       p2p_config.Libp2p.identity(keyPair),
       p2p_config.Libp2p.connManager(connMgr),
+      // UDX transport for our peers
       p2p_config.Libp2p.transport(
           UDXTransport(connManager: connMgr, udxInstance: udx)),
+      // TCP transport for IPFS/libp2p ecosystem interop (relay discovery, AutoNAT)
+      if (config.enableTcp)
+        p2p_config.Libp2p.transport(
+            TCPTransport(resourceManager: resourceManager, connManager: connMgr)),
       p2p_config.Libp2p.security(await NoiseSecurity.create(keyPair)),
-      // Listen on both IPv4 and IPv6 for maximum connectivity
-      p2p_config.Libp2p.listenAddrs([
-        // MultiAddr('/ip4/0.0.0.0/udp/0/udx'),
-        MultiAddr('/ip6/::/udp/0/udx'),
-      ]),
+      p2p_config.Libp2p.listenAddrs(listenAddrs),
+      // NAT traversal: Circuit Relay v2, AutoRelay, AutoNAT, Hole Punching
+      p2p_config.Libp2p.relay(config.enableRelay),
+      p2p_config.Libp2p.autoRelay(config.enableAutoRelay),
+      p2p_config.Libp2p.autoNAT(config.enableAutoNAT),
+      p2p_config.Libp2p.holePunching(config.enableHolePunching),
+      if (config.relayServers.isNotEmpty)
+        p2p_config.Libp2p.relayServers(config.relayServers),
     ];
 
     final host = await p2p_config.Libp2p.new_(options);
@@ -530,18 +571,18 @@ class LibP2PTransportService extends TransportService {
 
     // Register for connection lifecycle events
     _notifiee = NotifyBundle(
-      connectedF: (network, conn) => _onPeerConnected(conn),
+      connectedF: (network, conn, {Duration? dialLatency}) => _onPeerConnected(conn),
       disconnectedF: (network, conn) => _onPeerDisconnected(network, conn),
     );
     host.network.notify(_notifiee!);
 
     await host.start();
 
-    // Extract the dynamically-assigned UDP port from the resolved address
-    if (host.addrs.isNotEmpty) {
-      final parts = host.addrs.first.toString().split('/');
+    // Extract listen ports from resolved addresses
+    for (var addr in host.addrs) {
+      final parts = addr.toString().split('/');
       final udpIndex = parts.indexOf('udp');
-      if (udpIndex != -1 && udpIndex + 1 < parts.length) {
+      if (udpIndex != -1 && udpIndex + 1 < parts.length && _listenPort == null) {
         _listenPort = int.tryParse(parts[udpIndex + 1]);
       }
     }
@@ -551,7 +592,36 @@ class LibP2PTransportService extends TransportService {
       _log.i('Listening on address: $addr');
     }
     _log.i('Public multiaddr: $publicMultiaddr');
+
+    // Connect to bootstrap peers in the background (for relay discovery)
+    for (final addr in config.bootstrapPeers) {
+      _connectToBootstrapPeer(addr);
+    }
+
     return host;
+  }
+
+  /// Connect to a bootstrap peer (fire-and-forget, best-effort).
+  /// Bootstrap connections seed the AutoRelay's RelayFinder with relay candidates.
+  void _connectToBootstrapPeer(String multiaddr) {
+    unawaited(() async {
+      try {
+        final addr = MultiAddr(multiaddr);
+        // Extract peer ID from the multiaddr (last /p2p/<id> component)
+        final parts = multiaddr.split('/p2p/');
+        if (parts.length < 2) {
+          _log.w('Bootstrap addr missing peer ID: $multiaddr');
+          return;
+        }
+        final peerId = PeerId.fromString(parts.last);
+        final addrInfo = AddrInfo(peerId, [addr]);
+        _log.i('Connecting to bootstrap peer: ${parts.last.substring(0, 8)}...');
+        await _host!.connect(addrInfo);
+        _log.i('Connected to bootstrap peer: ${parts.last.substring(0, 8)}...');
+      } catch (e) {
+        _log.w('Failed to connect to bootstrap peer $multiaddr: $e');
+      }
+    }());
   }
 
   // Helper function to truncate peer IDs for display
