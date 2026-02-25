@@ -75,8 +75,8 @@ Future<BitchatIdentity> _initIdentity() async {
 
 Map<String, dynamic> _serializeAppState(AppState state) {
   return {
-    'connectionStatus': state.connectionStatus.name,
-    'errorMessage': state.errorMessage,
+    'bleTransportState': state.transports.bleState.name,
+    'libp2pTransportState': state.transports.libp2pState.name,
     'peers': {
       'discoveredBlePeers': {
         for (final e in state.peers.discoveredBlePeers.entries)
@@ -133,11 +133,6 @@ void main() async {
   final settings = await persistenceService.loadSettings();
   final (conversations, unreadCounts) = await persistenceService.loadConversations();
 
-  final remoteDevToolsMiddleware = RemoteDevToolsMiddleware<AppState>(
-    '132.69.202.151:8001',
-    stateEncoder: (state) => jsonEncode(_serializeAppState(state)),
-  );
-
   // Initialize redux store with hydrated state
   appStore = Store<AppState>(
     appReducer,
@@ -149,10 +144,7 @@ void main() async {
         unreadCounts: unreadCounts,
       ),
     ),
-    middleware: [remoteDevToolsMiddleware]
   );
-  remoteDevToolsMiddleware.store = appStore;
-  remoteDevToolsMiddleware.connect();
 
   // Subscribe to persist changes (debounced)
   appStore.onChange.listen((state) => persistenceService.onStateChanged(state));
@@ -222,9 +214,9 @@ class _BitchatHomeState extends State<BitchatHome>
   // Track nickname changes for animation
   final Map<String, _NicknameChange> _nicknameChanges = {};
   
-  // Transport availability flags
-  bool _bleAvailable = true;
-  bool _libp2pAvailable = true;
+  // Transport availability derived from Redux store
+  bool get _bleAvailable => appStore.state.transports.bleState.isUsable;
+  bool get _libp2pAvailable => appStore.state.transports.libp2pState.isUsable;
 
   /// Check if libp2p host is available for friend requests
   bool get _hasLibp2pHost => _bitchat?.libp2pHostId != null;
@@ -308,9 +300,6 @@ class _BitchatHomeState extends State<BitchatHome>
     try {
       final identity = await _initIdentity();
 
-      // Dispatch initializing status
-      appStore.dispatch(SetInitializingAction());
-
       final bitchat = Bitchat(
         identity: identity,
         store: appStore,
@@ -349,12 +338,9 @@ class _BitchatHomeState extends State<BitchatHome>
 
       final success = await bitchat.initialize();
       if (!success) {
-        appStore.dispatch(SetErrorAction('Failed: ${bitchat.status}'));
+        _log.e('Bitchat initialization failed');
         return;
       }
-
-      // Dispatch online status
-      appStore.dispatch(SetOnlineAction());
 
       // Hydrate Redux store with existing friends from FriendshipStore
       await _hydrateFriendsFromStore();
@@ -362,7 +348,7 @@ class _BitchatHomeState extends State<BitchatHome>
       // Start periodic friend announce timer
       _startFriendAnnounceTimer();
     } catch (e) {
-      appStore.dispatch(SetErrorAction('Error: $e'));
+      _log.e('Initialization error: $e');
     }
   }
 
@@ -2011,8 +1997,6 @@ class _BitchatHomeState extends State<BitchatHome>
       MaterialPageRoute(
         builder: (context) => SettingsScreen(
           store: appStore,
-          bleAvailable: _bleAvailable,
-          libp2pAvailable: _libp2pAvailable,
           onSettingsChanged: () {
             setState(() {});
           },

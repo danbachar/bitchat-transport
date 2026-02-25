@@ -41,7 +41,6 @@ void main() {
       expect(peer.serviceUuid, 'uuid-abc');
       expect(peer.isConnecting, false);
       expect(peer.isConnected, false);
-      expect(peer.connectionAttempts, 0);
     });
 
     test('updates existing peer RSSI and lastSeen', () {
@@ -143,7 +142,7 @@ void main() {
   // =========================================================================
 
   group('BleDeviceConnectingAction', () {
-    test('sets isConnecting=true and increments connectionAttempts', () {
+    test('sets isConnecting=true', () {
       final now = DateTime.now();
       final initial = PeersState(
         discoveredBlePeers: {
@@ -152,7 +151,6 @@ void main() {
             rssi: -60,
             discoveredAt: now,
             lastSeen: now,
-            connectionAttempts: 2,
           ),
         },
       );
@@ -162,7 +160,6 @@ void main() {
 
       final peer = result.discoveredBlePeers['device-1']!;
       expect(peer.isConnecting, true);
-      expect(peer.connectionAttempts, 3);
     });
 
     test('is a no-op for unknown device', () {

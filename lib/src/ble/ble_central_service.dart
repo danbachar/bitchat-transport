@@ -295,6 +295,11 @@ class BleCentralService {
       return true;
     } catch (e) {
       _log.e('Failed to send data to $deviceId: $e');
+      // Remove stale entry so we stop writing to the broken GATT handle.
+      // Don't trigger the full disconnect chain — the native connection
+      // will fire the disconnect listener on its own, and the normal
+      // staleness mechanism handles peer cleanup after missed ANNOUNCEs.
+      _connected.remove(deviceId);
       return false;
     }
   }

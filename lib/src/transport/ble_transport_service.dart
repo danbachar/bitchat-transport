@@ -59,15 +59,11 @@ class BleTransportService extends TransportService {
   /// Peripheral service (advertiser)
   late final BlePeripheralService _peripheral;
 
-  /// Current transport state
-  TransportState _state = TransportState.uninitialized;
-
   /// Flag to block packet processing after stop() is called
   /// This prevents race conditions where packets were already in the event queue
   bool _stopped = false;
 
   /// Stream controllers
-  final _stateController = StreamController<TransportState>.broadcast();
   final _dataController = StreamController<TransportDataEvent>.broadcast();
   final _connectionController = StreamController<TransportConnectionEvent>.broadcast();
 
@@ -105,10 +101,7 @@ class BleTransportService extends TransportService {
   TransportDisplayInfo get displayInfo => _defaultBleDisplayInfo;
 
   @override
-  TransportState get state => _state;
-
-  @override
-  Stream<TransportState> get stateStream => _stateController.stream;
+  TransportState get state => store.state.transports.bleState;
 
   @override
   Stream<TransportDataEvent> get dataStream => _dataController.stream;
@@ -121,7 +114,7 @@ class BleTransportService extends TransportService {
 
   @override
   bool get isActive =>
-      _state == TransportState.active &&
+      store.state.transports.bleState == TransportState.active &&
       (_central.isScanning || _peripheral.isAdvertising);
 
   /// Whether currently scanning for devices
@@ -146,9 +139,9 @@ class BleTransportService extends TransportService {
 
   @override
   Future<bool> initialize() async {
-    if (_state != TransportState.uninitialized) {
+    if (state != TransportState.uninitialized) {
       _log.w('BLE transport already initialized');
-      return _state == TransportState.ready || _state == TransportState.active;
+      return state == TransportState.ready || state == TransportState.active;
     }
 
     _setState(TransportState.initializing);
@@ -180,8 +173,8 @@ class BleTransportService extends TransportService {
 
   @override
   Future<void> start() async {
-    if (_state != TransportState.ready && _state != TransportState.active) {
-      _log.w('Cannot start BLE transport in state: $_state');
+    if (state != TransportState.ready && state != TransportState.active) {
+      _log.w('Cannot start BLE transport in state: $state');
       return;
     }
 
@@ -216,7 +209,7 @@ class BleTransportService extends TransportService {
     // Stop advertising and disconnect all centrals
     await _peripheral.stopAdvertising();
 
-    if (_state == TransportState.active) {
+    if (state == TransportState.active) {
       _setState(TransportState.ready);
     }
 
@@ -227,18 +220,6 @@ class BleTransportService extends TransportService {
   Future<void> scan({Duration? timeout}) async {
     // _log.d('Starting BLE scan${timeout != null ? " for ${timeout.inSeconds}s" : ""}');
     await _central.startScan(timeout: timeout);
-  }
-
-  @override
-  Future<bool> connectToPeer(String peerId) async {
-    // _log.d('Connecting to peer: $peerId');
-    return await _central.connectToDevice(peerId);
-  }
-
-  @override
-  Future<void> disconnectFromPeer(String peerId) async {
-    // _log.d('Disconnecting from peer: $peerId');
-    await _central.disconnectFromDevice(peerId);
   }
 
   @override
@@ -290,10 +271,8 @@ class BleTransportService extends TransportService {
     await _central.dispose();
     await _peripheral.dispose();
 
-    // Set state before closing controllers
     _setState(TransportState.disposed);
 
-    await _stateController.close();
     await _dataController.close();
     await _connectionController.close();
   }
@@ -384,16 +363,9 @@ class BleTransportService extends TransportService {
     if (pubkey != null) {
       store.dispatch(PeerRssiUpdatedAction(publicKey: pubkey, rssi: device.rssi));
     }
+
+    if (!isNew && (existing.isConnected || existing.isConnecting)) return;
     
-    // Auto-connect if new device
-    if (isNew) {
-      _autoConnectToPeer(device.deviceId);
-      return;
-    }
-
-    // Skip devices that are already connected or currently connecting.
-    if (existing.isConnected || existing.isConnecting) return;
-
     _autoConnectToPeer(device.deviceId);
   }
   
@@ -460,9 +432,8 @@ class BleTransportService extends TransportService {
   // ===== Helpers =====
 
   void _setState(TransportState newState) {
-    if (_state != newState) {
-      _state = newState;
-      _stateController.add(newState);
+    if (store.state.transports.bleState != newState) {
+      store.dispatch(BleTransportStateChangedAction(newState));
     }
   }
 

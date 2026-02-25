@@ -128,12 +128,6 @@ void main() {
       });
     });
 
-    group('validate()', () {
-      test('does not throw for valid identity', () async {
-        await expectLater(identity.validate(), completes);
-      });
-    });
-
     group('toJson() / fromMap() round-trip', () {
       test('serializes and deserializes preserving publicKey', () {
         final json = identity.toJson();
@@ -175,12 +169,6 @@ void main() {
         final json = identity.toJson();
         final restored = BitchatIdentity.fromMap(json);
         expect(restored.shortFingerprint, equals(identity.shortFingerprint));
-      });
-
-      test('restored identity passes validate()', () async {
-        final json = identity.toJson();
-        final restored = BitchatIdentity.fromMap(json);
-        await expectLater(restored.validate(), completes);
       });
     });
 

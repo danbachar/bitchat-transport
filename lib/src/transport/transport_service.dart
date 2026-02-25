@@ -134,9 +134,6 @@ abstract class TransportService {
   /// Current state of the transport
   TransportState get state;
 
-  /// Stream of state changes
-  Stream<TransportState> get stateStream;
-
   /// Stream of received data events
   Stream<TransportDataEvent> get dataStream;
 
@@ -175,15 +172,6 @@ abstract class TransportService {
   /// - Can be restarted with [start]
   Future<void> stop();
 
-  /// Connect to a specific peer by their transport-specific ID.
-  ///
-  /// Returns true if connection was initiated successfully.
-  /// The actual connection result will come through [connectionStream].
-  Future<bool> connectToPeer(String peerId);
-
-  /// Disconnect from a specific peer.
-  Future<void> disconnectFromPeer(String peerId);
-
   /// Send data to a specific peer.
   ///
   /// Returns true if the data was sent (or queued) successfully.
@@ -212,5 +200,11 @@ abstract class TransportService {
   ///
   /// After this call, the transport cannot be used again.
   Future<void> dispose();
+}
+
+/// Convenience extension on TransportState
+extension TransportStateX on TransportState {
+  /// Whether this state represents a usable (initialized) transport
+  bool get isUsable => this == TransportState.ready || this == TransportState.active;
 }
 

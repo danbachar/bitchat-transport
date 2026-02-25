@@ -57,17 +57,6 @@ class BitchatIdentity {
       nickname: nickname,
     );
   }
-
-  /// Validates the keypair lengths (for compatibility)
-  Future<void> validate() async {
-    // Keys are already validated in create(), this is kept for backward compatibility
-    if (publicKey.length != 32) {
-      throw ArgumentError('Public key must be 32 bytes (Ed25519)');
-    }
-    if (privateKey.length != 64) {
-      throw ArgumentError('Private key must be 64 bytes (Ed25519 seed + pubkey)');
-    }
-  }
   
   /// Static 8-byte prefix identifying Grassroots devices on BLE.
   /// First 8 bytes of SHA-256("grassroots").
