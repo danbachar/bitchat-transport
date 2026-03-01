@@ -18,6 +18,8 @@ import 'package:dart_libp2p/p2p/transport/tcp_transport.dart';
 import 'package:dart_libp2p/p2p/transport/connection_manager.dart'
     as p2p_conn_manager;
 import 'package:dart_libp2p/p2p/host/resource_manager/resource_manager_impl.dart';
+import 'package:dart_libp2p/p2p/host/basic/natmgr.dart';
+import 'package:dart_libp2p/p2p/nat/stun/stun_client_pool.dart';
 import 'package:dart_udx/dart_udx.dart';
 import 'package:http/http.dart' as http;
 
@@ -61,9 +63,23 @@ class LibP2PConfig {
   /// Explicit relay server multiaddrs (optional, AutoRelay can discover relays automatically)
   final List<String> relayServers;
 
+  /// STUN servers for NAT discovery and external address mapping.
+  /// Defaults to Google's public STUN servers (stun.l.google.com, stun1-4.l.google.com).
+  /// Set to empty list to disable STUN/NAT manager.
+  final List<({String host, int port})> stunServers;
+
   /// Default IPFS bootstrap peers (pre-resolved IPs since dart_libp2p lacks dnsaddr resolution)
   static const defaultBootstrapPeers = [
     '/ip4/104.131.131.82/tcp/4001/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ',
+  ];
+
+  /// Default STUN servers (Google's public STUN pool)
+  static const defaultStunServers = [
+    (host: 'stun.l.google.com', port: 19302),
+    (host: 'stun1.l.google.com', port: 19302),
+    (host: 'stun2.l.google.com', port: 19302),
+    (host: 'stun3.l.google.com', port: 19302),
+    (host: 'stun4.l.google.com', port: 19302),
   ];
 
   const LibP2PConfig({
@@ -77,6 +93,7 @@ class LibP2PConfig {
     this.enableAutoNAT = true,
     this.enableHolePunching = true,
     this.relayServers = const [],
+    this.stunServers = defaultStunServers,
   });
 }
 
@@ -141,6 +158,72 @@ class LibP2PTransportService extends TransportService {
     } catch (e) {
       _log.e('Failed to refresh public IPv6 address: $e');
     }
+  }
+
+  /// Returns all routable addresses in priority order:
+  /// 1. Public IPv6 multiaddr (from icanhazip — immediate, most reliable)
+  /// 2. Circuit relay addresses (from host.addrs — /p2p-circuit/)
+  /// 3. STUN/NAT-mapped IPv4 addresses (from host.addrs — routable IPv4, not relay, not local)
+  ///
+  /// Each address includes `/p2p/{hostId}` suffix for peer identification.
+  List<String> getRoutableAddresses() {
+    final id = hostId;
+    if (id == null) return [];
+
+    final addresses = <String>[];
+
+    // 1. Public IPv6 (highest priority — immediately available)
+    final ipv6Addr = publicMultiaddr;
+    if (ipv6Addr != null) {
+      addresses.add('$ipv6Addr/p2p/$id');
+    }
+
+    // 2. Circuit relay addresses (from host.addrs)
+    // 3. STUN/NAT-mapped routable IPv4 addresses (from host.addrs)
+    final relayAddrs = <String>[];
+    final stunAddrs = <String>[];
+
+    for (final addr in hostAddrs) {
+      final addrStr = addr.toString();
+
+      if (addrStr.contains('/p2p-circuit/')) {
+        // Relay address — already includes /p2p/ components
+        relayAddrs.add(addrStr);
+      } else if (_isRoutableAddress(addrStr) && !_isIpv6Address(addrStr)) {
+        // Routable non-IPv6 (i.e., STUN-mapped IPv4)
+        final withId = addrStr.contains('/p2p/') ? addrStr : '$addrStr/p2p/$id';
+        stunAddrs.add(withId);
+      }
+    }
+
+    addresses.addAll(relayAddrs);
+    addresses.addAll(stunAddrs);
+
+    return addresses;
+  }
+
+  /// Check if a multiaddr string is a routable (non-local) address
+  bool _isRoutableAddress(String addr) {
+    // Filter out loopback, unspecified, private, and link-local
+    const nonRoutable = [
+      '/ip4/127.', '/ip4/0.0.0.0',
+      '/ip6/::1/', '/ip6/::/',
+      '/ip4/10.', '/ip4/192.168.',
+      '/ip4/172.16.', '/ip4/172.17.', '/ip4/172.18.', '/ip4/172.19.',
+      '/ip4/172.2', '/ip4/172.3',
+      '/ip6/fe80:',
+    ];
+    for (final prefix in nonRoutable) {
+      if (addr.contains(prefix)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /// Check if a multiaddr string is an IPv6 address
+  bool _isIpv6Address(String addr) {
+    return addr.startsWith('/ip6/');
   }
 
   /// Current transport state
@@ -557,7 +640,14 @@ class LibP2PTransportService extends TransportService {
             TCPTransport(resourceManager: resourceManager, connManager: connMgr)),
       p2p_config.Libp2p.security(await NoiseSecurity.create(keyPair)),
       p2p_config.Libp2p.listenAddrs(listenAddrs),
-      // NAT traversal: Circuit Relay v2, AutoRelay, AutoNAT, Hole Punching
+      // NAT traversal: STUN/NAT discovery, Circuit Relay v2, AutoRelay, AutoNAT, Hole Punching
+      if (config.stunServers.isNotEmpty)
+        p2p_config.Libp2p.natManager((network) {
+          final stunPool = StunClientPool(
+            stunServers: config.stunServers,
+          );
+          return newNATManager(network, stunClientPool: stunPool);
+        }),
       p2p_config.Libp2p.relay(config.enableRelay),
       p2p_config.Libp2p.autoRelay(config.enableAutoRelay),
       p2p_config.Libp2p.autoNAT(config.enableAutoNAT),

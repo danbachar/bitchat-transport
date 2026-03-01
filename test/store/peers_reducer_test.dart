@@ -422,7 +422,7 @@ void main() {
         protocolVersion: 3,
         rssi: -40,
         transport: PeerTransport.libp2p,
-        libp2pAddress: '/ip4/1.2.3.4/tcp/4001/p2p/QmTest',
+        libp2pAddresses: ['/ip4/1.2.3.4/tcp/4001/p2p/QmTest'],
       );
 
       final result = peersReducer(initial, action);

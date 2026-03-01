@@ -104,8 +104,8 @@ class PeerAnnounceReceivedAction extends PeerAction {
   final int rssi;
   final PeerTransport transport;
   final String? bleDeviceId;
-  final String? libp2pAddress;
-  
+  final List<String> libp2pAddresses;
+
   PeerAnnounceReceivedAction({
     required this.publicKey,
     required this.nickname,
@@ -113,7 +113,7 @@ class PeerAnnounceReceivedAction extends PeerAction {
     required this.rssi,
     this.transport = PeerTransport.bleDirect,
     this.bleDeviceId,
-    this.libp2pAddress,
+    this.libp2pAddresses = const [],
   });
 }
 

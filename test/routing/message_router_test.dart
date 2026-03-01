@@ -16,10 +16,10 @@ Uint8List buildAnnouncePayload({
   required Uint8List pubkey,
   String nickname = 'OtherPeer',
   String? address,
+  List<String> addresses = const [],
 }) {
   final nicknameBytes = Uint8List.fromList(nickname.codeUnits);
-  final addressBytes =
-      address != null ? Uint8List.fromList(address.codeUnits) : Uint8List(0);
+  final allAddresses = address != null ? [address] : addresses;
   final buffer = BytesBuilder();
 
   buffer.add(pubkey);
@@ -31,11 +31,13 @@ Uint8List buildAnnouncePayload({
   buffer.addByte(nicknameBytes.length);
   buffer.add(nicknameBytes);
 
-  final addrLenBytes = ByteData(2);
-  addrLenBytes.setUint16(0, addressBytes.length, Endian.big);
-  buffer.add(addrLenBytes.buffer.asUint8List());
-  if (addressBytes.isNotEmpty) {
-    buffer.add(addressBytes);
+  buffer.addByte(allAddresses.length);
+  for (final addr in allAddresses) {
+    final addrBytes = Uint8List.fromList(addr.codeUnits);
+    final addrLenBytes = ByteData(2);
+    addrLenBytes.setUint16(0, addrBytes.length, Endian.big);
+    buffer.add(addrLenBytes.buffer.asUint8List());
+    buffer.add(addrBytes);
   }
 
   return buffer.toBytes();

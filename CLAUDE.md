@@ -2,15 +2,19 @@
 
 ## Critical: always be precise, critical, but helpful.
 
-## CRITICAL: NO Legacy or Compatibility Code
+## CRITICAL: NO Legacy or Compatibility Code — EVER
 
-**IMPORTANT**: When refactoring, DO NOT keep old code "for legacy" or "for compatibility".
+**IMPORTANT**: NEVER write backward-compatible code, migration shims, or compatibility layers. This applies to ALL code changes including protocol changes, API changes, data format changes, and refactors.
 
 - ❌ **NO** `// Legacy - kept for compatibility` comments
 - ❌ **NO** keeping both old and new implementations
+- ❌ **NO** backward-compatible encoding/decoding (e.g., "old receivers will still parse this")
+- ❌ **NO** migration paths or version-gated behavior
+- ❌ **NO** fallback logic for old formats or protocols
 - ✅ **DO** fully replace old code with new implementation
 - ✅ **DO** remove unused imports and dead code
 - ✅ **DO** update all call sites when changing APIs
+- ✅ **DO** change protocols/formats cleanly without worrying about old versions
 - ❌ **NO** `PeerStore` - use Redux store (`AppState.peers`) only
 
 ---

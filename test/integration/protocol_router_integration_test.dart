@@ -109,7 +109,7 @@ void main() {
 
     test('ANNOUNCE with libp2p address roundtrips correctly', () async {
       const address = '/ip4/192.168.1.1/tcp/4001/p2p/QmHash123';
-      final announcePayload = aliceProtocol.createAnnouncePayload(address: address);
+      final announcePayload = aliceProtocol.createAnnouncePayload(addresses: [address]);
 
       final packet = BitchatPacket(
         type: PacketType.announce,
@@ -133,7 +133,7 @@ void main() {
       );
 
       expect(receivedAnnounce, isNotNull);
-      expect(receivedAnnounce!.libp2pAddress, equals(address));
+      expect(receivedAnnounce!.libp2pAddresses, equals([address]));
 
       // Verify libp2p address stored in Redux
       final peerState = bobStore.state.peers.getPeerByPubkey(aliceIdentity.publicKey);
@@ -294,7 +294,7 @@ void main() {
 
     test('libp2p ANNOUNCE with address roundtrips correctly', () async {
       const address = '/ip6/::1/udp/4001/udx';
-      final announcePayload = aliceProtocol.createAnnouncePayload(address: address);
+      final announcePayload = aliceProtocol.createAnnouncePayload(addresses: [address]);
 
       final packet = BitchatPacket(
         type: PacketType.announce,
@@ -316,7 +316,7 @@ void main() {
         libp2pPeerId: 'peer-alice-id',
       );
 
-      expect(receivedAnnounce!.libp2pAddress, equals(address));
+      expect(receivedAnnounce!.libp2pAddresses, equals([address]));
     });
   });
 
@@ -490,7 +490,7 @@ void main() {
 
       // Then: Alice announces via libp2p with address
       const libp2pAddr = '/ip4/10.0.0.1/tcp/4001/p2p/QmAlice';
-      final libp2pAnnouncePayload = aliceProtocol.createAnnouncePayload(address: libp2pAddr);
+      final libp2pAnnouncePayload = aliceProtocol.createAnnouncePayload(addresses: [libp2pAddr]);
       final libp2pPacket = BitchatPacket(
         type: PacketType.announce,
         senderPubkey: aliceIdentity.publicKey,

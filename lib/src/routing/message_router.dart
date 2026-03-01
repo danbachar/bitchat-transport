@@ -148,9 +148,9 @@ class MessageRouter {
     final isNew = _peersState.getPeerByPubkey(pubkey) == null;
 
     // LibP2P-specific: use peerId as fallback address
-    String? libp2pAddress = data.libp2pAddress;
-    if (transport == PeerTransport.libp2p && libp2pAddress == null) {
-      libp2pAddress = libp2pPeerId;
+    var libp2pAddresses = data.libp2pAddresses;
+    if (transport == PeerTransport.libp2p && libp2pAddresses.isEmpty && libp2pPeerId != null) {
+      libp2pAddresses = [libp2pPeerId];
     }
 
     store.dispatch(PeerAnnounceReceivedAction(
@@ -160,7 +160,7 @@ class MessageRouter {
       rssi: effectiveRssi,
       transport: transport,
       bleDeviceId: bleDeviceId,
-      libp2pAddress: libp2pAddress,
+      libp2pAddresses: libp2pAddresses,
     ));
 
     if (bleDeviceId != null) {

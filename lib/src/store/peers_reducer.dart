@@ -175,7 +175,11 @@ PeersState peersReducer(PeersState state, dynamic action) {
     final pubkeyHex = _pubkeyToHex(action.publicKey);
     final existing = state.peers[pubkeyHex];
     final now = DateTime.now();
-    
+
+    // Extract hostId and base addresses from the address list
+    final parsed = _parseLibp2pAddresses(action.libp2pAddresses);
+    final primaryAddress = action.libp2pAddresses.isNotEmpty ? action.libp2pAddresses.first : null;
+
     if (existing == null) {
       // New peer
       final newPeer = PeerState(
@@ -187,7 +191,9 @@ PeersState peersReducer(PeersState state, dynamic action) {
         protocolVersion: action.protocolVersion,
         lastSeen: now,
         bleDeviceId: action.bleDeviceId,
-        libp2pAddress: action.libp2pAddress,
+        libp2pAddress: primaryAddress,
+        libp2pHostId: parsed.hostId,
+        libp2pHostAddrs: parsed.baseAddresses,
       );
       return state.copyWith(
         peers: Map.from(state.peers)..[pubkeyHex] = newPeer,
@@ -202,7 +208,9 @@ PeersState peersReducer(PeersState state, dynamic action) {
         protocolVersion: action.protocolVersion,
         lastSeen: now,
         bleDeviceId: action.bleDeviceId ?? existing.bleDeviceId,
-        libp2pAddress: action.libp2pAddress ?? existing.libp2pAddress,
+        libp2pAddress: primaryAddress ?? existing.libp2pAddress,
+        libp2pHostId: parsed.hostId ?? existing.libp2pHostId,
+        libp2pHostAddrs: parsed.baseAddresses.isNotEmpty ? parsed.baseAddresses : existing.libp2pHostAddrs,
       );
       return state.copyWith(
         peers: Map.from(state.peers)..[pubkeyHex] = updated,
@@ -459,4 +467,28 @@ PeersState peersReducer(PeersState state, dynamic action) {
 
 String _pubkeyToHex(List<int> pubkey) {
   return pubkey.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+}
+
+/// Parse a list of libp2p multiaddrs to extract the hostId and base addresses.
+/// Each address may be in the form `/ip6/.../udp/.../udx/p2p/QmABC`.
+/// Returns the first hostId found and all base addresses (with /p2p/ suffix stripped).
+({String? hostId, List<String> baseAddresses}) _parseLibp2pAddresses(List<String> addresses) {
+  String? hostId;
+  final baseAddresses = <String>[];
+
+  for (final addr in addresses) {
+    final parts = addr.split('/p2p/');
+    if (parts.length >= 2) {
+      // Last /p2p/ segment is the hostId (handles circuit relay addresses too)
+      final id = parts.last;
+      hostId ??= id;
+      // Base address is everything before the last /p2p/ segment
+      baseAddresses.add(parts.sublist(0, parts.length - 1).join('/p2p/'));
+    } else {
+      // No /p2p/ component — use as-is
+      baseAddresses.add(addr);
+    }
+  }
+
+  return (hostId: hostId, baseAddresses: baseAddresses);
 }

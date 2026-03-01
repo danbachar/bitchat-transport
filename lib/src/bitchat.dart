@@ -980,10 +980,8 @@ class Bitchat {
   Future<void> _broadcastAnnounceViaLibp2p() async {
     if (_libp2pService == null || !_libp2pAvailable) return;
 
-    // Prefer public multiaddr (routable), fall back to local host addr
-    final addrs = libp2pHostAddrs;
-    final addr = publicLibp2pMultiaddr ?? (addrs.isNotEmpty ? addrs.first : null);
-    final payload = _protocolHandler.createAnnouncePayload(address: addr);
+    final addresses = _libp2pService!.getRoutableAddresses();
+    final payload = _protocolHandler.createAnnouncePayload(addresses: addresses);
     final packet = BitchatPacket(
       type: PacketType.announce,
       ttl: 0,
@@ -995,20 +993,20 @@ class Bitchat {
     await _libp2pService!.broadcast(packet.serialize());
   }
 
-  /// Send ANNOUNCE with address to a specific friend.
+  /// Send ANNOUNCE with addresses to a specific friend.
   ///
-  /// This is the unified presence mechanism - friends receive our libp2p address
+  /// This is the unified presence mechanism - friends receive our libp2p addresses
   /// in the ANNOUNCE so they can connect to us over the internet.
   ///
   /// Works over both BLE and libp2p transports.
   Future<bool> sendAnnounceToFriend({
     required Uint8List friendPubkey,
-    required String myAddress,
+    required List<String> myAddresses,
   }) async {
     var sent = false;
 
-    // Create signed ANNOUNCE packet with our address
-    final payload = _protocolHandler.createAnnouncePayload(address: myAddress);
+    // Create signed ANNOUNCE packet with our addresses
+    final payload = _protocolHandler.createAnnouncePayload(addresses: myAddresses);
     final packet = BitchatPacket(
       type: PacketType.announce,
       ttl: 0,
