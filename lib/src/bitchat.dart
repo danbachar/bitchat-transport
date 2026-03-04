@@ -46,9 +46,6 @@ class BitchatConfig {
   /// Scan duration (null for continuous)
   final Duration? scanDuration;
 
-  /// Whether to relay packets for other peers
-  final bool enableRelay;
-
   /// Local name for BLE advertising
   final String? localName;
   
@@ -68,7 +65,6 @@ class BitchatConfig {
     this.autoConnect = true,
     this.autoStart = true,
     this.scanDuration,
-    this.enableRelay = true,
     this.localName,
     this.announceInterval = const Duration(seconds: 10),
     this.scanInterval = const Duration(seconds: 10),
