@@ -1,7 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:bitchat_transport/src/store/messages_state.dart';
 
-// Re-export ChatMessageType from messages_state for backwards compatibility
 export 'package:bitchat_transport/src/store/messages_state.dart' show ChatMessageType;
 
 /// A chat message model for the demo app

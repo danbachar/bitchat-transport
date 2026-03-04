@@ -97,7 +97,7 @@ This is by design - the application layer (GSG) handles message persistence and 
 - Messages to offline peers simply **fail** - they are NOT cached
 - The sender must retry later when the peer is online
 - This is by design to keep the protocol simple and avoid message accumulation
-- If a peer is unreachable via any enabled transport (BLE or libp2p), `send()` returns `false`
+- If a peer is unreachable via any enabled transport (BLE or iroh), `send()` returns `false`
 
 ### DO NOT:
 - ❌ Cache messages for offline peers
@@ -108,7 +108,7 @@ This is by design - the application layer (GSG) handles message persistence and 
 ### DO:
 - ✅ Return `false` immediately if peer is unreachable
 - ✅ Let the application layer handle retry logic if needed
-- ✅ Try all available transports (BLE first, then libp2p) before failing
+- ✅ Try all available transports (BLE first, then iroh) before failing
 
 ## Redux Architecture for Peers
 
@@ -145,18 +145,60 @@ appStore.onChange.listen((_) => setState(() {}));
 ### Transport Priority
 When both transports are enabled and a peer is reachable via both:
 1. **Bluetooth (BLE)** is preferred - faster, no Internet needed, works for nearby peers
-2. **libp2p (Internet)** is fallback - works globally but requires Internet
+2. **iroh (Internet)** is fallback - works globally but requires Internet
 
 ### Disabling Transports
 - When Bluetooth is disabled: stop advertising, stop scanning, no BLE communication
-- When libp2p is disabled: stop libp2p host, no Internet communication
+- When iroh is disabled: stop iroh endpoint, no Internet communication
 - At least one transport should remain enabled for the app to function
 
 ### Per-Peer Addresses
-Each peer can have both a BLE address and a libp2p address stored:
+Each peer can have both a BLE address and an iroh connection:
 - `PeerState.bleDeviceId` - BLE device ID (MAC on Android, UUID on iOS)
-- `PeerState.libp2pAddress` - libp2p multiaddress
+- `PeerState.irohConnected` - whether iroh connection is active
+- `PeerState.irohRelayUrl` - iroh relay URL
+- `PeerState.irohDirectAddresses` - iroh direct addresses
 - Messages route through the best available transport based on peer availability
+
+## Iroh Connection Assumptions
+
+**IMPORTANT**: Iroh is a P2P networking library (iroh.computer) that uses QUIC over UDP. It does NOT use a DHT or bootstrap nodes.
+
+### How Iroh Connects Peers
+
+1. **Identity = NodeId**: Each peer's Ed25519 public key IS their iroh NodeId. No separate addressing.
+2. **Relay servers** (e.g., `https://use1-1.relay.iroh.network.`) provide NAT traversal:
+   - Connections start through relay when peers are behind NAT/firewalls
+   - Iroh automatically hole-punches and migrates to direct connections when possible
+   - Relay servers are NOT message relays — they only facilitate connection establishment
+3. **No bootstrap node required**: Iroh does not use DHT/Kademlia. Peer discovery is handled at the application layer via BLE ANNOUNCE packets.
+4. **Direct connections**: If peers have public IPs or are on the same LAN, relay is not needed.
+
+### Peer Discovery Flow
+
+Iroh does NOT discover peers on its own. Discovery happens via:
+1. **BLE ANNOUNCE** packets — include the sender's iroh relay URL + direct addresses
+2. **Out-of-band** exchange (e.g., QR code, manual entry)
+3. After discovery, the app calls `connectToNode(nodeIdHex, relayUrl, directAddresses)` to establish an iroh connection
+
+### Connection Requirements
+
+| Scenario | Internet Required? | Notes |
+|----------|-------------------|-------|
+| Same LAN / public IP | No | Direct addresses suffice |
+| Behind NAT/firewall | Yes | Needs relay server for hole punching |
+| No relay configured | Only works with direct reachability | |
+
+### DO NOT:
+- ❌ Assume iroh has built-in peer discovery (it doesn't)
+- ❌ Use iroh relay servers to relay/store messages (they only do NAT traversal)
+- ❌ Require a custom bootstrap/signaling server
+
+### DO:
+- ✅ Use BLE ANNOUNCE for peer discovery (includes iroh addresses)
+- ✅ Pass relay URL + direct addresses when connecting to a peer
+- ✅ Rely on iroh's automatic relay-to-direct migration
+- ✅ Use default iroh relay servers (`IrohConfig.defaultRelayUrls`)
 
 ## Code References
 

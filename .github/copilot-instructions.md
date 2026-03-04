@@ -91,7 +91,7 @@ This is by design - the application layer (GSG) handles message persistence and 
 - Messages to offline peers simply **fail** - they are NOT cached
 - The sender must retry later when the peer is online
 - This is by design to keep the protocol simple and avoid message accumulation
-- If a peer is unreachable via any enabled transport (BLE or libp2p), `send()` returns `false`
+- If a peer is unreachable via any enabled transport (BLE or iroh), `send()` returns `false`
 
 ### DO NOT:
 - ❌ Cache messages for offline peers
@@ -102,7 +102,7 @@ This is by design - the application layer (GSG) handles message persistence and 
 ### DO:
 - ✅ Return `false` immediately if peer is unreachable
 - ✅ Let the application layer handle retry logic if needed
-- ✅ Try all available transports (BLE first, then libp2p) before failing
+- ✅ Try all available transports (BLE first, then iroh) before failing
 
 ## Redux Architecture for Peers
 
@@ -139,17 +139,19 @@ appStore.onChange.listen((_) => setState(() {}));
 ### Transport Priority
 When both transports are enabled and a peer is reachable via both:
 1. **Bluetooth (BLE)** is preferred - faster, no Internet needed, works for nearby peers
-2. **libp2p (Internet)** is fallback - works globally but requires Internet
+2. **iroh (Internet)** is fallback - works globally but requires Internet
 
 ### Disabling Transports
 - When Bluetooth is disabled: stop advertising, stop scanning, no BLE communication
-- When libp2p is disabled: stop libp2p host, no Internet communication
+- When iroh is disabled: stop iroh endpoint, no Internet communication
 - At least one transport should remain enabled for the app to function
 
 ### Per-Peer Addresses
-Each peer can have both a BLE address and a libp2p address stored:
+Each peer can have both a BLE address and an iroh connection:
 - `PeerState.bleDeviceId` - BLE device ID (MAC on Android, UUID on iOS)
-- `PeerState.libp2pAddress` - libp2p multiaddress
+- `PeerState.irohConnected` - whether iroh connection is active
+- `PeerState.irohRelayUrl` - iroh relay URL
+- `PeerState.irohDirectAddresses` - iroh direct addresses
 - Messages route through the best available transport based on peer availability
 
 ## Code References

@@ -51,7 +51,7 @@ MessagesState messagesReducer(MessagesState state, MessageAction action) {
         status: MessageStatus.sent,
       );
     } else {
-      // Create new message (for backwards compatibility)
+      // Create new message when no prior MessageSendingAction was dispatched
       final message = OutgoingMessage(
         messageId: action.messageId,
         transport: action.transport,

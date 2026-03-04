@@ -155,92 +155,6 @@ void main() {
           equals(FriendshipStatus.pending));
     });
 
-    test('migrates from old key format (list of objects)', () async {
-      final createdAt = DateTime.utc(2025, 1, 10, 8, 0, 0);
-      final updatedAt = DateTime.utc(2025, 1, 12, 10, 0, 0);
-      final oldFormatList = [
-        {
-          'peerPubkeyHex': peerA,
-          'irohRelayUrl': 'https://use1-1.relay.iroh.network',
-          'irohDirectAddresses': ['192.168.1.1:4433'],
-          'nickname': 'OldAlice',
-          'status': FriendshipStatus.accepted.index,
-          'createdAt': createdAt.toIso8601String(),
-          'updatedAt': updatedAt.toIso8601String(),
-          'message': 'Be my friend',
-        },
-        {
-          'peerPubkeyHex': peerB,
-          'irohRelayUrl': null,
-          'nickname': 'OldBob',
-          'status': FriendshipStatus.pending.index,
-          'createdAt': createdAt.toIso8601String(),
-          'updatedAt': updatedAt.toIso8601String(),
-          'message': null,
-        },
-      ];
-
-      SharedPreferences.setMockInitialValues({
-        'bitchat_friendships': jsonEncode(oldFormatList),
-      });
-      service = PersistenceService();
-
-      final result = await service.loadFriendships();
-
-      expect(result.friendships.length, equals(2));
-      expect(result.friendships[peerA]!.nickname, equals('OldAlice'));
-      expect(result.friendships[peerA]!.status,
-          equals(FriendshipStatus.accepted));
-      expect(result.friendships[peerA]!.irohRelayUrl,
-          equals('https://use1-1.relay.iroh.network'));
-      expect(result.friendships[peerA]!.irohDirectAddresses,
-          equals(['192.168.1.1:4433']));
-      expect(result.friendships[peerA]!.message, equals('Be my friend'));
-      expect(result.friendships[peerA]!.createdAt, equals(createdAt));
-      expect(result.friendships[peerA]!.updatedAt, equals(updatedAt));
-
-      expect(result.friendships[peerB]!.nickname, equals('OldBob'));
-      expect(result.friendships[peerB]!.status,
-          equals(FriendshipStatus.pending));
-
-      // Verify migration saved to new key and removed old key
-      final prefs = await SharedPreferences.getInstance();
-      expect(prefs.getString('bitchat_friendships_v2'), isNotNull);
-      expect(prefs.getString('bitchat_friendships'), isNull);
-    });
-
-    test('prefers v2 key over old key', () async {
-      final v2Friendship = makeFriendship(
-        pubkey: peerA,
-        nickname: 'NewAlice',
-        status: FriendshipStatus.accepted,
-      );
-      final v2State = FriendshipsState(friendships: {peerA: v2Friendship});
-
-      final oldFormatList = [
-        {
-          'peerPubkeyHex': peerB,
-          'nickname': 'OldBob',
-          'status': FriendshipStatus.pending.index,
-          'createdAt': DateTime.utc(2025, 1, 1).toIso8601String(),
-          'updatedAt': DateTime.utc(2025, 1, 1).toIso8601String(),
-        },
-      ];
-
-      SharedPreferences.setMockInitialValues({
-        'bitchat_friendships_v2': jsonEncode(v2State.toJson()),
-        'bitchat_friendships': jsonEncode(oldFormatList),
-      });
-      service = PersistenceService();
-
-      final result = await service.loadFriendships();
-
-      // Should load from v2, not old key
-      expect(result.friendships.length, equals(1));
-      expect(result.friendships.containsKey(peerA), isTrue);
-      expect(result.friendships[peerA]!.nickname, equals('NewAlice'));
-    });
-
     test('returns empty FriendshipsState on corrupt v2 data', () async {
       SharedPreferences.setMockInitialValues({
         'bitchat_friendships_v2': 'this is not json{{{',
@@ -252,33 +166,7 @@ void main() {
       expect(result.friendships, isEmpty);
     });
 
-    test('returns empty FriendshipsState on corrupt old format data',
-        () async {
-      SharedPreferences.setMockInitialValues({
-        'bitchat_friendships': 'not valid json!!!',
-      });
-      service = PersistenceService();
-
-      final result = await service.loadFriendships();
-
-      expect(result.friendships, isEmpty);
-    });
-
-    test(
-        'returns empty FriendshipsState when old format has invalid structure',
-        () async {
-      // Old format is supposed to be a list, but provide an object
-      SharedPreferences.setMockInitialValues({
-        'bitchat_friendships': jsonEncode({'unexpected': 'object'}),
-      });
-      service = PersistenceService();
-
-      final result = await service.loadFriendships();
-
-      // Should fail to cast to List and fall through to empty
-      expect(result.friendships, isEmpty);
-    });
-  });
+});
 
   // ===================================================================
   // loadSettings
@@ -320,70 +208,9 @@ void main() {
       ]));
     });
 
-    test('migrates from old key format', () async {
-      final settingsJson = {
-        'bluetoothEnabled': false,
-        'irohEnabled': false,
-        'transportPriority': ['iroh', 'bluetooth'],
-      };
-
-      SharedPreferences.setMockInitialValues({
-        'bitchat_transport_settings': jsonEncode(settingsJson),
-      });
-      service = PersistenceService();
-
-      final result = await service.loadSettings();
-
-      expect(result.bluetoothEnabled, isFalse);
-      expect(result.irohEnabled, isFalse);
-      expect(result.transportPriority, equals(const [
-        TransportProtocol.iroh,
-        TransportProtocol.bluetooth,
-      ]));
-
-      // Verify migration saved to new key and removed old key
-      final prefs = await SharedPreferences.getInstance();
-      expect(prefs.getString('bitchat_settings_v2'), isNotNull);
-      expect(prefs.getString('bitchat_transport_settings'), isNull);
-    });
-
-    test('prefers v2 key over old key', () async {
-      const v2Settings = SettingsState(
-        bluetoothEnabled: false,
-        irohEnabled: true,
-      );
-      final oldSettings = {
-        'bluetoothEnabled': true,
-        'irohEnabled': false,
-      };
-
-      SharedPreferences.setMockInitialValues({
-        'bitchat_settings_v2': jsonEncode(v2Settings.toJson()),
-        'bitchat_transport_settings': jsonEncode(oldSettings),
-      });
-      service = PersistenceService();
-
-      final result = await service.loadSettings();
-
-      expect(result.bluetoothEnabled, isFalse);
-      expect(result.irohEnabled, isTrue);
-    });
-
     test('returns default SettingsState on corrupt v2 data', () async {
       SharedPreferences.setMockInitialValues({
         'bitchat_settings_v2': 'garbage data {{{',
-      });
-      service = PersistenceService();
-
-      final result = await service.loadSettings();
-
-      expect(result.bluetoothEnabled, isTrue);
-      expect(result.irohEnabled, isTrue);
-    });
-
-    test('returns default SettingsState on corrupt old format data', () async {
-      SharedPreferences.setMockInitialValues({
-        'bitchat_transport_settings': 'not json at all',
       });
       service = PersistenceService();
 
@@ -1084,35 +911,5 @@ void main() {
       expect(unreads[peerA], equals(2));
     });
 
-    test(
-        'all FriendshipStatus values round-trip through old format migration',
-        () async {
-      final now = DateTime.utc(2025, 1, 1);
-      final oldList = FriendshipStatus.values.map((status) {
-        return {
-          'peerPubkeyHex':
-              'peer${status.index}${'0' * 60}'.substring(0, 64),
-          'nickname': 'Peer ${status.name}',
-          'status': status.index,
-          'createdAt': now.toIso8601String(),
-          'updatedAt': now.toIso8601String(),
-        };
-      }).toList();
-
-      SharedPreferences.setMockInitialValues({
-        'bitchat_friendships': jsonEncode(oldList),
-      });
-      service = PersistenceService();
-
-      final result = await service.loadFriendships();
-
-      expect(result.friendships.length,
-          equals(FriendshipStatus.values.length));
-      for (final status in FriendshipStatus.values) {
-        final key =
-            'peer${status.index}${'0' * 60}'.substring(0, 64);
-        expect(result.friendships[key]!.status, equals(status));
-      }
-    });
   });
 }
