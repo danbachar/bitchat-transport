@@ -100,13 +100,10 @@ class FriendshipState {
   factory FriendshipState.fromJson(Map<String, dynamic> json) {
     return FriendshipState(
       peerPubkeyHex: json['peerPubkeyHex'] as String,
-      // Support both new and old (libp2p) field names for migration
-      irohRelayUrl: json['irohRelayUrl'] as String? ?? json['libp2pAddress'] as String?,
+      irohRelayUrl: json['irohRelayUrl'] as String?,
       irohDirectAddresses: json['irohDirectAddresses'] != null
           ? List<String>.from(json['irohDirectAddresses'] as List)
-          : json['libp2pHostAddrs'] != null
-              ? List<String>.from(json['libp2pHostAddrs'] as List)
-              : null,
+          : null,
       nickname: json['nickname'] as String?,
       status: FriendshipStatus.values[json['status'] as int],
       createdAt: DateTime.parse(json['createdAt'] as String),

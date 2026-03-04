@@ -161,22 +161,17 @@ void main() {
       final oldFormatList = [
         {
           'peerPubkeyHex': peerA,
-          'libp2pAddress': '/ip4/10.0.0.1/tcp/4001/p2p/QmOld',
-          'libp2pHostId': 'QmOld',
-          'libp2pHostAddrs': ['/ip4/10.0.0.1/tcp/4001'],
+          'irohRelayUrl': 'https://use1-1.relay.iroh.network',
+          'irohDirectAddresses': ['192.168.1.1:4433'],
           'nickname': 'OldAlice',
           'status': FriendshipStatus.accepted.index,
           'createdAt': createdAt.toIso8601String(),
           'updatedAt': updatedAt.toIso8601String(),
           'message': 'Be my friend',
-          // Legacy fields that should be ignored
-          'isOnline': true,
-          'lastOnline': '2025-01-12T10:00:00.000Z',
         },
         {
           'peerPubkeyHex': peerB,
-          'libp2pAddress': null,
-          'libp2pHostId': null,
+          'irohRelayUrl': null,
           'nickname': 'OldBob',
           'status': FriendshipStatus.pending.index,
           'createdAt': createdAt.toIso8601String(),
@@ -197,9 +192,9 @@ void main() {
       expect(result.friendships[peerA]!.status,
           equals(FriendshipStatus.accepted));
       expect(result.friendships[peerA]!.irohRelayUrl,
-          equals('/ip4/10.0.0.1/tcp/4001/p2p/QmOld'));
+          equals('https://use1-1.relay.iroh.network'));
       expect(result.friendships[peerA]!.irohDirectAddresses,
-          equals(['/ip4/10.0.0.1/tcp/4001']));
+          equals(['192.168.1.1:4433']));
       expect(result.friendships[peerA]!.message, equals('Be my friend'));
       expect(result.friendships[peerA]!.createdAt, equals(createdAt));
       expect(result.friendships[peerA]!.updatedAt, equals(updatedAt));
@@ -328,8 +323,8 @@ void main() {
     test('migrates from old key format', () async {
       final settingsJson = {
         'bluetoothEnabled': false,
-        'libp2pEnabled': false,
-        'transportPriority': ['libp2p', 'bluetooth'],
+        'irohEnabled': false,
+        'transportPriority': ['iroh', 'bluetooth'],
       };
 
       SharedPreferences.setMockInitialValues({
@@ -359,7 +354,7 @@ void main() {
       );
       final oldSettings = {
         'bluetoothEnabled': true,
-        'libp2pEnabled': false,
+        'irohEnabled': false,
       };
 
       SharedPreferences.setMockInitialValues({

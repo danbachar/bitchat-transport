@@ -43,7 +43,6 @@ class IrohConfig {
 /// Iroh-based transport service.
 ///
 /// Uses iroh for peer-to-peer connectivity with automatic NAT traversal.
-/// Key advantages over libp2p:
 /// - NodeId IS the Ed25519 public key (no separate PeerId mapping)
 /// - Built-in relay + hole punching (no STUN/NAT config needed)
 /// - QUIC-based with automatic encryption

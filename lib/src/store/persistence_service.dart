@@ -87,7 +87,7 @@ class PersistenceService {
   FriendshipState _migrateOldFriendship(Map<String, dynamic> json) {
     return FriendshipState(
       peerPubkeyHex: json['peerPubkeyHex'] as String,
-      irohRelayUrl: json['irohRelayUrl'] as String? ?? json['libp2pAddress'] as String?,
+      irohRelayUrl: json['irohRelayUrl'] as String?,
       nickname: json['nickname'] as String?,
       status: FriendshipStatus.values[json['status'] as int],
       createdAt: DateTime.parse(json['createdAt'] as String),

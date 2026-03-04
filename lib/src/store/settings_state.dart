@@ -88,7 +88,7 @@ class SettingsState {
   factory SettingsState.fromJson(Map<String, dynamic> json) {
     return SettingsState(
       bluetoothEnabled: json['bluetoothEnabled'] as bool? ?? true,
-      irohEnabled: json['irohEnabled'] as bool? ?? json['libp2pEnabled'] as bool? ?? true,
+      irohEnabled: json['irohEnabled'] as bool? ?? true,
       transportPriority: (json['transportPriority'] as List<dynamic>?)
               ?.map((e) => TransportProtocol.values.firstWhere(
                     (t) => t.name == e,
