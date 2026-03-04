@@ -125,11 +125,17 @@ class LibP2PTransportService extends TransportService {
   /// Network notifiee for connection events (registered on start, unregistered on stop)
   NotifyBundle? _notifiee;
 
+  /// Cached public IPv4 address (fetched from external service)
+  String? _publicIpv4;
+
   /// Cached public IPv6 address (fetched from external service)
   String? _publicIpv6;
 
-  /// Cached listen port (extracted from host addrs after start)
-  int? _listenPort;
+  /// Cached UDX listen port (extracted from host addrs after start)
+  int? _udxListenPort;
+
+  /// Cached TCP listen port (extracted from host addrs after start)
+  int? _tcpListenPort;
 
   /// Get the host ID (PeerId) as string - null if host not initialized
   String? get hostId => _host?.id.toString();
@@ -138,25 +144,46 @@ class LibP2PTransportService extends TransportService {
   List<String> get hostAddrs =>
       _host?.addrs.map((a) => a.toString()).toList() ?? [];
 
+  /// The last-known public IPv4 address
+  String? get publicIpv4 => _publicIpv4;
+
   /// The last-known public IPv6 address
   String? get publicIpv6 => _publicIpv6;
 
-  /// Routable public multiaddr constructed from public IPv6 + listen port
-  String? get publicMultiaddr {
-    if (_publicIpv6 == null || _listenPort == null) return null;
-    return '/ip6/$_publicIpv6/udp/$_listenPort/udx';
+  /// Routable public multiaddrs (UDX over IPv6, TCP over IPv4, etc.)
+  List<String> get publicMultiaddrs {
+    final addrs = <String>[];
+    if (_publicIpv6 != null && _udxListenPort != null) {
+      addrs.add('/ip6/$_publicIpv6/udp/$_udxListenPort/udx');
+    }
+    if (_publicIpv4 != null && _tcpListenPort != null) {
+      addrs.add('/ip4/$_publicIpv4/tcp/$_tcpListenPort');
+    }
+    if (_publicIpv4 != null && _udxListenPort != null) {
+      addrs.add('/ip4/$_publicIpv4/udp/$_udxListenPort/udx');
+    }
+    return addrs;
   }
 
-  /// Re-fetch the public IPv6 address (call after network connectivity changes)
+  /// Best available public multiaddr (prefers IPv6/UDX, falls back to IPv4/TCP)
+  String? get publicMultiaddr => publicMultiaddrs.isNotEmpty ? publicMultiaddrs.first : null;
+
+  /// Re-fetch public addresses (call after network connectivity changes)
   Future<void> refreshPublicAddress() async {
-    try {
-      final newIpv6 = await _getIPv6Address();
-      if (newIpv6 != _publicIpv6) {
-        _log.i('Public IPv6 changed: $_publicIpv6 → $newIpv6');
-        _publicIpv6 = newIpv6;
-      }
-    } catch (e) {
-      _log.e('Failed to refresh public IPv6 address: $e');
+    final results = await Future.wait([
+      _getIPv4Address(),
+      _getIPv6Address(),
+    ]);
+    final newIpv4 = results[0];
+    final newIpv6 = results[1];
+
+    if (newIpv4 != _publicIpv4) {
+      _log.i('Public IPv4 changed: $_publicIpv4 → $newIpv4');
+      _publicIpv4 = newIpv4;
+    }
+    if (newIpv6 != _publicIpv6) {
+      _log.i('Public IPv6 changed: $_publicIpv6 → $newIpv6');
+      _publicIpv6 = newIpv6;
     }
   }
 
@@ -166,40 +193,69 @@ class LibP2PTransportService extends TransportService {
   /// 3. STUN/NAT-mapped IPv4 addresses (from host.addrs — routable IPv4, not relay, not local)
   ///
   /// Each address includes `/p2p/{hostId}` suffix for peer identification.
-  List<String> getRoutableAddresses() {
+  /// Get addresses ordered by connection hierarchy:
+  /// IPv6/UDX > IPv4/UDX > IPv4/TCP > Relay.
+  ///
+  /// When [includeLocal] is true, private/LAN addresses (192.168.x, 10.x,
+  /// 172.16-31.x) are included — useful for friends discovered via BLE
+  /// who are likely on the same local network.
+  List<String> getRoutableAddresses({bool includeLocal = false}) {
     final id = hostId;
     if (id == null) return [];
 
-    final addresses = <String>[];
+    final ipv6Udx = <String>[];
+    final ipv4Udx = <String>[];
+    final ipv4Tcp = <String>[];
+    final relay = <String>[];
+    final seen = <String>{};
 
-    // 1. Public IPv6 (highest priority — immediately available)
-    final ipv6Addr = publicMultiaddr;
-    if (ipv6Addr != null) {
-      addresses.add('$ipv6Addr/p2p/$id');
-    }
+    void classify(String addr) {
+      // Relay addresses are always included
+      if (addr.contains('/p2p-circuit/')) {
+        final withId = addr.contains('/p2p/') ? addr : '$addr/p2p/$id';
+        if (seen.add(withId)) relay.add(withId);
+        return;
+      }
 
-    // 2. Circuit relay addresses (from host.addrs)
-    // 3. STUN/NAT-mapped routable IPv4 addresses (from host.addrs)
-    final relayAddrs = <String>[];
-    final stunAddrs = <String>[];
+      // Always skip loopback, unspecified, and link-local
+      if (_isLoopbackOrUnspecified(addr)) return;
 
-    for (final addr in hostAddrs) {
-      final addrStr = addr.toString();
+      // Skip private/local addresses unless includeLocal is set
+      if (!includeLocal && !_isRoutableAddress(addr)) return;
 
-      if (addrStr.contains('/p2p-circuit/')) {
-        // Relay address — already includes /p2p/ components
-        relayAddrs.add(addrStr);
-      } else if (_isRoutableAddress(addrStr) && !_isIpv6Address(addrStr)) {
-        // Routable non-IPv6 (i.e., STUN-mapped IPv4)
-        final withId = addrStr.contains('/p2p/') ? addrStr : '$addrStr/p2p/$id';
-        stunAddrs.add(withId);
+      final withId = addr.contains('/p2p/') ? addr : '$addr/p2p/$id';
+      if (!seen.add(withId)) return;
+
+      if (_isIpv6Address(addr) && addr.contains('/udx')) {
+        ipv6Udx.add(withId);
+      } else if (addr.startsWith('/ip4/') && addr.contains('/udx')) {
+        ipv4Udx.add(withId);
+      } else if (addr.startsWith('/ip4/') && addr.contains('/tcp/')) {
+        ipv4Tcp.add(withId);
       }
     }
 
-    addresses.addAll(relayAddrs);
-    addresses.addAll(stunAddrs);
+    // Externally-discovered public addresses first
+    for (final addr in publicMultiaddrs) {
+      classify(addr);
+    }
 
-    return addresses;
+    // Host addresses (STUN-mapped, relay, local)
+    for (final addr in hostAddrs) {
+      classify(addr);
+    }
+
+    return [...ipv6Udx, ...ipv4Udx, ...ipv4Tcp, ...relay];
+  }
+
+  /// Check if a multiaddr is loopback, unspecified, or link-local.
+  /// These are never useful for peer connections regardless of includeLocal.
+  bool _isLoopbackOrUnspecified(String addr) {
+    return addr.contains('/ip4/127.') ||
+        addr.contains('/ip4/0.0.0.0') ||
+        addr.contains('/ip6/::1/') ||
+        addr.contains('/ip6/::/') ||
+        addr.contains('/ip6/fe80:');
   }
 
   /// Check if a multiaddr string is a routable (non-local) address
@@ -595,17 +651,30 @@ class LibP2PTransportService extends TransportService {
     }
   }
 
-  Future<String> _getIPv6Address() async {
-    // final response = await http.get(Uri.parse('https://api64.ipify.org/?format=text'));
-    final response = await http.get(Uri.parse('https://ipv6.icanhazip.com/'));
-
-    if (response.statusCode == 200) {
-      return response.body.trim();
-    } else {
-      _log.w(
-          'Failed to get IPv6 address from api64.ipify.org, status code: ${response.statusCode}');
-      return '::1'; // Fallback to loopback
+  Future<String?> _getIPv4Address() async {
+    try {
+      final response = await http.get(Uri.parse('https://api.ipify.org/?format=text'))
+          .timeout(const Duration(seconds: 5));
+      if (response.statusCode == 200) {
+        return response.body.trim();
+      }
+    } catch (e) {
+      _log.d('Failed to get public IPv4 address: $e');
     }
+    return null;
+  }
+
+  Future<String?> _getIPv6Address() async {
+    try {
+      final response = await http.get(Uri.parse('https://ipv6.icanhazip.com/'))
+          .timeout(const Duration(seconds: 5));
+      if (response.statusCode == 200) {
+        return response.body.trim();
+      }
+    } catch (e) {
+      _log.d('Failed to get public IPv6 address: $e');
+    }
+    return null;
   }
 
   Future<Host> createHost() async {
@@ -614,9 +683,14 @@ class LibP2PTransportService extends TransportService {
     final connMgr = p2p_conn_manager.ConnectionManager();
     final resourceManager = ResourceManagerImpl();
 
-    String ipv6 = await _getIPv6Address();
-    _publicIpv6 = ipv6;
-    _log.i('Public IPv6 address: $ipv6');
+    // Fetch public addresses in parallel (best-effort, don't block host creation)
+    final addrResults = await Future.wait([
+      _getIPv4Address(),
+      _getIPv6Address(),
+    ]);
+    _publicIpv4 = addrResults[0];
+    _publicIpv6 = addrResults[1];
+    _log.i('Public addresses — IPv4: $_publicIpv4, IPv6: $_publicIpv6');
 
     final listenAddrs = [
       MultiAddr('/ip6/::/udp/0/udx'),
@@ -665,10 +739,18 @@ class LibP2PTransportService extends TransportService {
 
     // Extract listen ports from resolved addresses
     for (var addr in host.addrs) {
-      final parts = addr.toString().split('/');
-      final udpIndex = parts.indexOf('udp');
-      if (udpIndex != -1 && udpIndex + 1 < parts.length && _listenPort == null) {
-        _listenPort = int.tryParse(parts[udpIndex + 1]);
+      final addrStr = addr.toString();
+      final parts = addrStr.split('/');
+      if (addrStr.contains('/udp/') && addrStr.contains('/udx') && _udxListenPort == null) {
+        final udpIndex = parts.indexOf('udp');
+        if (udpIndex != -1 && udpIndex + 1 < parts.length) {
+          _udxListenPort = int.tryParse(parts[udpIndex + 1]);
+        }
+      } else if (addrStr.contains('/tcp/') && _tcpListenPort == null) {
+        final tcpIndex = parts.indexOf('tcp');
+        if (tcpIndex != -1 && tcpIndex + 1 < parts.length) {
+          _tcpListenPort = int.tryParse(parts[tcpIndex + 1]);
+        }
       }
     }
 
@@ -679,8 +761,9 @@ class LibP2PTransportService extends TransportService {
     _log.i('Public multiaddr: $publicMultiaddr');
 
     // Connect to bootstrap peers in the background (for relay discovery)
+    // Pass the local host reference since _host isn't assigned until createHost() returns
     for (final addr in config.bootstrapPeers) {
-      _connectToBootstrapPeer(addr);
+      _connectToBootstrapPeer(host, addr);
     }
 
     return host;
@@ -688,7 +771,7 @@ class LibP2PTransportService extends TransportService {
 
   /// Connect to a bootstrap peer (fire-and-forget, best-effort).
   /// Bootstrap connections seed the AutoRelay's RelayFinder with relay candidates.
-  void _connectToBootstrapPeer(String multiaddr) {
+  void _connectToBootstrapPeer(Host host, String multiaddr) {
     unawaited(() async {
       try {
         final addr = MultiAddr(multiaddr);
@@ -701,7 +784,7 @@ class LibP2PTransportService extends TransportService {
         final peerId = PeerId.fromString(parts.last);
         final addrInfo = AddrInfo(peerId, [addr]);
         _log.i('Connecting to bootstrap peer: ${parts.last.substring(0, 8)}...');
-        await _host!.connect(addrInfo);
+        await host.connect(addrInfo);
         _log.i('Connected to bootstrap peer: ${parts.last.substring(0, 8)}...');
       } catch (e) {
         _log.w('Failed to connect to bootstrap peer $multiaddr: $e');

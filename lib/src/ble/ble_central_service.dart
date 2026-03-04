@@ -115,12 +115,25 @@ class BleCentralService {
       throw UnsupportedError('Bluetooth not supported on this device');
     }
 
-    // Wait for Bluetooth to be on
+    // Wait for Bluetooth to be on (on iOS, initial state can be 'unknown')
     final state = await FlutterBluePlus.adapterState.first;
     if (state != BluetoothAdapterState.on) {
-      _log.w('Bluetooth is not on: $state');
-      // Could prompt user to enable Bluetooth
+      _log.i('Bluetooth state is $state, waiting for it to turn on...');
+      await FlutterBluePlus.adapterState
+          .firstWhere((s) => s == BluetoothAdapterState.on)
+          .timeout(
+            const Duration(seconds: 10),
+            onTimeout: () {
+              _log.w('Timeout waiting for Bluetooth to turn on');
+              return BluetoothAdapterState.unknown;
+            },
+          );
     }
+
+    // Set up scan results listener once (not per-scan to avoid subscription leak)
+    _subscriptions.add(
+      FlutterBluePlus.scanResults.listen(_onScanResults),
+    );
 
     _log.i('BLE central initialized');
   }
@@ -135,14 +148,10 @@ class BleCentralService {
     // _log.i('Starting BLE scan');
 
     try {
-      // Listen for scan results
-      _subscriptions.add(
-        FlutterBluePlus.scanResults.listen(_onScanResults),
-      );
-
       // Start scanning
       // Note: We scan for all devices and filter manually because
       // some platforms have issues with service UUID filtering
+      // Scan results listener is set up once in initialize()
       await FlutterBluePlus.startScan(
         timeout: timeout ?? scanTimeout,
         androidScanMode: AndroidScanMode.lowLatency,

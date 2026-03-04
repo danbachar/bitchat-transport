@@ -825,6 +825,7 @@ class Bitchat {
         // No stale connection — just try connecting if not yet connected
         _tryLibp2pConnectionForPeer(data.publicKey);
       }
+
     };
 
     // ACK request (router asks us to send ACK back to sender)
@@ -1032,20 +1033,20 @@ class Bitchat {
   }
 
   /// Broadcast ANNOUNCE to all connected BLE devices.
-  /// Friends receive ANNOUNCE with libp2p addresses; strangers receive
-  /// ANNOUNCE without addresses.
+  /// Friends receive ANNOUNCE with libp2p addresses (including local);
+  /// strangers receive ANNOUNCE without addresses.
   Future<void> _broadcastAnnounce() async {
     if (_bleService == null || !_bleAvailable) return;
 
     // Basic ANNOUNCE (no addresses) for strangers + unidentified devices
     final basicBytes = await _buildSignedAnnounceBytes();
 
-    // Friend ANNOUNCE (with libp2p addresses) — only if libp2p available
+    // Friend ANNOUNCE (with libp2p addresses including local) — only if libp2p available
     Uint8List? friendBytes;
     Set<String> friendDeviceIds = {};
 
     if (_libp2pService != null && _libp2pAvailable) {
-      final addresses = _libp2pService!.getRoutableAddresses();
+      final addresses = _libp2pService!.getRoutableAddresses(includeLocal: true);
       if (addresses.isNotEmpty) {
         friendBytes = await _buildSignedAnnounceBytes(addresses: addresses);
         for (final peer in store.state.peers.peersList) {

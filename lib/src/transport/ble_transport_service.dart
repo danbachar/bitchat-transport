@@ -190,11 +190,8 @@ class BleTransportService extends TransportService {
     // Clear stopped flag to allow packet processing
     _stopped = false;
 
-    // Start advertising first (so others can find us)
+    // Start advertising (so others can find us)
     await _peripheral.startAdvertising(localName: localName);
-
-    // Then start scanning (to find others)
-    await _central.startScan();
 
     _setState(TransportState.active);
     _log.i('BLE transport started');
@@ -462,7 +459,7 @@ class BleTransportService extends TransportService {
 
   bool _isConnected(String peerId) {
     final centralConnected = _central.connectedPeers.any((p) => p.deviceId == peerId);
-    final peripheralConnected = _peripheral.connectedCount > 0;
+    final peripheralConnected = _peripheral.isDeviceConnected(peerId);
     return centralConnected || peripheralConnected;
   }
 

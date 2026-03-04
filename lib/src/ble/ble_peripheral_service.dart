@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:typed_data';
 import 'package:ble_peripheral_bondless/ble_peripheral_bondless.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart' show FlutterBluePlus, BluetoothAdapterState;
 import 'package:logger/logger.dart';
 
 /// Callback when data is received from a connected central
@@ -57,6 +58,9 @@ class BlePeripheralService {
   /// Number of connected centrals
   int get connectedCount => _connectedCentrals.length;
 
+  /// Whether a specific central device is connected
+  bool isDeviceConnected(String deviceId) => _connectedCentrals.contains(deviceId);
+
   /// Initialize the peripheral service
   Future<void> initialize() async {
     _log.i('Initializing BLE peripheral service');
@@ -102,7 +106,13 @@ class BlePeripheralService {
     }
 
     try {
-      // Wait for BLE to be powered on (important for iOS)
+      // Check if BLE is already powered on (handles re-enable after toggle off/on)
+      final currentState = await FlutterBluePlus.adapterState.first;
+      if (currentState == BluetoothAdapterState.on && !_bleReadyCompleter.isCompleted) {
+        _bleReadyCompleter.complete();
+      }
+
+      // Wait for BLE to be powered on (important for iOS cold start)
       _log.i('Waiting for BLE to be powered on...');
       await _bleReadyCompleter.future.timeout(
         const Duration(seconds: 10),
