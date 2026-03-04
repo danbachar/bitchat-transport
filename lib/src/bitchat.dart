@@ -1041,27 +1041,46 @@ class Bitchat {
     // Basic ANNOUNCE (no addresses) for strangers + unidentified devices
     final basicBytes = await _buildSignedAnnounceBytes();
 
-    // Friend ANNOUNCE (with libp2p addresses including local) — only if libp2p available
-    Uint8List? friendBytes;
-    Set<String> friendDeviceIds = {};
-
-    if (_libp2pService != null && _libp2pAvailable) {
-      final addresses = _libp2pService!.getRoutableAddresses(includeLocal: true);
-      if (addresses.isNotEmpty) {
-        friendBytes = await _buildSignedAnnounceBytes(addresses: addresses);
-        for (final peer in store.state.peers.peersList) {
-          if (peer.isFriend && peer.bleDeviceId != null) {
-            friendDeviceIds.add(peer.bleDeviceId!);
-          }
-        }
-      }
+    if (_libp2pService == null || !_libp2pAvailable) {
+      await _bleService!.broadcast(basicBytes);
+      return;
     }
 
-    await _bleService!.broadcast(
-      basicBytes,
-      friendData: friendBytes,
-      friendDeviceIds: friendDeviceIds.isNotEmpty ? friendDeviceIds : null,
-    );
+    final addresses = _libp2pService!.getRoutableAddresses(includeLocal: true);
+    final friendPeers = store.state.peers.peersList
+        .where((p) => p.isFriend && p.bleDeviceId != null)
+        .toList();
+
+    if (addresses.isEmpty || friendPeers.isEmpty) {
+      await _bleService!.broadcast(basicBytes);
+      return;
+    }
+
+    final friendPayload =
+        _protocolHandler.createAnnouncePayload(addresses: addresses);
+
+    if (_fragmentHandler.needsFragmentation(friendPayload)) {
+      // Friend ANNOUNCE too large for single BLE packet.
+      // Broadcast basic to all, then send fragmented to each friend.
+      await _bleService!.broadcast(basicBytes);
+      for (final peer in friendPeers) {
+        await _sendFragmentedViaBle(
+          payload: friendPayload,
+          recipientPubkey: peer.publicKey,
+          bleDeviceId: peer.bleDeviceId!,
+        );
+      }
+    } else {
+      // Fits in single packet — efficient single-pass broadcast
+      final friendBytes =
+          await _buildSignedAnnounceBytes(addresses: addresses);
+      final friendDeviceIds = friendPeers.map((p) => p.bleDeviceId!).toSet();
+      await _bleService!.broadcast(
+        basicBytes,
+        friendData: friendBytes,
+        friendDeviceIds: friendDeviceIds,
+      );
+    }
   }
 
   /// Broadcast ANNOUNCE via libp2p (uses BitchatPacket format, same as BLE)
