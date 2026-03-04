@@ -877,7 +877,6 @@ class Bitchat {
 
     // Fire-and-forget: try connecting in the background
     _libp2pService!.connectToHost(hostId: hostId, hostAddrs: hostAddrs).then((successAddr) {
-      _pendingLibp2pConnections.remove(pubkeyHex);
       if (successAddr != null) {
         _log.i('Connected to ${peer.displayName} via $successAddr');
         store.dispatch(AssociateLibp2pAddressAction(
@@ -887,6 +886,8 @@ class Bitchat {
       } else {
         _log.w('Failed to connect to ${peer.displayName} via any advertised address');
       }
+    }).whenComplete(() {
+      _pendingLibp2pConnections.remove(pubkeyHex);
     });
   }
 
