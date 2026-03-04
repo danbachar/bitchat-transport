@@ -15,7 +15,7 @@ enum BlockType {
   /// Accept friend request (no transport info)
   friendshipAccept(0x03),
 
-  /// Announce presence and libp2p address to friends
+  /// Announce presence and iroh address to friends
   friendAnnounce(0x04),
 
   /// Revoke friendship (unfriend)
@@ -45,7 +45,7 @@ enum BlockType {
 /// - Say: Regular text message
 /// - FriendshipOffer: Send friend request (transport-agnostic)
 /// - FriendshipAccept: Accept friend request (transport-agnostic)
-/// - FriendAnnounce: Announce presence and libp2p address to friends
+/// - FriendAnnounce: Announce presence and iroh address to friends
 abstract class Block {
   /// The type of this block
   BlockType get type;
@@ -187,25 +187,25 @@ class FriendshipAcceptBlock extends Block {
   }
 }
 
-/// A friend announce block for presence and libp2p address sharing
+/// A friend announce block for presence and iroh address sharing
 class FriendAnnounceBlock extends Block {
   @override
   BlockType get type => BlockType.friendAnnounce;
 
-  /// The sender's libp2p multiaddress (null if libp2p unavailable)
-  final String? libp2pAddress;
+  /// The sender's iroh relay URL (null if iroh unavailable)
+  final String? irohAddress;
 
   /// The sender's nickname
   final String nickname;
 
   FriendAnnounceBlock({
-    this.libp2pAddress,
+    this.irohAddress,
     required this.nickname,
   });
 
   @override
   Uint8List serialize() {
-    final addressBytes = libp2pAddress != null ? utf8.encode(libp2pAddress!) : Uint8List(0);
+    final addressBytes = irohAddress != null ? utf8.encode(irohAddress!) : Uint8List(0);
     final nicknameBytes = utf8.encode(nickname);
 
     final data = ByteData(1 + 2 + addressBytes.length + 2 + nicknameBytes.length);
@@ -249,7 +249,7 @@ class FriendAnnounceBlock extends Block {
     final nickname = utf8.decode(nicknameBytes);
 
     return FriendAnnounceBlock(
-      libp2pAddress: address,
+      irohAddress: address,
       nickname: nickname,
     );
   }

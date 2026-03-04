@@ -396,8 +396,8 @@ void main() {
       });
     });
 
-    group('UpdateFriendshipLibp2pInfoAction', () {
-      test('updates libp2p fields on existing friendship', () {
+    group('UpdateFriendshipIrohInfoAction', () {
+      test('updates iroh fields on existing friendship', () {
         final now = DateTime.now();
         final existingFriendship = FriendshipState(
           peerPubkeyHex: peerA,
@@ -410,31 +410,28 @@ void main() {
           friendships: {peerA: existingFriendship},
         );
 
-        final action = UpdateFriendshipLibp2pInfoAction(
+        final action = UpdateFriendshipIrohInfoAction(
           peerPubkeyHex: peerA,
-          libp2pAddress: '/ip4/1.2.3.4/tcp/4001/p2p/QmPeer123',
-          libp2pHostId: 'QmPeer123',
-          libp2pHostAddrs: ['/ip4/1.2.3.4/tcp/4001', '/ip4/5.6.7.8/tcp/4001'],
+          irohRelayUrl: 'https://relay.iroh.network',
+          irohDirectAddresses: ['192.168.1.1:4433', '10.0.0.1:4433'],
         );
 
         final newState = friendshipsReducer(state, action);
 
         final friendship = newState.friendships[peerA]!;
-        expect(friendship.libp2pAddress, equals('/ip4/1.2.3.4/tcp/4001/p2p/QmPeer123'));
-        expect(friendship.libp2pHostId, equals('QmPeer123'));
-        expect(friendship.libp2pHostAddrs, equals(['/ip4/1.2.3.4/tcp/4001', '/ip4/5.6.7.8/tcp/4001']));
+        expect(friendship.irohRelayUrl, equals('https://relay.iroh.network'));
+        expect(friendship.irohDirectAddresses, equals(['192.168.1.1:4433', '10.0.0.1:4433']));
         expect(friendship.updatedAt.isAfter(now) || friendship.updatedAt.isAtSameMomentAs(now), isTrue);
       });
 
-      test('updates only provided libp2p fields, preserving others', () {
+      test('updates only provided iroh fields, preserving others', () {
         final now = DateTime.now();
         final existingFriendship = FriendshipState(
           peerPubkeyHex: peerA,
           nickname: 'Alice',
           status: FriendshipStatus.accepted,
-          libp2pAddress: '/ip4/1.2.3.4/tcp/4001/p2p/QmOld',
-          libp2pHostId: 'QmOld',
-          libp2pHostAddrs: const ['/ip4/1.2.3.4/tcp/4001'],
+          irohRelayUrl: 'https://old-relay.iroh.network',
+          irohDirectAddresses: const ['192.168.1.1:4433'],
           createdAt: now,
           updatedAt: now,
         );
@@ -442,26 +439,25 @@ void main() {
           friendships: {peerA: existingFriendship},
         );
 
-        // Only update the address, leave hostId and hostAddrs unchanged
-        final action = UpdateFriendshipLibp2pInfoAction(
+        // Only update the relay URL, leave direct addresses unchanged
+        final action = UpdateFriendshipIrohInfoAction(
           peerPubkeyHex: peerA,
-          libp2pAddress: '/ip4/9.8.7.6/tcp/4001/p2p/QmOld',
+          irohRelayUrl: 'https://new-relay.iroh.network',
         );
 
         final newState = friendshipsReducer(state, action);
 
         final friendship = newState.friendships[peerA]!;
-        expect(friendship.libp2pAddress, equals('/ip4/9.8.7.6/tcp/4001/p2p/QmOld'));
-        expect(friendship.libp2pHostId, equals('QmOld'));
-        expect(friendship.libp2pHostAddrs, equals(['/ip4/1.2.3.4/tcp/4001']));
+        expect(friendship.irohRelayUrl, equals('https://new-relay.iroh.network'));
+        expect(friendship.irohDirectAddresses, equals(['192.168.1.1:4433']));
       });
 
       test('is no-op if friendship does not exist', () {
         const state = FriendshipsState.initial;
 
-        final action = UpdateFriendshipLibp2pInfoAction(
+        final action = UpdateFriendshipIrohInfoAction(
           peerPubkeyHex: peerA,
-          libp2pAddress: '/ip4/1.2.3.4/tcp/4001/p2p/QmPeer123',
+          irohRelayUrl: 'https://relay.iroh.network',
         );
 
         final newState = friendshipsReducer(state, action);

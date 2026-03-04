@@ -87,17 +87,12 @@ class PersistenceService {
   FriendshipState _migrateOldFriendship(Map<String, dynamic> json) {
     return FriendshipState(
       peerPubkeyHex: json['peerPubkeyHex'] as String,
-      libp2pAddress: json['libp2pAddress'] as String?,
-      libp2pHostId: json['libp2pHostId'] as String?,
-      libp2pHostAddrs: json['libp2pHostAddrs'] != null
-          ? List<String>.from(json['libp2pHostAddrs'] as List)
-          : null,
+      irohRelayUrl: json['irohRelayUrl'] as String? ?? json['libp2pAddress'] as String?,
       nickname: json['nickname'] as String?,
       status: FriendshipStatus.values[json['status'] as int],
       createdAt: DateTime.parse(json['createdAt'] as String),
       updatedAt: DateTime.parse(json['updatedAt'] as String),
       message: json['message'] as String?,
-      // isOnline and lastOnline are no longer persisted
     );
   }
 

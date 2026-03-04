@@ -10,22 +10,22 @@ class SetBluetoothEnabledAction extends SettingsAction {
   SetBluetoothEnabledAction(this.enabled);
 }
 
-/// Set libp2p enabled state
-class SetLibp2pEnabledAction extends SettingsAction {
+/// Set iroh enabled state
+class SetIrohEnabledAction extends SettingsAction {
   final bool enabled;
 
-  SetLibp2pEnabledAction(this.enabled);
+  SetIrohEnabledAction(this.enabled);
 }
 
 /// Update both transport settings at once
 class UpdateTransportSettingsAction extends SettingsAction {
   final bool? bluetoothEnabled;
-  final bool? libp2pEnabled;
+  final bool? irohEnabled;
   final List<TransportProtocol>? transportPriority;
 
   UpdateTransportSettingsAction({
     this.bluetoothEnabled,
-    this.libp2pEnabled,
+    this.irohEnabled,
     this.transportPriority,
   });
 }

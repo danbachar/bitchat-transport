@@ -12,7 +12,7 @@ class BleDeviceDiscoveredAction extends PeerAction {
   final String? displayName;
   final int rssi;
   final String? serviceUuid;
-  
+
   BleDeviceDiscoveredAction({
     required this.deviceId,
     this.displayName,
@@ -25,7 +25,7 @@ class BleDeviceDiscoveredAction extends PeerAction {
 class BleDeviceRssiUpdatedAction extends PeerAction {
   final String deviceId;
   final int rssi;
-  
+
   BleDeviceRssiUpdatedAction({
     required this.deviceId,
     required this.rssi,
@@ -35,14 +35,14 @@ class BleDeviceRssiUpdatedAction extends PeerAction {
 /// Mark a discovered BLE device as connecting
 class BleDeviceConnectingAction extends PeerAction {
   final String deviceId;
-  
+
   BleDeviceConnectingAction(this.deviceId);
 }
 
 /// Mark a discovered BLE device as connected (transport level)
 class BleDeviceConnectedAction extends PeerAction {
   final String deviceId;
-  
+
   BleDeviceConnectedAction(this.deviceId);
 }
 
@@ -50,49 +50,49 @@ class BleDeviceConnectedAction extends PeerAction {
 class BleDeviceConnectionFailedAction extends PeerAction {
   final String deviceId;
   final String? error;
-  
+
   BleDeviceConnectionFailedAction(this.deviceId, {this.error});
 }
 
 /// Mark a discovered BLE device as disconnected
 class BleDeviceDisconnectedAction extends PeerAction {
   final String deviceId;
-  
+
   BleDeviceDisconnectedAction(this.deviceId);
 }
 
 /// Remove a discovered BLE device
 class BleDeviceRemovedAction extends PeerAction {
   final String deviceId;
-  
+
   BleDeviceRemovedAction(this.deviceId);
 }
 
 /// Remove stale discovered BLE devices
 class StaleDiscoveredBlePeersRemovedAction extends PeerAction {
   final Duration staleThreshold;
-  
+
   StaleDiscoveredBlePeersRemovedAction(this.staleThreshold);
 }
 
 /// Clear all discovered BLE peers
 class ClearDiscoveredBlePeersAction extends PeerAction {}
 
-// ===== Libp2p Discovery Actions =====
+// ===== Iroh Discovery Actions =====
 
-/// A libp2p peer was discovered
-class Libp2pPeerDiscoveredAction extends PeerAction {
-  final String peerId;
+/// An iroh peer was discovered
+class IrohPeerDiscoveredAction extends PeerAction {
+  final String nodeIdHex;
   final String? displayName;
-  
-  Libp2pPeerDiscoveredAction({
-    required this.peerId,
+
+  IrohPeerDiscoveredAction({
+    required this.nodeIdHex,
     this.displayName,
   });
 }
 
-/// Clear all discovered libp2p peers
-class ClearDiscoveredLibp2pPeersAction extends PeerAction {}
+/// Clear all discovered iroh peers
+class ClearDiscoveredIrohPeersAction extends PeerAction {}
 
 // ===== Peer Identity Actions (after ANNOUNCE) =====
 
@@ -104,7 +104,10 @@ class PeerAnnounceReceivedAction extends PeerAction {
   final int rssi;
   final PeerTransport transport;
   final String? bleDeviceId;
-  final List<String> libp2pAddresses;
+
+  /// Iroh addressing info from the ANNOUNCE
+  final String? irohRelayUrl;
+  final List<String> irohDirectAddresses;
 
   PeerAnnounceReceivedAction({
     required this.publicKey,
@@ -113,7 +116,8 @@ class PeerAnnounceReceivedAction extends PeerAction {
     required this.rssi,
     this.transport = PeerTransport.bleDirect,
     this.bleDeviceId,
-    this.libp2pAddresses = const [],
+    this.irohRelayUrl,
+    this.irohDirectAddresses = const [],
   });
 }
 
@@ -121,7 +125,7 @@ class PeerAnnounceReceivedAction extends PeerAction {
 class PeerRssiUpdatedAction extends PeerAction {
   final Uint8List publicKey;
   final int rssi;
-  
+
   PeerRssiUpdatedAction({
     required this.publicKey,
     required this.rssi,
@@ -131,35 +135,35 @@ class PeerRssiUpdatedAction extends PeerAction {
 /// Mark peer as disconnected from BLE
 class PeerBleDisconnectedAction extends PeerAction {
   final Uint8List publicKey;
-  
+
   PeerBleDisconnectedAction(this.publicKey);
 }
 
-/// Mark peer as disconnected from libp2p
-class PeerLibp2pDisconnectedAction extends PeerAction {
+/// Mark peer as disconnected from iroh
+class PeerIrohDisconnectedAction extends PeerAction {
   final Uint8List publicKey;
-  
-  PeerLibp2pDisconnectedAction(this.publicKey);
+
+  PeerIrohDisconnectedAction(this.publicKey);
 }
 
 /// Mark peer as fully disconnected
 class PeerDisconnectedAction extends PeerAction {
   final Uint8List publicKey;
-  
+
   PeerDisconnectedAction(this.publicKey);
 }
 
 /// Remove peer completely
 class PeerRemovedAction extends PeerAction {
   final Uint8List publicKey;
-  
+
   PeerRemovedAction(this.publicKey);
 }
 
 /// Remove stale peers that haven't been seen
 class StalePeersRemovedAction extends PeerAction {
   final Duration staleThreshold;
-  
+
   StalePeersRemovedAction(this.staleThreshold);
 }
 
@@ -172,21 +176,23 @@ class ClearAllPeersAction extends PeerAction {}
 class AssociateBleDeviceAction extends PeerAction {
   final Uint8List publicKey;
   final String deviceId;
-  
+
   AssociateBleDeviceAction({
     required this.publicKey,
     required this.deviceId,
   });
 }
 
-/// Associate a libp2p address with a pubkey
-class AssociateLibp2pAddressAction extends PeerAction {
+/// Mark a peer as connected via iroh
+class AssociateIrohConnectionAction extends PeerAction {
   final Uint8List publicKey;
-  final String address;
+  final String? relayUrl;
+  final List<String>? directAddresses;
 
-  AssociateLibp2pAddressAction({
+  AssociateIrohConnectionAction({
     required this.publicKey,
-    required this.address,
+    this.relayUrl,
+    this.directAddresses,
   });
 }
 

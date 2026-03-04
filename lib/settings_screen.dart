@@ -10,8 +10,8 @@ class SettingsScreen extends StatefulWidget {
   /// Whether BLE is available on this device
   final bool bleAvailable;
 
-  /// Whether libp2p is available
-  final bool libp2pAvailable;
+  /// Whether iroh is available
+  final bool irohAvailable;
 
   /// Callback when settings are changed
   final VoidCallback? onSettingsChanged;
@@ -20,7 +20,7 @@ class SettingsScreen extends StatefulWidget {
     super.key,
     required this.store,
     this.bleAvailable = true,
-    this.libp2pAvailable = true,
+    this.irohAvailable = true,
     this.onSettingsChanged,
   });
 
@@ -30,13 +30,13 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   late bool _bluetoothEnabled;
-  late bool _libp2pEnabled;
+  late bool _irohEnabled;
 
   @override
   void initState() {
     super.initState();
     _bluetoothEnabled = widget.store.state.settings.bluetoothEnabled;
-    _libp2pEnabled = widget.store.state.settings.libp2pEnabled;
+    _irohEnabled = widget.store.state.settings.irohEnabled;
   }
 
   @override
@@ -92,22 +92,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
             priority: 1,
           ),
 
-          // libp2p Toggle
+          // iroh Toggle
           _buildTransportTile(
             icon: Icons.public,
             iconColor: Colors.green,
-            title: 'Internet (libp2p)',
+            title: 'Internet (iroh)',
             subtitle: 'Connect to peers over the Internet',
-            value: _libp2pEnabled,
-            available: widget.libp2pAvailable,
-            onChanged: _onLibp2pChanged,
+            value: _irohEnabled,
+            available: widget.irohAvailable,
+            onChanged: _onIrohChanged,
             priority: 2,
           ),
 
           const Divider(height: 32),
 
           // Warning if no transport enabled
-          if (!_bluetoothEnabled && !_libp2pEnabled)
+          if (!_bluetoothEnabled && !_irohEnabled)
             Container(
               margin: const EdgeInsets.symmetric(horizontal: 16),
               padding: const EdgeInsets.all(16),
@@ -281,7 +281,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _buildInfoRow(
             icon: Icons.public,
             iconColor: Colors.green,
-            text: 'Internet (libp2p) connects you to peers anywhere in the world',
+            text: 'Internet (iroh) connects you to peers anywhere in the world',
           ),
           const SizedBox(height: 8),
           _buildInfoRow(
@@ -316,7 +316,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   void _onBluetoothChanged(bool value) {
     // Prevent disabling both transports
-    if (!value && !_libp2pEnabled) {
+    if (!value && !_irohEnabled) {
       _showCannotDisableDialog();
       return;
     }
@@ -329,7 +329,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     widget.onSettingsChanged?.call();
   }
 
-  void _onLibp2pChanged(bool value) {
+  void _onIrohChanged(bool value) {
     // Prevent disabling both transports
     if (!value && !_bluetoothEnabled) {
       _showCannotDisableDialog();
@@ -337,10 +337,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
 
     setState(() {
-      _libp2pEnabled = value;
+      _irohEnabled = value;
     });
 
-    widget.store.dispatch(SetLibp2pEnabledAction(value));
+    widget.store.dispatch(SetIrohEnabledAction(value));
     widget.onSettingsChanged?.call();
   }
 

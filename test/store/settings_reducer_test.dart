@@ -9,15 +9,15 @@ class _UnknownAction extends SettingsAction {}
 void main() {
   group('settingsReducer', () {
     group('default state', () {
-      test('initial state has bluetoothEnabled=true and libp2pEnabled=true',
+      test('initial state has bluetoothEnabled=true and irohEnabled=true',
           () {
         const state = SettingsState.initial;
 
         expect(state.bluetoothEnabled, isTrue);
-        expect(state.libp2pEnabled, isTrue);
+        expect(state.irohEnabled, isTrue);
         expect(state.transportPriority, [
           TransportProtocol.bluetooth,
-          TransportProtocol.libp2p,
+          TransportProtocol.iroh,
         ]);
       });
 
@@ -50,11 +50,11 @@ void main() {
         expect(result.bluetoothEnabled, isFalse);
       });
 
-      test('preserves libp2pEnabled and transportPriority', () {
+      test('preserves irohEnabled and transportPriority', () {
         const state = SettingsState(
           bluetoothEnabled: true,
-          libp2pEnabled: false,
-          transportPriority: [TransportProtocol.libp2p],
+          irohEnabled: false,
+          transportPriority: [TransportProtocol.iroh],
         );
         final result = settingsReducer(
           state,
@@ -62,50 +62,50 @@ void main() {
         );
 
         expect(result.bluetoothEnabled, isFalse);
-        expect(result.libp2pEnabled, isFalse);
-        expect(result.transportPriority, [TransportProtocol.libp2p]);
+        expect(result.irohEnabled, isFalse);
+        expect(result.transportPriority, [TransportProtocol.iroh]);
       });
     });
 
-    group('SetLibp2pEnabledAction', () {
-      test('sets libp2pEnabled to true', () {
-        const state = SettingsState(libp2pEnabled: false);
+    group('SetIrohEnabledAction', () {
+      test('sets irohEnabled to true', () {
+        const state = SettingsState(irohEnabled: false);
         final result = settingsReducer(
           state,
-          SetLibp2pEnabledAction(true),
+          SetIrohEnabledAction(true),
         );
 
-        expect(result.libp2pEnabled, isTrue);
+        expect(result.irohEnabled, isTrue);
       });
 
-      test('sets libp2pEnabled to false', () {
-        const state = SettingsState(libp2pEnabled: true);
+      test('sets irohEnabled to false', () {
+        const state = SettingsState(irohEnabled: true);
         final result = settingsReducer(
           state,
-          SetLibp2pEnabledAction(false),
+          SetIrohEnabledAction(false),
         );
 
-        expect(result.libp2pEnabled, isFalse);
+        expect(result.irohEnabled, isFalse);
       });
 
       test('preserves bluetoothEnabled and transportPriority', () {
         const state = SettingsState(
           bluetoothEnabled: false,
-          libp2pEnabled: true,
+          irohEnabled: true,
           transportPriority: [
-            TransportProtocol.libp2p,
+            TransportProtocol.iroh,
             TransportProtocol.bluetooth,
           ],
         );
         final result = settingsReducer(
           state,
-          SetLibp2pEnabledAction(false),
+          SetIrohEnabledAction(false),
         );
 
-        expect(result.libp2pEnabled, isFalse);
+        expect(result.irohEnabled, isFalse);
         expect(result.bluetoothEnabled, isFalse);
         expect(result.transportPriority, [
-          TransportProtocol.libp2p,
+          TransportProtocol.iroh,
           TransportProtocol.bluetooth,
         ]);
       });
@@ -118,16 +118,16 @@ void main() {
           state,
           UpdateTransportSettingsAction(
             bluetoothEnabled: false,
-            libp2pEnabled: false,
+            irohEnabled: false,
           ),
         );
 
         expect(result.bluetoothEnabled, isFalse);
-        expect(result.libp2pEnabled, isFalse);
+        expect(result.irohEnabled, isFalse);
         // transportPriority not provided, so it should remain at default
         expect(result.transportPriority, [
           TransportProtocol.bluetooth,
-          TransportProtocol.libp2p,
+          TransportProtocol.iroh,
         ]);
       });
 
@@ -137,19 +137,19 @@ void main() {
           state,
           UpdateTransportSettingsAction(
             transportPriority: [
-              TransportProtocol.libp2p,
+              TransportProtocol.iroh,
               TransportProtocol.bluetooth,
             ],
           ),
         );
 
         expect(result.transportPriority, [
-          TransportProtocol.libp2p,
+          TransportProtocol.iroh,
           TransportProtocol.bluetooth,
         ]);
         // Fields not provided in the action should remain unchanged
         expect(result.bluetoothEnabled, isTrue);
-        expect(result.libp2pEnabled, isTrue);
+        expect(result.irohEnabled, isTrue);
       });
 
       test('updates all fields simultaneously', () {
@@ -158,14 +158,14 @@ void main() {
           state,
           UpdateTransportSettingsAction(
             bluetoothEnabled: false,
-            libp2pEnabled: true,
-            transportPriority: [TransportProtocol.libp2p],
+            irohEnabled: true,
+            transportPriority: [TransportProtocol.iroh],
           ),
         );
 
         expect(result.bluetoothEnabled, isFalse);
-        expect(result.libp2pEnabled, isTrue);
-        expect(result.transportPriority, [TransportProtocol.libp2p]);
+        expect(result.irohEnabled, isTrue);
+        expect(result.transportPriority, [TransportProtocol.iroh]);
       });
     });
 
@@ -174,7 +174,7 @@ void main() {
         const state = SettingsState.initial;
         const hydratedState = SettingsState(
           bluetoothEnabled: false,
-          libp2pEnabled: false,
+          irohEnabled: false,
         );
         final result = settingsReducer(
           state,
@@ -183,16 +183,16 @@ void main() {
 
         expect(result, equals(hydratedState));
         expect(result.bluetoothEnabled, isFalse);
-        expect(result.libp2pEnabled, isFalse);
+        expect(result.irohEnabled, isFalse);
       });
 
       test('handles custom transport priority', () {
         const state = SettingsState.initial;
         const hydratedState = SettingsState(
           bluetoothEnabled: true,
-          libp2pEnabled: false,
+          irohEnabled: false,
           transportPriority: [
-            TransportProtocol.libp2p,
+            TransportProtocol.iroh,
             TransportProtocol.bluetooth,
           ],
         );
@@ -202,25 +202,25 @@ void main() {
         );
 
         expect(result.transportPriority, [
-          TransportProtocol.libp2p,
+          TransportProtocol.iroh,
           TransportProtocol.bluetooth,
         ]);
         expect(result.bluetoothEnabled, isTrue);
-        expect(result.libp2pEnabled, isFalse);
+        expect(result.irohEnabled, isFalse);
       });
 
       test('completely discards previous state', () {
         const previousState = SettingsState(
           bluetoothEnabled: false,
-          libp2pEnabled: false,
-          transportPriority: [TransportProtocol.libp2p],
+          irohEnabled: false,
+          transportPriority: [TransportProtocol.iroh],
         );
         const hydratedState = SettingsState(
           bluetoothEnabled: true,
-          libp2pEnabled: true,
+          irohEnabled: true,
           transportPriority: [
             TransportProtocol.bluetooth,
-            TransportProtocol.libp2p,
+            TransportProtocol.iroh,
           ],
         );
         final result = settingsReducer(
@@ -230,10 +230,10 @@ void main() {
 
         expect(result, equals(hydratedState));
         expect(result.bluetoothEnabled, isTrue);
-        expect(result.libp2pEnabled, isTrue);
+        expect(result.irohEnabled, isTrue);
         expect(result.transportPriority, [
           TransportProtocol.bluetooth,
-          TransportProtocol.libp2p,
+          TransportProtocol.iroh,
         ]);
       });
     });

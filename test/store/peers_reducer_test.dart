@@ -421,8 +421,9 @@ void main() {
         nickname: 'NewNick',
         protocolVersion: 3,
         rssi: -40,
-        transport: PeerTransport.libp2p,
-        libp2pAddresses: ['/ip4/1.2.3.4/tcp/4001/p2p/QmTest'],
+        transport: PeerTransport.iroh,
+        irohRelayUrl: 'https://relay.iroh.network',
+        irohDirectAddresses: ['192.168.1.1:4433'],
       );
 
       final result = peersReducer(initial, action);
@@ -431,8 +432,10 @@ void main() {
       expect(peer.nickname, 'NewNick');
       expect(peer.protocolVersion, 3);
       expect(peer.rssi, -40);
-      expect(peer.transport, PeerTransport.libp2p);
-      expect(peer.libp2pAddress, '/ip4/1.2.3.4/tcp/4001/p2p/QmTest');
+      expect(peer.transport, PeerTransport.iroh);
+      expect(peer.irohConnected, isTrue);
+      expect(peer.irohRelayUrl, 'https://relay.iroh.network');
+      expect(peer.irohDirectAddresses, ['192.168.1.1:4433']);
       expect(peer.connectionState, PeerConnectionState.connected);
     });
 
@@ -494,7 +497,7 @@ void main() {
   // =========================================================================
 
   group('PeerBleDisconnectedAction', () {
-    test('marks disconnected if no libp2p address', () {
+    test('marks disconnected if no iroh connection', () {
       final pubkey = _testPubkey(1);
       final hex = _pubkeyHex(pubkey);
       final initial = PeersState(
@@ -516,7 +519,7 @@ void main() {
       expect(peer.bleDeviceId, isNull);
     });
 
-    test('keeps connected if has libp2p address', () {
+    test('keeps connected if has iroh connection', () {
       final pubkey = _testPubkey(1);
       final hex = _pubkeyHex(pubkey);
       final initial = PeersState(
@@ -526,7 +529,8 @@ void main() {
             nickname: 'Alice',
             connectionState: PeerConnectionState.connected,
             bleDeviceId: 'ble-1',
-            libp2pAddress: '/ip4/1.2.3.4/tcp/4001/p2p/QmTest',
+            irohConnected: true,
+            irohRelayUrl: 'https://relay.iroh.network',
           ),
         },
       );
@@ -537,7 +541,7 @@ void main() {
       final peer = result.peers[hex]!;
       expect(peer.connectionState, PeerConnectionState.connected);
       expect(peer.bleDeviceId, isNull);
-      expect(peer.libp2pAddress, '/ip4/1.2.3.4/tcp/4001/p2p/QmTest');
+      expect(peer.irohConnected, isTrue);
     });
 
     test('clears bleDeviceId', () {
@@ -562,10 +566,10 @@ void main() {
   });
 
   // =========================================================================
-  // PeerLibp2pDisconnectedAction
+  // PeerIrohDisconnectedAction
   // =========================================================================
 
-  group('PeerLibp2pDisconnectedAction', () {
+  group('PeerIrohDisconnectedAction', () {
     test('marks disconnected if no BLE device', () {
       final pubkey = _testPubkey(1);
       final hex = _pubkeyHex(pubkey);
@@ -575,17 +579,18 @@ void main() {
             publicKey: pubkey,
             nickname: 'Alice',
             connectionState: PeerConnectionState.connected,
-            libp2pAddress: '/ip4/1.2.3.4/tcp/4001/p2p/QmTest',
+            irohConnected: true,
+            irohRelayUrl: 'https://relay.iroh.network',
           ),
         },
       );
-      final action = PeerLibp2pDisconnectedAction(pubkey);
+      final action = PeerIrohDisconnectedAction(pubkey);
 
       final result = peersReducer(initial, action);
 
       final peer = result.peers[hex]!;
       expect(peer.connectionState, PeerConnectionState.disconnected);
-      expect(peer.libp2pAddress, isNull);
+      expect(peer.irohConnected, isFalse);
     });
 
     test('keeps connected if has BLE device', () {
@@ -598,21 +603,22 @@ void main() {
             nickname: 'Alice',
             connectionState: PeerConnectionState.connected,
             bleDeviceId: 'ble-1',
-            libp2pAddress: '/ip4/1.2.3.4/tcp/4001/p2p/QmTest',
+            irohConnected: true,
+            irohRelayUrl: 'https://relay.iroh.network',
           ),
         },
       );
-      final action = PeerLibp2pDisconnectedAction(pubkey);
+      final action = PeerIrohDisconnectedAction(pubkey);
 
       final result = peersReducer(initial, action);
 
       final peer = result.peers[hex]!;
       expect(peer.connectionState, PeerConnectionState.connected);
       expect(peer.bleDeviceId, 'ble-1');
-      expect(peer.libp2pAddress, isNull);
+      expect(peer.irohConnected, isFalse);
     });
 
-    test('clears libp2pAddress', () {
+    test('clears irohConnected', () {
       final pubkey = _testPubkey(1);
       final hex = _pubkeyHex(pubkey);
       final initial = PeersState(
@@ -621,15 +627,16 @@ void main() {
             publicKey: pubkey,
             nickname: 'Alice',
             connectionState: PeerConnectionState.connected,
-            libp2pAddress: '/ip4/1.2.3.4/tcp/4001/p2p/QmTest',
+            irohConnected: true,
+            irohRelayUrl: 'https://relay.iroh.network',
           ),
         },
       );
-      final action = PeerLibp2pDisconnectedAction(pubkey);
+      final action = PeerIrohDisconnectedAction(pubkey);
 
       final result = peersReducer(initial, action);
 
-      expect(result.peers[hex]!.libp2pAddress, isNull);
+      expect(result.peers[hex]!.irohConnected, isFalse);
     });
   });
 
@@ -701,39 +708,38 @@ void main() {
   });
 
   // =========================================================================
-  // AssociateLibp2pAddressAction
+  // AssociateIrohConnectionAction
   // =========================================================================
 
-  group('AssociateLibp2pAddressAction', () {
-    test('sets libp2pAddress and hostId without overwriting libp2pHostAddrs', () {
+  group('AssociateIrohConnectionAction', () {
+    test('sets irohConnected and relay URL, preserves existing direct addresses', () {
       final pubkey = _testPubkey(1);
       final hex = _pubkeyHex(pubkey);
-      final existingAddrs = ['/ip6/2001:db8::1/udp/4001/quic', '/ip4/5.6.7.8/udp/4001/quic'];
+      final existingAddrs = ['192.168.1.1:4433', '10.0.0.1:4433'];
       final initial = PeersState(
         peers: {
           hex: PeerState(
             publicKey: pubkey,
             nickname: 'Alice',
-            libp2pHostId: 'QmTest',
-            libp2pHostAddrs: existingAddrs,
+            irohDirectAddresses: existingAddrs,
           ),
         },
       );
-      final action = AssociateLibp2pAddressAction(
+      final action = AssociateIrohConnectionAction(
         publicKey: pubkey,
-        address: '/ip4/1.2.3.4/tcp/4001/p2p/QmTest',
+        relayUrl: 'https://relay.iroh.network',
+        directAddresses: ['192.168.1.1:4433', '10.0.0.1:4433'],
       );
 
       final result = peersReducer(initial, action);
 
       final peer = result.peers[hex]!;
-      expect(peer.libp2pAddress, '/ip4/1.2.3.4/tcp/4001/p2p/QmTest');
-      expect(peer.libp2pHostId, 'QmTest');
-      // libp2pHostAddrs preserved from ANNOUNCE, not overwritten
-      expect(peer.libp2pHostAddrs, existingAddrs);
+      expect(peer.irohConnected, isTrue);
+      expect(peer.irohRelayUrl, 'https://relay.iroh.network');
+      expect(peer.irohDirectAddresses, existingAddrs);
     });
 
-    test('clears libp2pAddress when address is empty', () {
+    test('sets irohConnected with just relay URL', () {
       final pubkey = _testPubkey(1);
       final hex = _pubkeyHex(pubkey);
       final initial = PeersState(
@@ -741,32 +747,26 @@ void main() {
           hex: PeerState(
             publicKey: pubkey,
             nickname: 'Alice',
-            libp2pAddress: '/ip4/1.2.3.4/tcp/4001/p2p/QmTest',
           ),
         },
       );
-      final action = AssociateLibp2pAddressAction(
+      final action = AssociateIrohConnectionAction(
         publicKey: pubkey,
-        address: '',
+        relayUrl: 'https://relay.iroh.network',
       );
 
       final result = peersReducer(initial, action);
 
-      // When address is empty, copyWith with null keeps old value for
-      // libp2pAddress. The reducer passes: libp2pAddress: action.address.isEmpty ? null : action.address
-      // But copyWith(libp2pAddress: null) preserves old value due to ?? semantics.
-      // This documents the actual behavior of the reducer.
       final peer = result.peers[hex]!;
-      // The reducer uses copyWith which can't clear nullable fields to null.
-      // So the old libp2pAddress is preserved. This is a known copyWith limitation.
-      expect(peer.libp2pAddress, '/ip4/1.2.3.4/tcp/4001/p2p/QmTest');
+      expect(peer.irohConnected, isTrue);
+      expect(peer.irohRelayUrl, 'https://relay.iroh.network');
     });
 
     test('is a no-op for unknown peer', () {
       const state = PeersState.initial;
-      final action = AssociateLibp2pAddressAction(
+      final action = AssociateIrohConnectionAction(
         publicKey: _testPubkey(99),
-        address: '/ip4/1.2.3.4/tcp/4001/p2p/QmTest',
+        relayUrl: 'https://relay.iroh.network',
       );
 
       final result = peersReducer(state, action);
@@ -845,7 +845,8 @@ void main() {
             publicKey: pubkey,
             nickname: 'Alice',
             isFriend: true,
-            libp2pAddress: '/ip4/1.2.3.4/tcp/4001/p2p/QmTest',
+            irohConnected: true,
+            irohRelayUrl: 'https://relay.iroh.network',
             // bleDeviceId is null
           ),
         },
@@ -858,7 +859,7 @@ void main() {
       expect(result.peers, isEmpty);
     });
 
-    test('clears isFriend and libp2p fields but keeps peer if has BLE', () {
+    test('clears isFriend and iroh fields but keeps peer if has BLE', () {
       final pubkey = _testPubkey(1);
       final hex = _pubkeyHex(pubkey);
       final initial = PeersState(
@@ -869,9 +870,9 @@ void main() {
             connectionState: PeerConnectionState.connected,
             isFriend: true,
             bleDeviceId: 'ble-1',
-            libp2pAddress: '/ip4/1.2.3.4/tcp/4001/p2p/QmTest',
-            libp2pHostId: 'QmTest',
-            libp2pHostAddrs: const ['/ip4/1.2.3.4/tcp/4001'],
+            irohConnected: true,
+            irohRelayUrl: 'https://relay.iroh.network',
+            irohDirectAddresses: const ['192.168.1.1:4433'],
           ),
         },
       );
@@ -882,9 +883,9 @@ void main() {
       expect(result.peers.containsKey(hex), true);
       final peer = result.peers[hex]!;
       expect(peer.isFriend, false);
-      expect(peer.libp2pAddress, isNull);
-      expect(peer.libp2pHostId, isNull);
-      expect(peer.libp2pHostAddrs, isNull);
+      expect(peer.irohConnected, isFalse);
+      expect(peer.irohRelayUrl, isNull);
+      expect(peer.irohDirectAddresses, isNull);
       expect(peer.bleDeviceId, 'ble-1');
       expect(peer.connectionState, PeerConnectionState.connected);
       expect(peer.transport, PeerTransport.bleDirect);
@@ -927,7 +928,7 @@ void main() {
       expect(result.peers.containsKey(hex), false);
     });
 
-    test('marks stale friend peers as disconnected and preserves libp2pHostId', () {
+    test('marks stale friend peers as disconnected and preserves iroh info', () {
       final pubkey = _testPubkey(1);
       final hex = _pubkeyHex(pubkey);
       final now = DateTime.now();
@@ -940,9 +941,9 @@ void main() {
             lastSeen: now.subtract(const Duration(minutes: 10)),
             isFriend: true,
             bleDeviceId: 'ble-1',
-            libp2pAddress: '/ip4/1.2.3.4/tcp/4001/p2p/QmTest',
-            libp2pHostId: 'QmTest',
-            libp2pHostAddrs: const ['/ip4/1.2.3.4/tcp/4001'],
+            irohConnected: true,
+            irohRelayUrl: 'https://relay.iroh.network',
+            irohDirectAddresses: const ['192.168.1.1:4433'],
           ),
         },
       );
@@ -956,9 +957,9 @@ void main() {
       expect(peer.isFriend, true);
       expect(peer.rssi, -100);
       expect(peer.bleDeviceId, isNull);
-      expect(peer.libp2pAddress, isNull);
-      expect(peer.libp2pHostId, 'QmTest');
-      expect(peer.libp2pHostAddrs, ['/ip4/1.2.3.4/tcp/4001']);
+      expect(peer.irohConnected, isFalse);
+      expect(peer.irohRelayUrl, 'https://relay.iroh.network');
+      expect(peer.irohDirectAddresses, ['192.168.1.1:4433']);
     });
 
     test('keeps fresh peers unchanged', () {

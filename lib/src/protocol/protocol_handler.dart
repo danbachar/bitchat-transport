@@ -123,7 +123,7 @@ class ProtocolHandler {
       publicKey: Uint8List.fromList(pubkey),
       nickname: nickname,
       protocolVersion: version,
-      libp2pAddresses: addresses,
+      irohAddresses: addresses,
     );
   }
 
@@ -186,15 +186,15 @@ class AnnounceData {
   final Uint8List publicKey;
   final String nickname;
   final int protocolVersion;
-  final List<String> libp2pAddresses;
+  final List<String> irohAddresses;
 
   const AnnounceData({
     required this.publicKey,
     required this.nickname,
     required this.protocolVersion,
-    this.libp2pAddresses = const [],
+    this.irohAddresses = const [],
   });
 
   @override
-  String toString() => 'AnnounceData($nickname, v$protocolVersion${libp2pAddresses.isNotEmpty ? ", addrs: $libp2pAddresses" : ""})';
+  String toString() => 'AnnounceData($nickname, v$protocolVersion${irohAddresses.isNotEmpty ? ", addrs: $irohAddresses" : ""})';
 }

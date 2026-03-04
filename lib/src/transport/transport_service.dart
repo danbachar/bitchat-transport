@@ -10,8 +10,8 @@ enum TransportType {
   /// WebRTC-based P2P transport (STUN/TURN/TURNS)
   webrtc,
 
-  /// LibP2P-based transport
-  libp2p,
+  /// Iroh-based peer-to-peer transport
+  iroh,
 }
 
 /// Display metadata for a transport service.

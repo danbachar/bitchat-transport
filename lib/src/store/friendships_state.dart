@@ -21,14 +21,11 @@ class FriendshipState {
   /// The friend's public key in hex format
   final String peerPubkeyHex;
 
-  /// The friend's libp2p multiaddress (if known)
-  final String? libp2pAddress;
+  /// The friend's iroh relay URL (if known)
+  final String? irohRelayUrl;
 
-  /// The friend's libp2p host ID (PeerId) for connection
-  final String? libp2pHostId;
-
-  /// The friend's libp2p addresses for connection
-  final List<String>? libp2pHostAddrs;
+  /// The friend's iroh direct addresses for connection
+  final List<String>? irohDirectAddresses;
 
   /// The friend's nickname (if known)
   final String? nickname;
@@ -47,9 +44,8 @@ class FriendshipState {
 
   const FriendshipState({
     required this.peerPubkeyHex,
-    this.libp2pAddress,
-    this.libp2pHostId,
-    this.libp2pHostAddrs,
+    this.irohRelayUrl,
+    this.irohDirectAddresses,
     this.nickname,
     required this.status,
     required this.createdAt,
@@ -71,9 +67,8 @@ class FriendshipState {
       nickname?.isNotEmpty == true ? nickname! : 'Peer ${peerPubkeyHex.substring(0, 8)}...';
 
   FriendshipState copyWith({
-    String? libp2pAddress,
-    String? libp2pHostId,
-    List<String>? libp2pHostAddrs,
+    String? irohRelayUrl,
+    List<String>? irohDirectAddresses,
     String? nickname,
     FriendshipStatus? status,
     String? message,
@@ -81,9 +76,8 @@ class FriendshipState {
   }) {
     return FriendshipState(
       peerPubkeyHex: peerPubkeyHex,
-      libp2pAddress: libp2pAddress ?? this.libp2pAddress,
-      libp2pHostId: libp2pHostId ?? this.libp2pHostId,
-      libp2pHostAddrs: libp2pHostAddrs ?? this.libp2pHostAddrs,
+      irohRelayUrl: irohRelayUrl ?? this.irohRelayUrl,
+      irohDirectAddresses: irohDirectAddresses ?? this.irohDirectAddresses,
       nickname: nickname ?? this.nickname,
       status: status ?? this.status,
       createdAt: createdAt,
@@ -94,9 +88,8 @@ class FriendshipState {
 
   Map<String, dynamic> toJson() => {
         'peerPubkeyHex': peerPubkeyHex,
-        'libp2pAddress': libp2pAddress,
-        'libp2pHostId': libp2pHostId,
-        'libp2pHostAddrs': libp2pHostAddrs,
+        'irohRelayUrl': irohRelayUrl,
+        'irohDirectAddresses': irohDirectAddresses,
         'nickname': nickname,
         'status': status.index,
         'createdAt': createdAt.toIso8601String(),
@@ -107,11 +100,13 @@ class FriendshipState {
   factory FriendshipState.fromJson(Map<String, dynamic> json) {
     return FriendshipState(
       peerPubkeyHex: json['peerPubkeyHex'] as String,
-      libp2pAddress: json['libp2pAddress'] as String?,
-      libp2pHostId: json['libp2pHostId'] as String?,
-      libp2pHostAddrs: json['libp2pHostAddrs'] != null
-          ? List<String>.from(json['libp2pHostAddrs'] as List)
-          : null,
+      // Support both new and old (libp2p) field names for migration
+      irohRelayUrl: json['irohRelayUrl'] as String? ?? json['libp2pAddress'] as String?,
+      irohDirectAddresses: json['irohDirectAddresses'] != null
+          ? List<String>.from(json['irohDirectAddresses'] as List)
+          : json['libp2pHostAddrs'] != null
+              ? List<String>.from(json['libp2pHostAddrs'] as List)
+              : null,
       nickname: json['nickname'] as String?,
       status: FriendshipStatus.values[json['status'] as int],
       createdAt: DateTime.parse(json['createdAt'] as String),
@@ -126,8 +121,7 @@ class FriendshipState {
       other is FriendshipState &&
           runtimeType == other.runtimeType &&
           peerPubkeyHex == other.peerPubkeyHex &&
-          libp2pAddress == other.libp2pAddress &&
-          libp2pHostId == other.libp2pHostId &&
+          irohRelayUrl == other.irohRelayUrl &&
           nickname == other.nickname &&
           status == other.status &&
           message == other.message;
@@ -135,8 +129,7 @@ class FriendshipState {
   @override
   int get hashCode => Object.hash(
         peerPubkeyHex,
-        libp2pAddress,
-        libp2pHostId,
+        irohRelayUrl,
         nickname,
         status,
         message,
@@ -192,10 +185,10 @@ class FriendshipsState {
   List<String> get friendPubkeyHexes =>
       friends.map((f) => f.peerPubkeyHex).toList();
 
-  /// Get all friend libp2p addresses
-  List<String> get friendLibp2pAddresses => friends
-      .where((f) => f.libp2pAddress != null)
-      .map((f) => f.libp2pAddress!)
+  /// Get all friend iroh relay URLs
+  List<String> get friendIrohRelayUrls => friends
+      .where((f) => f.irohRelayUrl != null)
+      .map((f) => f.irohRelayUrl!)
       .toList();
 
   // ===== Copy With =====

@@ -15,9 +15,8 @@ FriendshipState makeFriendship({
   required String pubkey,
   FriendshipStatus status = FriendshipStatus.accepted,
   String? nickname,
-  String? libp2pAddress,
-  String? libp2pHostId,
-  List<String>? libp2pHostAddrs,
+  String? irohRelayUrl,
+  List<String>? irohDirectAddresses,
   String? message,
   DateTime? createdAt,
   DateTime? updatedAt,
@@ -27,9 +26,8 @@ FriendshipState makeFriendship({
     peerPubkeyHex: pubkey,
     nickname: nickname,
     status: status,
-    libp2pAddress: libp2pAddress,
-    libp2pHostId: libp2pHostId,
-    libp2pHostAddrs: libp2pHostAddrs,
+    irohRelayUrl: irohRelayUrl,
+    irohDirectAddresses: irohDirectAddresses,
     message: message,
     createdAt: createdAt ?? now,
     updatedAt: updatedAt ?? now,
@@ -42,7 +40,7 @@ ChatMessageState makeMessage({
   String content = 'hello',
   bool isOutgoing = true,
   ChatMessageType messageType = ChatMessageType.text,
-  String? libp2pAddress,
+  String? irohAddress,
   String? messageId,
   DateTime? timestamp,
 }) {
@@ -53,7 +51,7 @@ ChatMessageState makeMessage({
     timestamp: timestamp ?? DateTime.utc(2025, 1, 15, 12, 0, 0),
     isOutgoing: isOutgoing,
     messageType: messageType,
-    libp2pAddress: libp2pAddress,
+    irohAddress: irohAddress,
     messageId: messageId,
   );
 }
@@ -104,9 +102,8 @@ void main() {
         pubkey: peerA,
         nickname: 'Alice',
         status: FriendshipStatus.accepted,
-        libp2pAddress: '/ip4/1.2.3.4/tcp/4001/p2p/QmAlice',
-        libp2pHostId: 'QmAlice',
-        libp2pHostAddrs: const ['/ip4/1.2.3.4/tcp/4001'],
+        irohRelayUrl: 'https://relay.example.com',
+        irohDirectAddresses: const ['192.168.1.1:12345'],
         message: 'Hi!',
       );
       final state = FriendshipsState(friendships: {peerA: friendship});
@@ -124,10 +121,8 @@ void main() {
       expect(loaded.peerPubkeyHex, equals(peerA));
       expect(loaded.nickname, equals('Alice'));
       expect(loaded.status, equals(FriendshipStatus.accepted));
-      expect(
-          loaded.libp2pAddress, equals('/ip4/1.2.3.4/tcp/4001/p2p/QmAlice'));
-      expect(loaded.libp2pHostId, equals('QmAlice'));
-      expect(loaded.libp2pHostAddrs, equals(['/ip4/1.2.3.4/tcp/4001']));
+      expect(loaded.irohRelayUrl, equals('https://relay.example.com'));
+      expect(loaded.irohDirectAddresses, equals(['192.168.1.1:12345']));
       expect(loaded.message, equals('Hi!'));
     });
 
@@ -201,10 +196,9 @@ void main() {
       expect(result.friendships[peerA]!.nickname, equals('OldAlice'));
       expect(result.friendships[peerA]!.status,
           equals(FriendshipStatus.accepted));
-      expect(result.friendships[peerA]!.libp2pAddress,
+      expect(result.friendships[peerA]!.irohRelayUrl,
           equals('/ip4/10.0.0.1/tcp/4001/p2p/QmOld'));
-      expect(result.friendships[peerA]!.libp2pHostId, equals('QmOld'));
-      expect(result.friendships[peerA]!.libp2pHostAddrs,
+      expect(result.friendships[peerA]!.irohDirectAddresses,
           equals(['/ip4/10.0.0.1/tcp/4001']));
       expect(result.friendships[peerA]!.message, equals('Be my friend'));
       expect(result.friendships[peerA]!.createdAt, equals(createdAt));
@@ -299,19 +293,19 @@ void main() {
       final result = await service.loadSettings();
 
       expect(result.bluetoothEnabled, isTrue);
-      expect(result.libp2pEnabled, isTrue);
+      expect(result.irohEnabled, isTrue);
       expect(result.transportPriority, equals(const [
         TransportProtocol.bluetooth,
-        TransportProtocol.libp2p,
+        TransportProtocol.iroh,
       ]));
     });
 
     test('loads settings from v2 key', () async {
       const settings = SettingsState(
         bluetoothEnabled: false,
-        libp2pEnabled: true,
+        irohEnabled: true,
         transportPriority: [
-          TransportProtocol.libp2p,
+          TransportProtocol.iroh,
           TransportProtocol.bluetooth,
         ],
       );
@@ -324,9 +318,9 @@ void main() {
       final result = await service.loadSettings();
 
       expect(result.bluetoothEnabled, isFalse);
-      expect(result.libp2pEnabled, isTrue);
+      expect(result.irohEnabled, isTrue);
       expect(result.transportPriority, equals(const [
-        TransportProtocol.libp2p,
+        TransportProtocol.iroh,
         TransportProtocol.bluetooth,
       ]));
     });
@@ -346,9 +340,9 @@ void main() {
       final result = await service.loadSettings();
 
       expect(result.bluetoothEnabled, isFalse);
-      expect(result.libp2pEnabled, isFalse);
+      expect(result.irohEnabled, isFalse);
       expect(result.transportPriority, equals(const [
-        TransportProtocol.libp2p,
+        TransportProtocol.iroh,
         TransportProtocol.bluetooth,
       ]));
 
@@ -361,7 +355,7 @@ void main() {
     test('prefers v2 key over old key', () async {
       const v2Settings = SettingsState(
         bluetoothEnabled: false,
-        libp2pEnabled: true,
+        irohEnabled: true,
       );
       final oldSettings = {
         'bluetoothEnabled': true,
@@ -377,7 +371,7 @@ void main() {
       final result = await service.loadSettings();
 
       expect(result.bluetoothEnabled, isFalse);
-      expect(result.libp2pEnabled, isTrue);
+      expect(result.irohEnabled, isTrue);
     });
 
     test('returns default SettingsState on corrupt v2 data', () async {
@@ -389,7 +383,7 @@ void main() {
       final result = await service.loadSettings();
 
       expect(result.bluetoothEnabled, isTrue);
-      expect(result.libp2pEnabled, isTrue);
+      expect(result.irohEnabled, isTrue);
     });
 
     test('returns default SettingsState on corrupt old format data', () async {
@@ -401,7 +395,7 @@ void main() {
       final result = await service.loadSettings();
 
       expect(result.bluetoothEnabled, isTrue);
-      expect(result.libp2pEnabled, isTrue);
+      expect(result.irohEnabled, isTrue);
     });
 
     test('handles partial settings JSON gracefully', () async {
@@ -417,10 +411,10 @@ void main() {
 
       expect(result.bluetoothEnabled, isFalse);
       // Defaults for missing fields
-      expect(result.libp2pEnabled, isTrue);
+      expect(result.irohEnabled, isTrue);
       expect(result.transportPriority, equals(const [
         TransportProtocol.bluetooth,
-        TransportProtocol.libp2p,
+        TransportProtocol.iroh,
       ]));
     });
   });
@@ -565,7 +559,7 @@ void main() {
         recipient: peerB,
         content: 'Sent a friend request',
         messageType: ChatMessageType.friendRequestSent,
-        libp2pAddress: '/ip4/1.2.3.4/tcp/4001',
+        irohAddress: '/ip4/1.2.3.4/tcp/4001',
       );
       final friendReqReceived = makeMessage(
         sender: peerB,
@@ -573,7 +567,7 @@ void main() {
         content: 'Wants to be friends',
         isOutgoing: false,
         messageType: ChatMessageType.friendRequestReceived,
-        libp2pAddress: '/ip4/5.6.7.8/tcp/4001',
+        irohAddress: '/ip4/5.6.7.8/tcp/4001',
       );
       final friendReqAccepted = makeMessage(
         sender: peerB,
@@ -604,7 +598,7 @@ void main() {
           equals(ChatMessageType.friendRequestSent));
       expect(conversations[peerB]![2].messageType,
           equals(ChatMessageType.friendRequestReceived));
-      expect(conversations[peerB]![2].libp2pAddress,
+      expect(conversations[peerB]![2].irohAddress,
           equals('/ip4/5.6.7.8/tcp/4001'));
       expect(conversations[peerB]![3].messageType,
           equals(ChatMessageType.friendRequestAccepted));
@@ -624,7 +618,7 @@ void main() {
           FriendshipsState(friendships: {peerA: friendship});
       const settingsState = SettingsState(
         bluetoothEnabled: false,
-        libp2pEnabled: true,
+        irohEnabled: true,
       );
       final msg = makeMessage(
         sender: peerA,
@@ -659,9 +653,8 @@ void main() {
         pubkey: peerA,
         nickname: 'RoundTripAlice',
         status: FriendshipStatus.received,
-        libp2pAddress: '/ip4/192.168.1.1/tcp/4001/p2p/QmRT',
-        libp2pHostId: 'QmRT',
-        libp2pHostAddrs: const ['/ip4/192.168.1.1/tcp/4001'],
+        irohRelayUrl: 'https://relay.example.com',
+        irohDirectAddresses: const ['192.168.1.1:12345'],
         message: 'round trip message',
       );
       final friendshipsState =
@@ -680,11 +673,10 @@ void main() {
       expect(loadedFriendship.peerPubkeyHex, equals(peerA));
       expect(loadedFriendship.nickname, equals('RoundTripAlice'));
       expect(loadedFriendship.status, equals(FriendshipStatus.received));
-      expect(loadedFriendship.libp2pAddress,
-          equals('/ip4/192.168.1.1/tcp/4001/p2p/QmRT'));
-      expect(loadedFriendship.libp2pHostId, equals('QmRT'));
-      expect(loadedFriendship.libp2pHostAddrs,
-          equals(['/ip4/192.168.1.1/tcp/4001']));
+      expect(loadedFriendship.irohRelayUrl,
+          equals('https://relay.example.com'));
+      expect(loadedFriendship.irohDirectAddresses,
+          equals(['192.168.1.1:12345']));
       expect(loadedFriendship.message, equals('round trip message'));
       expect(loadedFriendship.createdAt, equals(friendship.createdAt));
       expect(loadedFriendship.updatedAt, equals(friendship.updatedAt));
@@ -693,9 +685,9 @@ void main() {
     test('round-trip: flush then load returns same settings', () async {
       const settings = SettingsState(
         bluetoothEnabled: false,
-        libp2pEnabled: false,
+        irohEnabled: false,
         transportPriority: [
-          TransportProtocol.libp2p,
+          TransportProtocol.iroh,
           TransportProtocol.bluetooth,
         ],
       );
@@ -708,9 +700,9 @@ void main() {
       loadService.dispose();
 
       expect(loaded.bluetoothEnabled, isFalse);
-      expect(loaded.libp2pEnabled, isFalse);
+      expect(loaded.irohEnabled, isFalse);
       expect(loaded.transportPriority, equals(const [
-        TransportProtocol.libp2p,
+        TransportProtocol.iroh,
         TransportProtocol.bluetooth,
       ]));
     });
@@ -782,7 +774,7 @@ void main() {
       final settingsJson =
           jsonDecode(settingsData!) as Map<String, dynamic>;
       expect(settingsJson['bluetoothEnabled'], isTrue);
-      expect(settingsJson['libp2pEnabled'], isTrue);
+      expect(settingsJson['irohEnabled'], isTrue);
 
       final conversationsJson =
           jsonDecode(conversationsData!) as Map<String, dynamic>;
@@ -1055,9 +1047,8 @@ void main() {
       loadService.dispose();
 
       final f = loaded.friendships[peerA]!;
-      expect(f.libp2pAddress, isNull);
-      expect(f.libp2pHostId, isNull);
-      expect(f.libp2pHostAddrs, isNull);
+      expect(f.irohRelayUrl, isNull);
+      expect(f.irohDirectAddresses, isNull);
       expect(f.nickname, isNull);
       expect(f.message, isNull);
       expect(f.status, equals(FriendshipStatus.pending));

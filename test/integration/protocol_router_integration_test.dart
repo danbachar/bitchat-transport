@@ -80,7 +80,7 @@ void main() {
       // Bob's router processes the BLE packet
       AnnounceData? receivedAnnounce;
       PeerTransport? receivedTransport;
-      bobRouter.onPeerAnnounced = (data, transport, {bool isNew = false, String? previousLibp2pAddress}) {
+      bobRouter.onPeerAnnounced = (data, transport, {bool isNew = false, bool irohAddressChanged = false}) {
         receivedAnnounce = data;
         receivedTransport = transport;
       };
@@ -107,8 +107,8 @@ void main() {
       expect(peerState.rssi, equals(-50));
     });
 
-    test('ANNOUNCE with libp2p address roundtrips correctly', () async {
-      const address = '/ip4/192.168.1.1/tcp/4001/p2p/QmHash123';
+    test('ANNOUNCE with iroh address roundtrips correctly', () async {
+      const address = 'https://use1-1.relay.iroh.network';
       final announcePayload = aliceProtocol.createAnnouncePayload(addresses: [address]);
 
       final packet = BitchatPacket(
@@ -121,7 +121,7 @@ void main() {
       await aliceProtocol.signPacket(packet);
 
       AnnounceData? receivedAnnounce;
-      bobRouter.onPeerAnnounced = (data, transport, {bool isNew = false, String? previousLibp2pAddress}) {
+      bobRouter.onPeerAnnounced = (data, transport, {bool isNew = false, bool irohAddressChanged = false}) {
         receivedAnnounce = data;
       };
 
@@ -133,13 +133,12 @@ void main() {
       );
 
       expect(receivedAnnounce, isNotNull);
-      expect(receivedAnnounce!.libp2pAddresses, equals([address]));
+      expect(receivedAnnounce!.irohAddresses, equals([address]));
 
-      // BLE ANNOUNCE stores addresses as backups, not as verified libp2pAddress
+      // BLE ANNOUNCE stores addresses as backup iroh info, not as verified iroh connection
       final peerState = bobStore.state.peers.getPeerByPubkey(aliceIdentity.publicKey);
-      expect(peerState!.libp2pAddress, isNull);
-      expect(peerState.libp2pHostId, equals('QmHash123'));
-      expect(peerState.libp2pHostAddrs, contains('/ip4/192.168.1.1/tcp/4001'));
+      expect(peerState!.irohConnected, isFalse);
+      expect(peerState.irohRelayUrl, 'https://use1-1.relay.iroh.network');
     });
   });
 
@@ -254,8 +253,8 @@ void main() {
     });
   });
 
-  group('LibP2P ANNOUNCE roundtrip', () {
-    test('Alice creates libp2p ANNOUNCE, Bob receives and decodes it', () async {
+  group('Iroh ANNOUNCE roundtrip', () {
+    test('Alice creates iroh ANNOUNCE, Bob receives and decodes it', () async {
       final announcePayload = aliceProtocol.createAnnouncePayload();
 
       final packet = BitchatPacket(
@@ -270,32 +269,32 @@ void main() {
       // Bob's router processes it
       AnnounceData? receivedAnnounce;
       PeerTransport? receivedTransport;
-      bobRouter.onPeerAnnounced = (data, transport, {bool isNew = false, String? previousLibp2pAddress}) {
+      bobRouter.onPeerAnnounced = (data, transport, {bool isNew = false, bool irohAddressChanged = false}) {
         receivedAnnounce = data;
         receivedTransport = transport;
       };
 
       await bobRouter.processPacket(
         packet,
-        transport: PeerTransport.libp2p,
-        libp2pPeerId: 'peer-alice-id',
+        transport: PeerTransport.iroh,
+        irohNodeIdHex: 'peer-alice-id',
       );
 
       expect(receivedAnnounce, isNotNull);
       expect(receivedAnnounce!.publicKey, equals(aliceIdentity.publicKey));
       expect(receivedAnnounce!.nickname, equals('Alice'));
       expect(receivedAnnounce!.protocolVersion, equals(1));
-      expect(receivedTransport, equals(PeerTransport.libp2p));
+      expect(receivedTransport, equals(PeerTransport.iroh));
 
       // Verify Bob's Redux store was updated
       final peerState = bobStore.state.peers.getPeerByPubkey(aliceIdentity.publicKey);
       expect(peerState, isNotNull);
       expect(peerState!.nickname, equals('Alice'));
-      expect(peerState.transport, equals(PeerTransport.libp2p));
+      expect(peerState.transport, equals(PeerTransport.iroh));
     });
 
-    test('libp2p ANNOUNCE with address roundtrips correctly', () async {
-      const address = '/ip6/::1/udp/4001/udx';
+    test('iroh ANNOUNCE with address roundtrips correctly', () async {
+      const address = 'https://use1-1.relay.iroh.network';
       final announcePayload = aliceProtocol.createAnnouncePayload(addresses: [address]);
 
       final packet = BitchatPacket(
@@ -308,22 +307,22 @@ void main() {
       await aliceProtocol.signPacket(packet);
 
       AnnounceData? receivedAnnounce;
-      bobRouter.onPeerAnnounced = (data, transport, {bool isNew = false, String? previousLibp2pAddress}) {
+      bobRouter.onPeerAnnounced = (data, transport, {bool isNew = false, bool irohAddressChanged = false}) {
         receivedAnnounce = data;
       };
 
       await bobRouter.processPacket(
         packet,
-        transport: PeerTransport.libp2p,
-        libp2pPeerId: 'peer-alice-id',
+        transport: PeerTransport.iroh,
+        irohNodeIdHex: 'peer-alice-id',
       );
 
-      expect(receivedAnnounce!.libp2pAddresses, equals([address]));
+      expect(receivedAnnounce!.irohAddresses, equals([address]));
     });
   });
 
-  group('LibP2P MESSAGE roundtrip', () {
-    test('Alice sends libp2p message, Bob receives it', () async {
+  group('Iroh MESSAGE roundtrip', () {
+    test('Alice sends iroh message, Bob receives it', () async {
       final messagePayload = Uint8List.fromList([99, 88, 77]);
 
       final packet = aliceProtocol.createMessagePacket(
@@ -344,8 +343,8 @@ void main() {
 
       await bobRouter.processPacket(
         packet,
-        transport: PeerTransport.libp2p,
-        libp2pPeerId: 'peer-alice-id',
+        transport: PeerTransport.iroh,
+        irohNodeIdHex: 'peer-alice-id',
       );
 
       expect(receivedId, isNotNull);
@@ -354,7 +353,7 @@ void main() {
     });
   });
 
-  group('LibP2P ACK roundtrip', () {
+  group('Iroh ACK roundtrip', () {
     test('Alice sends ACK, Bob receives message ID', () async {
       const messageId = 'ack12345';
 
@@ -372,16 +371,16 @@ void main() {
 
       await bobRouter.processPacket(
         packet,
-        transport: PeerTransport.libp2p,
-        libp2pPeerId: 'peer-alice-id',
+        transport: PeerTransport.iroh,
+        irohNodeIdHex: 'peer-alice-id',
       );
 
       expect(receivedMessageId, equals(messageId));
     });
   });
 
-  group('LibP2P READ_RECEIPT roundtrip', () {
-    test('Alice sends read receipt via libp2p, Bob receives it', () async {
+  group('Iroh READ_RECEIPT roundtrip', () {
+    test('Alice sends read receipt via iroh, Bob receives it', () async {
       const messageId = 'rcpt1234';
 
       final packet = aliceProtocol.createReadReceiptPacket(
@@ -398,8 +397,8 @@ void main() {
 
       await bobRouter.processPacket(
         packet,
-        transport: PeerTransport.libp2p,
-        libp2pPeerId: 'peer-alice-id',
+        transport: PeerTransport.iroh,
+        irohNodeIdHex: 'peer-alice-id',
       );
 
       expect(receivedMessageId, equals(messageId));
@@ -447,7 +446,7 @@ void main() {
       await aliceProtocol.signPacket(packet);
 
       int announceCount = 0;
-      bobRouter.onPeerAnnounced = (_, __, {bool isNew = false, String? previousLibp2pAddress}) {
+      bobRouter.onPeerAnnounced = (_, __, {bool isNew = false, bool irohAddressChanged = false}) {
         announceCount++;
       };
 
@@ -467,7 +466,7 @@ void main() {
   });
 
   group('cross-transport peer discovery', () {
-    test('peer announced via BLE then libp2p updates transport info', () async {
+    test('peer announced via BLE then iroh updates transport info', () async {
       // First: Alice announces via BLE
       final bleAnnouncePayload = aliceProtocol.createAnnouncePayload();
       final blePacket = BitchatPacket(
@@ -490,27 +489,27 @@ void main() {
       expect(peer!.transport, equals(PeerTransport.bleDirect));
       expect(peer.bleDeviceId, equals('device-alice'));
 
-      // Then: Alice announces via libp2p with address
-      const libp2pAddr = '/ip4/10.0.0.1/tcp/4001/p2p/QmAlice';
-      final libp2pAnnouncePayload = aliceProtocol.createAnnouncePayload(addresses: [libp2pAddr]);
-      final libp2pPacket = BitchatPacket(
+      // Then: Alice announces via iroh with relay address
+      const irohRelayUrl = 'https://use1-1.relay.iroh.network';
+      final irohAnnouncePayload = aliceProtocol.createAnnouncePayload(addresses: [irohRelayUrl]);
+      final irohPacket = BitchatPacket(
         type: PacketType.announce,
         senderPubkey: aliceIdentity.publicKey,
-        payload: libp2pAnnouncePayload,
+        payload: irohAnnouncePayload,
         signature: Uint8List(64),
       );
-      await aliceProtocol.signPacket(libp2pPacket);
+      await aliceProtocol.signPacket(irohPacket);
 
       await bobRouter.processPacket(
-        libp2pPacket,
-        transport: PeerTransport.libp2p,
-        libp2pPeerId: 'peer-alice-libp2p',
+        irohPacket,
+        transport: PeerTransport.iroh,
+        irohNodeIdHex: 'peer-alice-iroh',
       );
 
-      // Peer should now have libp2p address too
+      // Peer should now have iroh connection too
       peer = bobStore.state.peers.getPeerByPubkey(aliceIdentity.publicKey);
       expect(peer, isNotNull);
-      expect(peer!.libp2pAddress, equals(libp2pAddr));
+      expect(peer!.irohConnected, isTrue);
     });
   });
 

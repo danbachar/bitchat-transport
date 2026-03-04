@@ -16,7 +16,7 @@ class ChatScreen extends StatefulWidget {
   final VoidCallback? onSendFriendRequest;
   final VoidCallback? onAcceptFriendRequest;
   final VoidCallback? onUnfriend;
-  final String? myLibp2pAddress;
+  final String? myIrohAddress;
 
   const ChatScreen({
     super.key,
@@ -27,7 +27,7 @@ class ChatScreen extends StatefulWidget {
     this.onSendFriendRequest,
     this.onAcceptFriendRequest,
     this.onUnfriend,
-    this.myLibp2pAddress,
+    this.myIrohAddress,
   });
 
   @override
@@ -468,9 +468,9 @@ class _ChatScreenState extends State<ChatScreen> {
             if (_isFriend) ...[
               const SizedBox(height: 8),
               _buildInfoRow('Friendship', 'Friends ✓'),
-              if (_friendship?.libp2pAddress != null) ...[
+              if (_friendship?.irohRelayUrl != null) ...[
                 const SizedBox(height: 8),
-                _buildInfoRow('LibP2P', _friendship!.libp2pAddress!),
+                _buildInfoRow('Iroh Relay', _friendship!.irohRelayUrl!),
               ],
             ],
           ],

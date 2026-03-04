@@ -471,7 +471,8 @@ class BleTransportService extends TransportService {
       connectionState: state.connectionState,
       transport: state.transport,
       bleDeviceId: state.bleDeviceId,
-      libp2pAddress: state.libp2pAddress,
+      irohRelayUrl: state.irohRelayUrl,
+      irohDirectAddresses: state.irohDirectAddresses,
       rssi: state.rssi,
       protocolVersion: state.protocolVersion,
     );

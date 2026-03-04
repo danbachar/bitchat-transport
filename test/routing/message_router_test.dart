@@ -124,7 +124,7 @@ void main() {
         router.onAckReceived = (_) => anyCalled = true;
         router.onReadReceiptReceived = (_) => anyCalled = true;
         router.onPeerAnnounced =
-            (_, __, {bool isNew = false, String? previousLibp2pAddress}) =>
+            (_, __, {bool isNew = false, bool irohAddressChanged = false}) =>
                 anyCalled = true;
 
         // Create packet without signing (zero signature)
@@ -215,7 +215,7 @@ void main() {
         expect(peer!.bleDeviceId, equals('ble-device-1'));
       });
 
-      test('stores libp2p addresses as backups from BLE ANNOUNCE', () async {
+      test('stores iroh addresses as backups from BLE ANNOUNCE', () async {
         final payload = buildAnnouncePayload(
           pubkey: otherPubkey,
           address: '/ip4/10.0.0.1/tcp/4001/p2p/QmTest',
@@ -233,11 +233,10 @@ void main() {
 
         final peer = store.state.peers.getPeerByPubkey(otherPubkey);
         expect(peer, isNotNull);
-        // BLE ANNOUNCE does NOT set libp2pAddress (no verified connection)
-        expect(peer!.libp2pAddress, isNull);
+        // BLE ANNOUNCE does NOT set irohConnected (no verified connection)
+        expect(peer!.irohConnected, isFalse);
         // Addresses stored as backups for connection attempts
-        expect(peer.libp2pHostId, equals('QmTest'));
-        expect(peer.libp2pHostAddrs, contains('/ip4/10.0.0.1/tcp/4001'));
+        expect(peer.irohDirectAddresses, contains('/ip4/10.0.0.1/tcp/4001'));
       });
 
       test('fires onPeerAnnounced callback', () async {
@@ -245,7 +244,7 @@ void main() {
         PeerTransport? receivedTransport;
         router.onPeerAnnounced =
             (data, transport,
-                {bool isNew = false, String? previousLibp2pAddress}) {
+                {bool isNew = false, bool irohAddressChanged = false}) {
           receivedData = data;
           receivedTransport = transport;
         };
@@ -280,7 +279,7 @@ void main() {
 
         int announceCount = 0;
         router.onPeerAnnounced =
-            (_, __, {bool isNew = false, String? previousLibp2pAddress}) =>
+            (_, __, {bool isNew = false, bool irohAddressChanged = false}) =>
                 announceCount++;
 
         await router.processPacket(
@@ -568,14 +567,14 @@ void main() {
     });
 
     // =========================================================================
-    // LibP2P Packet Processing - ANNOUNCE
+    // Iroh Packet Processing - ANNOUNCE
     // =========================================================================
 
-    group('processPacket (libp2p) - ANNOUNCE', () {
+    group('processPacket (iroh) - ANNOUNCE', () {
       test('decodes ANNOUNCE and dispatches to Redux', () async {
         final payload = buildAnnouncePayload(
           pubkey: otherPubkey,
-          nickname: 'LibPeer',
+          nickname: 'IrohPeer',
           address: '/ip4/1.2.3.4/tcp/4001/p2p/QmExample',
         );
         final p = await signedPacket(
@@ -585,21 +584,18 @@ void main() {
 
         await router.processPacket(
           p,
-          transport: PeerTransport.libp2p,
-          libp2pPeerId: 'peer-123',
+          transport: PeerTransport.iroh,
+          irohNodeIdHex: 'peer-123',
         );
 
         final peer = store.state.peers.getPeerByPubkey(otherPubkey);
         expect(peer, isNotNull);
-        expect(peer!.nickname, equals('LibPeer'));
-        expect(peer.transport, equals(PeerTransport.libp2p));
-        expect(
-          peer.libp2pAddress,
-          equals('/ip4/1.2.3.4/tcp/4001/p2p/QmExample'),
-        );
+        expect(peer!.nickname, equals('IrohPeer'));
+        expect(peer.transport, equals(PeerTransport.iroh));
+        expect(peer.irohConnected, isTrue);
       });
 
-      test('uses peerId as fallback address when not in payload', () async {
+      test('marks peer as iroh connected even without addresses in payload', () async {
         final payload = buildAnnouncePayload(
           pubkey: otherPubkey,
           nickname: 'NoPeer',
@@ -611,20 +607,20 @@ void main() {
 
         await router.processPacket(
           p,
-          transport: PeerTransport.libp2p,
-          libp2pPeerId: 'fallback-peer-id',
+          transport: PeerTransport.iroh,
+          irohNodeIdHex: 'fallback-peer-id',
         );
 
         final peer = store.state.peers.getPeerByPubkey(otherPubkey);
         expect(peer, isNotNull);
-        expect(peer!.libp2pAddress, equals('fallback-peer-id'));
+        expect(peer!.irohConnected, isTrue);
       });
 
-      test('fires onPeerAnnounced callback with libp2p transport', () async {
+      test('fires onPeerAnnounced callback with iroh transport', () async {
         PeerTransport? receivedTransport;
         router.onPeerAnnounced =
             (_, transport,
-                {bool isNew = false, String? previousLibp2pAddress}) {
+                {bool isNew = false, bool irohAddressChanged = false}) {
           receivedTransport = transport;
         };
 
@@ -636,19 +632,19 @@ void main() {
 
         await router.processPacket(
           p,
-          transport: PeerTransport.libp2p,
-          libp2pPeerId: 'peer-456',
+          transport: PeerTransport.iroh,
+          irohNodeIdHex: 'peer-456',
         );
 
-        expect(receivedTransport, equals(PeerTransport.libp2p));
+        expect(receivedTransport, equals(PeerTransport.iroh));
       });
     });
 
     // =========================================================================
-    // LibP2P Packet Processing - MESSAGE
+    // Iroh Packet Processing - MESSAGE
     // =========================================================================
 
-    group('processPacket (libp2p) - MESSAGE', () {
+    group('processPacket (iroh) - MESSAGE', () {
       test('delivers message via onMessageReceived', () async {
         String? receivedId;
         Uint8List? receivedPubkey;
@@ -668,8 +664,8 @@ void main() {
 
         await router.processPacket(
           p,
-          transport: PeerTransport.libp2p,
-          libp2pPeerId: 'peer-789',
+          transport: PeerTransport.iroh,
+          irohNodeIdHex: 'peer-789',
         );
 
         expect(receivedId, isNotNull);
@@ -697,11 +693,11 @@ void main() {
 
         await router.processPacket(
           p,
-          transport: PeerTransport.libp2p,
-          libp2pPeerId: 'peer-ack-test',
+          transport: PeerTransport.iroh,
+          irohNodeIdHex: 'peer-ack-test',
         );
 
-        expect(ackTransport, equals(PeerTransport.libp2p));
+        expect(ackTransport, equals(PeerTransport.iroh));
         expect(ackPeerId, equals('peer-ack-test'));
         expect(ackMessageId, equals(p.packetId));
       });
@@ -728,10 +724,10 @@ void main() {
     });
 
     // =========================================================================
-    // LibP2P Packet Processing - ACK
+    // Iroh Packet Processing - ACK
     // =========================================================================
 
-    group('processPacket (libp2p) - ACK', () {
+    group('processPacket (iroh) - ACK', () {
       test('delivers ACK via onAckReceived', () async {
         String? receivedId;
         router.onAckReceived = (id) => receivedId = id;
@@ -744,8 +740,8 @@ void main() {
 
         await router.processPacket(
           p,
-          transport: PeerTransport.libp2p,
-          libp2pPeerId: 'peer-abc',
+          transport: PeerTransport.iroh,
+          irohNodeIdHex: 'peer-abc',
         );
 
         expect(receivedId, equals(messageId));
@@ -753,10 +749,10 @@ void main() {
     });
 
     // =========================================================================
-    // LibP2P Packet Processing - ReadReceipt
+    // Iroh Packet Processing - ReadReceipt
     // =========================================================================
 
-    group('processPacket (libp2p) - ReadReceipt', () {
+    group('processPacket (iroh) - ReadReceipt', () {
       test('delivers read receipt via onReadReceiptReceived', () async {
         String? receivedId;
         router.onReadReceiptReceived = (id) => receivedId = id;
@@ -769,8 +765,8 @@ void main() {
 
         await router.processPacket(
           p,
-          transport: PeerTransport.libp2p,
-          libp2pPeerId: 'peer-def',
+          transport: PeerTransport.iroh,
+          irohNodeIdHex: 'peer-def',
         );
 
         expect(receivedId, equals(messageId));

@@ -66,7 +66,7 @@ class AppState {
   /// Number of connected peers (after ANNOUNCE)
   int get connectedPeerCount => peers.connectedCount;
   
-  /// Number of online friends (friends connected via libp2p only)
+  /// Number of online friends (friends connected via iroh only)
   int get onlineFriendsCount => peers.onlineFriends.length;
   
   /// Create a copy with updated values

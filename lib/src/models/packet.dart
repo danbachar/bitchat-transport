@@ -19,7 +19,7 @@ enum PacketType {
   /// Final fragment
   fragmentEnd(0x05),
   
-  /// Delivery acknowledgment (for libp2p transport)
+  /// Delivery acknowledgment (for iroh transport)
   ack(0x06),
 
   /// Negative acknowledgment / request for data

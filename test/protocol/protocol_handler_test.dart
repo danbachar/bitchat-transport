@@ -53,7 +53,7 @@ void main() {
         expect(payload[offset], equals(0));
       });
 
-      test('includes libp2p addresses when provided', () {
+      test('includes iroh addresses when provided', () {
         final testAddress = '/ip4/127.0.0.1/tcp/4001/p2p/QmTest';
         final payload = handler.createAnnouncePayload(addresses: [testAddress]);
 
@@ -94,10 +94,10 @@ void main() {
         expect(decoded.publicKey, equals(testIdentity.publicKey));
         expect(decoded.nickname, equals('TestUser'));
         expect(decoded.protocolVersion, equals(1));
-        expect(decoded.libp2pAddresses, isEmpty);
+        expect(decoded.irohAddresses, isEmpty);
       });
 
-      test('decodes announce with libp2p addresses', () {
+      test('decodes announce with iroh addresses', () {
         final testAddress = '/ip4/192.168.1.100/tcp/5000/p2p/QmExample';
         final payload = handler.createAnnouncePayload(addresses: [testAddress]);
         final decoded = handler.decodeAnnounce(payload);
@@ -105,7 +105,7 @@ void main() {
         expect(decoded.publicKey, equals(testIdentity.publicKey));
         expect(decoded.nickname, equals('TestUser'));
         expect(decoded.protocolVersion, equals(1));
-        expect(decoded.libp2pAddresses, equals([testAddress]));
+        expect(decoded.irohAddresses, equals([testAddress]));
       });
 
       test('decodes announce with multiple addresses', () {
@@ -117,7 +117,7 @@ void main() {
         final payload = handler.createAnnouncePayload(addresses: addresses);
         final decoded = handler.decodeAnnounce(payload);
 
-        expect(decoded.libp2pAddresses, equals(addresses));
+        expect(decoded.irohAddresses, equals(addresses));
       });
 
       test('handles announce without address field', () {
@@ -142,7 +142,7 @@ void main() {
         final decoded = handler.decodeAnnounce(payload);
 
         expect(decoded.nickname, equals('OldPeer'));
-        expect(decoded.libp2pAddresses, isEmpty);
+        expect(decoded.irohAddresses, isEmpty);
       });
 
       test('handles empty nickname in payload', () {
@@ -167,7 +167,7 @@ void main() {
         final decoded = handler.decodeAnnounce(payload);
 
         expect(decoded.nickname, equals(''));
-        expect(decoded.libp2pAddresses, isEmpty);
+        expect(decoded.irohAddresses, isEmpty);
       });
     });
 
@@ -416,7 +416,7 @@ void main() {
         });
         final reEncodedHandler = ProtocolHandler(identity: reEncodedIdentity);
         final reEncodedPayload = reEncodedHandler.createAnnouncePayload(
-          addresses: decoded.libp2pAddresses,
+          addresses: decoded.irohAddresses,
         );
 
         expect(reEncodedPayload, equals(originalPayload));

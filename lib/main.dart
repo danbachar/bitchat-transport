@@ -164,27 +164,20 @@ class _BitchatHomeState extends State<BitchatHome>
   
   // Transport availability flags
   bool _bleAvailable = true;
-  bool _libp2pAvailable = true;
+  bool _irohAvailable = true;
 
-  /// Check if libp2p host is available for friend requests
-  bool get _hasLibp2pHost => _bitchat?.libp2pHostId != null;
+  /// Check if iroh is available for friend requests
+  bool get _hasIroh => _bitchat?.irohNodeIdHex != null;
 
-  /// Get host ID for friend requests (null if not available)
-  String? get _myLibp2pHostId => _bitchat?.libp2pHostId;
+  /// Get our iroh relay URL (null if not available)
+  String? get _myIrohRelayUrl => _bitchat?.irohRelayUrl;
 
-  /// Get host addresses for friend requests (empty if not available)
-  List<String> get _myLibp2pHostAddrs => _bitchat?.libp2pHostAddrs ?? [];
+  /// Get our iroh direct addresses
+  List<String> get _myIrohDirectAddresses => _bitchat?.irohDirectAddresses ?? [];
 
-  /// Computed full multiaddress string combining first address with host ID
-  String? get _myLibp2pAddress {
-    final hostId = _myLibp2pHostId;
-    if (hostId == null) return null;
-    final publicAddr = _bitchat?.publicLibp2pMultiaddr;
-    if (publicAddr != null) return '$publicAddr/p2p/$hostId';
-    final addrs = _myLibp2pHostAddrs;
-    if (addrs.isNotEmpty) return '${addrs.first}/p2p/$hostId';
-    return '/p2p/$hostId';
-  }
+  /// Get shareable iroh address for FriendAnnounce blocks
+  /// Returns the relay URL if available, null otherwise
+  String? get _myIrohAddress => _myIrohRelayUrl;
   
   /// Get nearby peers from Redux store (BLE-connected peers in physical proximity).
   /// For the "Nearby" section - only peers reachable via Bluetooth.
@@ -218,8 +211,7 @@ class _BitchatHomeState extends State<BitchatHome>
   Future<void> _onConnectivityChanged(List<ConnectivityResult> results) async {
     _log.i('🌐 Connectivity changed: $results');
 
-    // Refresh the public IPv6 so the next friend announce has the current address
-    await _bitchat?.refreshLibp2pAddress();
+    // Refresh and announce to friends with updated address info
     await _announceToFriends();
   }
 
@@ -267,7 +259,7 @@ class _BitchatHomeState extends State<BitchatHome>
         _handleIncomingMessage(messageId, senderPubkey, payload);
       };
 
-      bitchat.onLibp2pInitialized = _onLibp2pBecameAvailable;
+      bitchat.onIrohInitialized = _onIrohBecameAvailable;
 
       // bitchat.onPeerConnected = (peer) {
       //   print('Peer connected: ${peer.displayName}');
@@ -313,7 +305,7 @@ class _BitchatHomeState extends State<BitchatHome>
   }
 
   /// Hydrate Redux store with friends from persistent FriendshipStore
-  /// and attempt to reconnect to each friend via libp2p if available.
+  /// and attempt to reconnect to each friend via iroh if available.
   Future<void> _hydrateFriendsFromStore() async {
     for (final friendship in appStore.state.friendships.friends) {
       final pubkey = ChatMessage.hexToPubkey(friendship.peerPubkeyHex);
@@ -324,34 +316,34 @@ class _BitchatHomeState extends State<BitchatHome>
         nickname: friendship.nickname,
       ));
 
-      // If friend has libp2p info, associate it and attempt connection
-      if (friendship.libp2pAddress != null && friendship.libp2pAddress!.isNotEmpty) {
-        appStore.dispatch(AssociateLibp2pAddressAction(
+      // If friend has iroh info, associate it and attempt connection
+      if (friendship.irohRelayUrl != null && friendship.irohRelayUrl!.isNotEmpty) {
+        appStore.dispatch(AssociateIrohConnectionAction(
           publicKey: pubkey,
-          address: friendship.libp2pAddress!,
+          relayUrl: friendship.irohRelayUrl,
+          directAddresses: friendship.irohDirectAddresses,
         ));
 
-        // Attempt to reconnect if libp2p is available
-        if (friendship.libp2pHostId != null && friendship.libp2pHostAddrs != null) {
-          await _bitchat?.connectToLibp2pHost(
-            hostId: friendship.libp2pHostId!,
-            hostAddrs: friendship.libp2pHostAddrs!,
-          );
-        }
+        // Attempt to reconnect via iroh
+        // In iroh, the NodeId IS the public key hex
+        await _bitchat?.connectToIrohPeer(
+          nodeIdHex: friendship.peerPubkeyHex,
+          relayUrl: friendship.irohRelayUrl,
+          directAddresses: friendship.irohDirectAddresses ?? [],
+        );
       }
     }
   }
 
-  /// Called when libp2p becomes available (initialized or toggled on)
-  Future<void> _onLibp2pBecameAvailable() async {
-    _log.i('libp2p initialized - broadcasting address to friends');
+  /// Called when iroh becomes available (initialized or toggled on)
+  Future<void> _onIrohBecameAvailable() async {
+    _log.i('iroh initialized - broadcasting address to friends');
 
-    // Send immediate FriendAnnounce with our new libp2p address
+    // Send immediate FriendAnnounce with our new iroh address
     // (instead of waiting for the next 10-second cycle)
-    // The _myLibp2pAddress getter will automatically get the new address from _bitchat
     await _announceToFriends();
 
-    // Friends will receive FriendAnnounce with libp2pAddress and connect
+    // Friends will receive FriendAnnounce with irohAddress and connect
   }
 
   /// Start periodic announcements to friends
@@ -366,23 +358,23 @@ class _BitchatHomeState extends State<BitchatHome>
   }
 
   /// Send FriendAnnounce block to all friends
-  /// Always sends announce, with or without libp2p address
+  /// Always sends announce, with or without iroh address
   Future<void> _announceToFriends() async {
     if (_bitchat == null || _identity == null) return;
 
     final friends = appStore.state.friendships.friends;
     if (friends.isEmpty) return;
 
-    // Create announce block - libp2pAddress is null if libp2p unavailable
+    // Create announce block - irohAddress is null if iroh unavailable
     final block = FriendAnnounceBlock(
-      libp2pAddress: _myLibp2pAddress,  // Can be null
+      irohAddress: _myIrohAddress,  // Can be null
       nickname: _identity!.nickname,
     );
     final data = block.serialize();
 
     for (final friend in friends) {
       final pubkey = ChatMessage.hexToPubkey(friend.peerPubkeyHex);
-      // Try to send via BLE first, then libp2p
+      // Try to send via BLE first, then iroh
       await _bitchat!.send(pubkey, data);
     }
   }
@@ -510,7 +502,7 @@ class _BitchatHomeState extends State<BitchatHome>
       await _showFriendRequestNotification(senderHex, senderName);
     }
 
-    // libp2p connection will be established when FriendAnnounce is received
+    // iroh connection will be established when FriendAnnounce is received
   }
 
   Future<void> _handleFriendshipAccept(
@@ -545,7 +537,7 @@ class _BitchatHomeState extends State<BitchatHome>
     ));
     debugPrint('🤝 Chat message saved');
 
-    // libp2p connection will be established when FriendAnnounce is received
+    // iroh connection will be established when FriendAnnounce is received
   }
 
   Future<void> _handleFriendAnnounce(
@@ -555,52 +547,35 @@ class _BitchatHomeState extends State<BitchatHome>
     // Update Redux state - ALWAYS, not just when there's an address
     final peerState = appStore.state.peers.getPeerByPubkey(pubkey);
     if (peerState != null && peerState.isFriend) {
-      if (block.libp2pAddress != null) {
-        final previousAddress = peerState.libp2pAddress;
-        final addressChanged = previousAddress != block.libp2pAddress;
+      if (block.irohAddress != null) {
+        final previousRelayUrl = peerState.irohRelayUrl;
+        final addressChanged = previousRelayUrl != block.irohAddress;
 
-        // Update Redux with the new address
-        appStore.dispatch(AssociateLibp2pAddressAction(
+        // Update Redux with the new iroh connection info
+        appStore.dispatch(AssociateIrohConnectionAction(
           publicKey: pubkey,
-          address: block.libp2pAddress!,
+          relayUrl: block.irohAddress,
         ));
 
         // Only (re)connect if the address changed or there's no existing connection
         if (addressChanged) {
-          if (addressChanged && previousAddress != null && previousAddress.isNotEmpty) {
-            _log.i('Friend $senderHex libp2p address changed: $previousAddress → ${block.libp2pAddress}');
+          if (previousRelayUrl != null && previousRelayUrl.isNotEmpty) {
+            _log.i('Friend $senderHex iroh address changed: $previousRelayUrl → ${block.irohAddress}');
           }
-          final libp2pParts = _parseLibp2pAddress(block.libp2pAddress!);
-          if (libp2pParts != null && _bitchat != null) {
-            final (hostId, baseAddr) = libp2pParts;
-            await _bitchat!.connectToLibp2pHost(
-              hostId: hostId,
-              hostAddrs: [baseAddr],
+          if (_bitchat != null) {
+            // In iroh, NodeId == public key hex
+            await _bitchat!.connectToIrohPeer(
+              nodeIdHex: senderHex,
+              relayUrl: block.irohAddress,
             );
           }
         }
       } else {
-        // Friend no longer has libp2p address (disabled libp2p)
-        // Clear the address and disconnect if connected via libp2p
-        appStore.dispatch(AssociateLibp2pAddressAction(
-          publicKey: pubkey,
-          address: '',  // Empty string clears
-        ));
-
-        // TODO: Disconnect libp2p connection if one exists
-        // _bitchat?.disconnectFromLibp2pHost(hostId);
+        // Friend no longer has iroh address (disabled iroh)
+        // Mark as disconnected from iroh
+        appStore.dispatch(PeerIrohDisconnectedAction(pubkey));
       }
     }
-  }
-
-  /// Parse libp2p multiaddress into (hostId, baseAddr)
-  /// Example: /ip6/::1/udp/12345/p2p/QmHostId → (QmHostId, /ip6/::1/udp/12345)
-  (String, String)? _parseLibp2pAddress(String libp2pAddress) {
-    final parts = libp2pAddress.split('/p2p/');
-    if (parts.length == 2) {
-      return (parts[1], parts[0]);
-    }
-    return null;
   }
 
   /// Handle being unfriended by someone
@@ -708,7 +683,7 @@ class _BitchatHomeState extends State<BitchatHome>
           onSendFriendRequest: () => _sendFriendRequest(peer),
           onAcceptFriendRequest: () => _acceptFriendRequest(peer),
           onUnfriend: () => _unfriend(peerHex),
-          myLibp2pAddress: _myLibp2pAddress,
+          myIrohAddress: _myIrohAddress,
         ),
       ),
     );
@@ -736,7 +711,7 @@ class _BitchatHomeState extends State<BitchatHome>
       nickname: peer.displayName,
     ));
 
-    // Create the friendship offer block (no libp2p info)
+    // Create the friendship offer block (no transport info)
     final block = FriendshipOfferBlock(
       message: 'Hey, let\'s be friends!',
     );
@@ -788,7 +763,7 @@ class _BitchatHomeState extends State<BitchatHome>
       nickname: peer.displayName,
     ));
 
-    // Create the friendship accept block (no libp2p info)
+    // Create the friendship accept block (no transport info)
     final block = FriendshipAcceptBlock();
 
     // Send via Bitchat (works over BLE)
@@ -806,7 +781,7 @@ class _BitchatHomeState extends State<BitchatHome>
       messageType: ChatMessageType.friendRequestAcceptedByUs.index,
     ));
 
-    // libp2p connection will be established when FriendAnnounce is received
+    // iroh connection will be established when FriendAnnounce is received
   }
 
   Future<void> _declineFriendRequest(String peerHex) async {
@@ -1878,13 +1853,13 @@ class _BitchatHomeState extends State<BitchatHome>
             ),
             const SizedBox(height: 8),
 
-            // libp2p status
+            // iroh status
             _buildTransportStatusRow(
               icon: Icons.public,
               iconColor: Colors.green,
-              name: 'Internet (libp2p)',
-              enabled: appStore.state.settings.libp2pEnabled,
-              available: _libp2pAvailable,
+              name: 'Internet (iroh)',
+              enabled: appStore.state.settings.irohEnabled,
+              available: _irohAvailable,
             ),
             
             const Divider(height: 24),
@@ -1966,7 +1941,7 @@ class _BitchatHomeState extends State<BitchatHome>
         builder: (context) => SettingsScreen(
           store: appStore,
           bleAvailable: _bleAvailable,
-          libp2pAvailable: _libp2pAvailable,
+          irohAvailable: _irohAvailable,
           onSettingsChanged: () {
             setState(() {});
           },

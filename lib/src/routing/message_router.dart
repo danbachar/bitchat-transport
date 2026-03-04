@@ -43,7 +43,7 @@ class MessageRouter {
 
   /// Called when a peer ANNOUNCE is processed (new or updated peer)
   void Function(AnnounceData data, PeerTransport transport,
-      {bool isNew, String? previousLibp2pAddress})? onPeerAnnounced;
+      {bool isNew, bool irohAddressChanged})? onPeerAnnounced;
 
   /// Called when a message needs an ACK sent back to the sender
   void Function(PeerTransport transport, String peerId, String messageId)?
@@ -70,7 +70,7 @@ class MessageRouter {
     BitchatPacket packet, {
     required PeerTransport transport,
     String? bleDeviceId,
-    String? libp2pPeerId,
+    String? irohNodeIdHex,
     int rssi = -100,
   }) async {
     // Verify signature — drop invalid packets
@@ -86,7 +86,7 @@ class MessageRouter {
         packet,
         transport: transport,
         bleDeviceId: bleDeviceId,
-        libp2pPeerId: libp2pPeerId,
+        irohNodeIdHex: irohNodeIdHex,
         rssi: rssi,
       );
       return;
@@ -101,7 +101,7 @@ class MessageRouter {
       case PacketType.announce:
         return; // Already handled above
       case PacketType.message:
-        _handleMessage(packet, transport: transport, libp2pPeerId: libp2pPeerId);
+        _handleMessage(packet, transport: transport, irohNodeIdHex: irohNodeIdHex);
       case PacketType.fragmentStart:
       case PacketType.fragmentContinue:
       case PacketType.fragmentEnd:
@@ -121,7 +121,7 @@ class MessageRouter {
     BitchatPacket packet, {
     required PeerTransport transport,
     String? bleDeviceId,
-    String? libp2pPeerId,
+    String? irohNodeIdHex,
     int rssi = -100,
   }) {
     final data = protocolHandler.decodeAnnounce(packet.payload);
@@ -147,12 +147,24 @@ class MessageRouter {
 
     final existingPeer = _peersState.getPeerByPubkey(pubkey);
     final isNew = existingPeer == null;
-    final previousLibp2pAddress = existingPeer?.libp2pAddress;
 
-    // LibP2P-specific: use peerId as fallback address
-    var libp2pAddresses = data.libp2pAddresses;
-    if (transport == PeerTransport.libp2p && libp2pAddresses.isEmpty && libp2pPeerId != null) {
-      libp2pAddresses = [libp2pPeerId];
+    // Parse iroh addresses from ANNOUNCE
+    final irohAddresses = data.irohAddresses;
+
+    // Detect if iroh addresses changed (for reconnection logic)
+    final previousRelayUrl = existingPeer?.irohRelayUrl;
+    final newRelayUrl = _extractRelayUrl(irohAddresses);
+    final irohAddressChanged = previousRelayUrl != null && newRelayUrl != previousRelayUrl;
+
+    // Extract relay URL and direct addresses from the address list
+    String? relayUrl;
+    final directAddresses = <String>[];
+    for (final addr in irohAddresses) {
+      if (addr.startsWith('https://') || addr.startsWith('http://')) {
+        relayUrl = addr;
+      } else {
+        directAddresses.add(addr);
+      }
     }
 
     store.dispatch(PeerAnnounceReceivedAction(
@@ -162,7 +174,8 @@ class MessageRouter {
       rssi: effectiveRssi,
       transport: transport,
       bleDeviceId: bleDeviceId,
-      libp2pAddresses: libp2pAddresses,
+      irohRelayUrl: relayUrl,
+      irohDirectAddresses: directAddresses,
     ));
 
     if (bleDeviceId != null) {
@@ -172,27 +185,36 @@ class MessageRouter {
 
     _log.i(
         'Peer ${isNew ? "connected" : "updated"}: ${data.nickname} via ${transport.name}'
-        '${libp2pAddresses.isNotEmpty ? ", ${libp2pAddresses.length} libp2p addrs" : ""}'
-        '${previousLibp2pAddress != null ? ", prevAddr=${previousLibp2pAddress.substring(0, previousLibp2pAddress.length.clamp(0, 30))}..." : ""}');
-    if (libp2pAddresses.isNotEmpty) {
-      _log.d('  ANNOUNCE addresses: ${libp2pAddresses.join(", ")}');
+        '${irohAddresses.isNotEmpty ? ", ${irohAddresses.length} iroh addrs" : ""}');
+    if (irohAddresses.isNotEmpty) {
+      _log.d('  ANNOUNCE addresses: ${irohAddresses.join(", ")}');
     }
 
     onPeerAnnounced?.call(data, transport,
-        isNew: isNew, previousLibp2pAddress: previousLibp2pAddress);
+        isNew: isNew, irohAddressChanged: irohAddressChanged);
+  }
+
+  /// Extract relay URL from a list of addresses (first https:// URL)
+  String? _extractRelayUrl(List<String> addresses) {
+    for (final addr in addresses) {
+      if (addr.startsWith('https://') || addr.startsWith('http://')) {
+        return addr;
+      }
+    }
+    return null;
   }
 
   void _handleMessage(
     BitchatPacket packet, {
     required PeerTransport transport,
-    String? libp2pPeerId,
+    String? irohNodeIdHex,
   }) {
     if (!_isForUs(packet)) return;
     onMessageReceived?.call(
         packet.packetId, packet.senderPubkey, packet.payload);
-    // Send ACK back for libp2p (delivery confirmation)
-    if (transport == PeerTransport.libp2p && libp2pPeerId != null) {
-      onAckRequested?.call(transport, libp2pPeerId, packet.packetId);
+    // Send ACK back for iroh (delivery confirmation)
+    if (transport == PeerTransport.iroh && irohNodeIdHex != null) {
+      onAckRequested?.call(transport, irohNodeIdHex, packet.packetId);
     }
   }
 

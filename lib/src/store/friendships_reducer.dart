@@ -77,8 +77,6 @@ FriendshipsState friendshipsReducer(FriendshipsState state, FriendshipAction act
     final now = DateTime.now();
 
     if (existing == null) {
-      // Strange case - they accepted but we never sent request
-      // Create a new accepted friendship
       final friendship = FriendshipState(
         peerPubkeyHex: action.peerPubkeyHex,
         nickname: action.nickname,
@@ -130,14 +128,13 @@ FriendshipsState friendshipsReducer(FriendshipsState state, FriendshipAction act
     return state.copyWith(friendships: action.friendships);
   }
 
-  if (action is UpdateFriendshipLibp2pInfoAction) {
+  if (action is UpdateFriendshipIrohInfoAction) {
     final existing = state.friendships[action.peerPubkeyHex];
     if (existing == null) return state;
 
     final friendship = existing.copyWith(
-      libp2pAddress: action.libp2pAddress ?? existing.libp2pAddress,
-      libp2pHostId: action.libp2pHostId ?? existing.libp2pHostId,
-      libp2pHostAddrs: action.libp2pHostAddrs ?? existing.libp2pHostAddrs,
+      irohRelayUrl: action.irohRelayUrl ?? existing.irohRelayUrl,
+      irohDirectAddresses: action.irohDirectAddresses ?? existing.irohDirectAddresses,
       updatedAt: DateTime.now(),
     );
     return state.copyWith(

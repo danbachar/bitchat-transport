@@ -7,14 +7,14 @@ SettingsState settingsReducer(SettingsState state, SettingsAction action) {
     return state.copyWith(bluetoothEnabled: action.enabled);
   }
 
-  if (action is SetLibp2pEnabledAction) {
-    return state.copyWith(libp2pEnabled: action.enabled);
+  if (action is SetIrohEnabledAction) {
+    return state.copyWith(irohEnabled: action.enabled);
   }
 
   if (action is UpdateTransportSettingsAction) {
     return state.copyWith(
       bluetoothEnabled: action.bluetoothEnabled,
-      libp2pEnabled: action.libp2pEnabled,
+      irohEnabled: action.irohEnabled,
       transportPriority: action.transportPriority,
     );
   }
