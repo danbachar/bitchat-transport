@@ -176,9 +176,22 @@ PeersState peersReducer(PeersState state, dynamic action) {
     final existing = state.peers[pubkeyHex];
     final now = DateTime.now();
 
-    // Extract hostId and base addresses from the address list
+    // ANNOUNCE addresses are the source of truth — always overwrite.
+    // If a peer removed an address, it's stale and should be cleared.
     final parsed = _parseLibp2pAddresses(action.libp2pAddresses);
-    final primaryAddress = action.libp2pAddresses.isNotEmpty ? action.libp2pAddresses.first : null;
+
+    // libp2pAddress = the verified working connection address.
+    // - If existing address is still in the new ANNOUNCE list: keep it
+    // - If existing address is NOT in the new list: stale, clear it
+    // - If no existing and ANNOUNCE came via libp2p: use first address
+    // - If no existing and ANNOUNCE came via BLE: null (side-effect connects)
+    final existingLibp2pAddr = existing?.libp2pAddress;
+    String? libp2pAddress;
+    if (existingLibp2pAddr != null && action.libp2pAddresses.contains(existingLibp2pAddr)) {
+      libp2pAddress = existingLibp2pAddr;
+    } else if (action.transport == PeerTransport.libp2p && action.libp2pAddresses.isNotEmpty) {
+      libp2pAddress = action.libp2pAddresses.first;
+    }
 
     if (existing == null) {
       // New peer
@@ -191,7 +204,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
         protocolVersion: action.protocolVersion,
         lastSeen: now,
         bleDeviceId: action.bleDeviceId,
-        libp2pAddress: primaryAddress,
+        libp2pAddress: libp2pAddress,
         libp2pHostId: parsed.hostId,
         libp2pHostAddrs: parsed.baseAddresses,
       );
@@ -199,8 +212,9 @@ PeersState peersReducer(PeersState state, dynamic action) {
         peers: Map.from(state.peers)..[pubkeyHex] = newPeer,
       );
     } else {
-      // Update existing peer
-      final updated = existing.copyWith(
+      // Update existing peer — ANNOUNCE overwrites addresses
+      final updated = PeerState(
+        publicKey: existing.publicKey,
         nickname: action.nickname,
         connectionState: PeerConnectionState.connected,
         transport: action.transport,
@@ -208,9 +222,10 @@ PeersState peersReducer(PeersState state, dynamic action) {
         protocolVersion: action.protocolVersion,
         lastSeen: now,
         bleDeviceId: action.bleDeviceId ?? existing.bleDeviceId,
-        libp2pAddress: primaryAddress ?? existing.libp2pAddress,
-        libp2pHostId: parsed.hostId ?? existing.libp2pHostId,
-        libp2pHostAddrs: parsed.baseAddresses.isNotEmpty ? parsed.baseAddresses : existing.libp2pHostAddrs,
+        libp2pAddress: libp2pAddress,
+        libp2pHostId: parsed.hostId,
+        libp2pHostAddrs: parsed.baseAddresses,
+        isFriend: existing.isFriend,
       );
       return state.copyWith(
         peers: Map.from(state.peers)..[pubkeyHex] = updated,
@@ -374,22 +389,22 @@ PeersState peersReducer(PeersState state, dynamic action) {
     final pubkeyHex = _pubkeyToHex(action.publicKey);
     final existing = state.peers[pubkeyHex];
     if (existing != null) {
-      // Parse address to extract hostId and baseAddr
+      // Extract hostId from the address
       String? libp2pHostId;
-      List<String>? libp2pHostAddrs;
-
       if (action.address.isNotEmpty) {
         final parts = action.address.split('/p2p/');
-        if (parts.length == 2) {
-          libp2pHostId = parts[1];
-          libp2pHostAddrs = [parts[0]];
+        if (parts.length >= 2) {
+          libp2pHostId = parts.last;
         }
       }
 
+      // Update libp2pAddress, libp2pHostId, and mark as connected.
+      // Do NOT overwrite libp2pHostAddrs — the full backup list
+      // comes from ANNOUNCE and should be preserved.
       final updated = existing.copyWith(
         libp2pAddress: action.address.isEmpty ? null : action.address,
         libp2pHostId: libp2pHostId,
-        libp2pHostAddrs: libp2pHostAddrs,
+        connectionState: PeerConnectionState.connected,
       );
       return state.copyWith(
         peers: Map.from(state.peers)..[pubkeyHex] = updated,

@@ -123,8 +123,9 @@ void main() {
         router.onMessageReceived = (_, __, ___) => anyCalled = true;
         router.onAckReceived = (_) => anyCalled = true;
         router.onReadReceiptReceived = (_) => anyCalled = true;
-        router.onPeerAnnounced = (_, __, {bool isNew = false}) =>
-            anyCalled = true;
+        router.onPeerAnnounced =
+            (_, __, {bool isNew = false, String? previousLibp2pAddress}) =>
+                anyCalled = true;
 
         // Create packet without signing (zero signature)
         final p = BitchatPacket(
@@ -214,7 +215,7 @@ void main() {
         expect(peer!.bleDeviceId, equals('ble-device-1'));
       });
 
-      test('includes libp2pAddress from ANNOUNCE payload', () async {
+      test('stores libp2p addresses as backups from BLE ANNOUNCE', () async {
         final payload = buildAnnouncePayload(
           pubkey: otherPubkey,
           address: '/ip4/10.0.0.1/tcp/4001/p2p/QmTest',
@@ -232,16 +233,19 @@ void main() {
 
         final peer = store.state.peers.getPeerByPubkey(otherPubkey);
         expect(peer, isNotNull);
-        expect(
-          peer!.libp2pAddress,
-          equals('/ip4/10.0.0.1/tcp/4001/p2p/QmTest'),
-        );
+        // BLE ANNOUNCE does NOT set libp2pAddress (no verified connection)
+        expect(peer!.libp2pAddress, isNull);
+        // Addresses stored as backups for connection attempts
+        expect(peer.libp2pHostId, equals('QmTest'));
+        expect(peer.libp2pHostAddrs, contains('/ip4/10.0.0.1/tcp/4001'));
       });
 
       test('fires onPeerAnnounced callback', () async {
         AnnounceData? receivedData;
         PeerTransport? receivedTransport;
-        router.onPeerAnnounced = (data, transport, {bool isNew = false}) {
+        router.onPeerAnnounced =
+            (data, transport,
+                {bool isNew = false, String? previousLibp2pAddress}) {
           receivedData = data;
           receivedTransport = transport;
         };
@@ -276,7 +280,8 @@ void main() {
 
         int announceCount = 0;
         router.onPeerAnnounced =
-            (_, __, {bool isNew = false}) => announceCount++;
+            (_, __, {bool isNew = false, String? previousLibp2pAddress}) =>
+                announceCount++;
 
         await router.processPacket(
           p,
@@ -617,7 +622,9 @@ void main() {
 
       test('fires onPeerAnnounced callback with libp2p transport', () async {
         PeerTransport? receivedTransport;
-        router.onPeerAnnounced = (_, transport, {bool isNew = false}) {
+        router.onPeerAnnounced =
+            (_, transport,
+                {bool isNew = false, String? previousLibp2pAddress}) {
           receivedTransport = transport;
         };
 

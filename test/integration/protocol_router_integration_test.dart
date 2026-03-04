@@ -80,7 +80,7 @@ void main() {
       // Bob's router processes the BLE packet
       AnnounceData? receivedAnnounce;
       PeerTransport? receivedTransport;
-      bobRouter.onPeerAnnounced = (data, transport, {bool isNew = false}) {
+      bobRouter.onPeerAnnounced = (data, transport, {bool isNew = false, String? previousLibp2pAddress}) {
         receivedAnnounce = data;
         receivedTransport = transport;
       };
@@ -121,7 +121,7 @@ void main() {
       await aliceProtocol.signPacket(packet);
 
       AnnounceData? receivedAnnounce;
-      bobRouter.onPeerAnnounced = (data, transport, {bool isNew = false}) {
+      bobRouter.onPeerAnnounced = (data, transport, {bool isNew = false, String? previousLibp2pAddress}) {
         receivedAnnounce = data;
       };
 
@@ -135,9 +135,11 @@ void main() {
       expect(receivedAnnounce, isNotNull);
       expect(receivedAnnounce!.libp2pAddresses, equals([address]));
 
-      // Verify libp2p address stored in Redux
+      // BLE ANNOUNCE stores addresses as backups, not as verified libp2pAddress
       final peerState = bobStore.state.peers.getPeerByPubkey(aliceIdentity.publicKey);
-      expect(peerState!.libp2pAddress, equals(address));
+      expect(peerState!.libp2pAddress, isNull);
+      expect(peerState.libp2pHostId, equals('QmHash123'));
+      expect(peerState.libp2pHostAddrs, contains('/ip4/192.168.1.1/tcp/4001'));
     });
   });
 
@@ -268,7 +270,7 @@ void main() {
       // Bob's router processes it
       AnnounceData? receivedAnnounce;
       PeerTransport? receivedTransport;
-      bobRouter.onPeerAnnounced = (data, transport, {bool isNew = false}) {
+      bobRouter.onPeerAnnounced = (data, transport, {bool isNew = false, String? previousLibp2pAddress}) {
         receivedAnnounce = data;
         receivedTransport = transport;
       };
@@ -306,7 +308,7 @@ void main() {
       await aliceProtocol.signPacket(packet);
 
       AnnounceData? receivedAnnounce;
-      bobRouter.onPeerAnnounced = (data, transport, {bool isNew = false}) {
+      bobRouter.onPeerAnnounced = (data, transport, {bool isNew = false, String? previousLibp2pAddress}) {
         receivedAnnounce = data;
       };
 
@@ -445,7 +447,7 @@ void main() {
       await aliceProtocol.signPacket(packet);
 
       int announceCount = 0;
-      bobRouter.onPeerAnnounced = (_, __, {bool isNew = false}) {
+      bobRouter.onPeerAnnounced = (_, __, {bool isNew = false, String? previousLibp2pAddress}) {
         announceCount++;
       };
 

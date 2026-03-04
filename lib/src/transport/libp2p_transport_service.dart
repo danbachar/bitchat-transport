@@ -356,9 +356,9 @@ class LibP2PTransportService extends TransportService {
     }
   }
 
-  /// Connect to a peer using their host info (ID and addresses)
-  /// This is used when accepting a friend request or receiving acceptance
-  /// Returns the successful address on success, null on failure
+  /// Connect to a peer using their host info (ID and addresses).
+  /// Tries each address in the order provided (caller controls priority).
+  /// Returns the successful address on success, null on failure.
   Future<String?> connectToHost(
       {required String hostId, required List<String> hostAddrs}) async {
     if (_host == null) {
@@ -366,37 +366,24 @@ class LibP2PTransportService extends TransportService {
       return null;
     }
 
-    _log.i('Connecting to host: $hostId with addresses: $hostAddrs');
-
-    // Separate IPv4 and IPv6 addresses - try IPv4 first (more common/reliable)
-    final ipv4Addrs =
-        hostAddrs.where((addr) => addr.startsWith('/ip4/')).toList();
-    final ipv6Addrs =
-        hostAddrs.where((addr) => addr.startsWith('/ip6/')).toList();
-
-    // Try IPv4 first, then IPv6
-    final orderedAddrs = [...ipv4Addrs, ...ipv6Addrs];
-
-    if (orderedAddrs.isEmpty) {
-      _log.w('No valid addresses found for host $hostId');
+    if (hostAddrs.isEmpty) {
+      _log.w('No addresses provided for host $hostId');
       return null;
     }
 
-    _log.d(
-        'Trying ${ipv4Addrs.length} IPv4 and ${ipv6Addrs.length} IPv6 addresses');
+    _log.i('Connecting to host: $hostId with ${hostAddrs.length} addresses');
 
-    for (final addr in orderedAddrs) {
+    for (final addr in hostAddrs) {
       try {
-        _log.i('Connecting to host: $hostId with address: $addr');
+        _log.i('Trying address: $addr');
         final peerId = PeerId.fromString(hostId);
         final address = MultiAddr(addr);
-        final addrs = [address];
-        final addrInfo = AddrInfo(peerId, addrs);
+        final addrInfo = AddrInfo(peerId, [address]);
         await _host!.connect(addrInfo);
-        _log.i('Successfully connected to host: $hostId with address: $addr');
+        _log.i('Successfully connected to host: $hostId via $addr');
         return addr;
       } catch (e) {
-        _log.e('Failed to connect to host $hostId with address: $addr: $e');
+        _log.e('Failed to connect to host $hostId via $addr: $e');
       }
     }
 
@@ -407,7 +394,9 @@ class LibP2PTransportService extends TransportService {
   Future<void> disconnectFromPeer(String peerId) async {
     _log.d('Disconnecting from peer: $peerId');
     try {
-      // TODO: Use dart_libp2p to disconnect
+      if (_host != null) {
+        await _host!.network.closePeer(PeerId.fromString(peerId));
+      }
       _connectionController.add(TransportConnectionEvent(
         peerId: peerId,
         transport: TransportType.libp2p,
@@ -439,10 +428,14 @@ class LibP2PTransportService extends TransportService {
   }
 
   @override
-  Future<void> broadcast(Uint8List data, {String? excludePeerId}) async {
+  Future<void> broadcast(
+    Uint8List data, {
+    Uint8List? friendData,
+    Set<String>? friendDeviceIds,
+  }) async {
     for (final peer in store.state.peers.libp2pPeers) {
       final hostId = peer.libp2pHostId;
-      if (hostId != null && hostId != excludePeerId) {
+      if (hostId != null) {
         await sendToPeer(hostId, data);
       }
     }

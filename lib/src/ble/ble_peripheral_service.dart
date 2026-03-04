@@ -215,11 +215,18 @@ class BlePeripheralService {
     }
   }
 
-  /// Send data to all connected centrals
-  Future<void> broadcastData(Uint8List data, {String? excludeDevice}) async {
+  /// Send data to all connected centrals.
+  /// If [friendData] and [friendDeviceIds] are provided, friends receive
+  /// [friendData] while all others receive [data].
+  Future<void> broadcastData(
+    Uint8List data, {
+    Uint8List? friendData,
+    Set<String>? friendDeviceIds,
+  }) async {
     for (final deviceId in _connectedCentrals) {
-      if (deviceId == excludeDevice) continue;
-      await sendData(deviceId, data);
+      final isFriend = friendDeviceIds?.contains(deviceId) ?? false;
+      await sendData(
+          deviceId, isFriend && friendData != null ? friendData : data);
     }
   }
 

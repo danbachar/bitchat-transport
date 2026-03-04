@@ -45,10 +45,10 @@ class BitchatConfig {
   
   /// Scan duration (null for continuous)
   final Duration? scanDuration;
-  
+
   /// Whether to relay packets for other peers
   final bool enableRelay;
-  
+
   /// Local name for BLE advertising
   final String? localName;
   
@@ -149,6 +149,9 @@ class Bitchat {
   
   /// Whether libp2p transport is available and enabled
   bool _libp2pAvailable = false;
+
+  /// Peers currently being connected to via libp2p (guards against concurrent attempts)
+  final _pendingLibp2pConnections = <String>{};
 
   /// Protocol handler for encoding/decoding packets
   late final ProtocolHandler _protocolHandler;
@@ -795,17 +798,36 @@ class Bitchat {
     };
 
     // Peer ANNOUNCE processed
-    _messageRouter.onPeerAnnounced = (data, transport, {bool isNew = false}) {
-      if (isNew) {
-        final peerState = store.state.peers.getPeerByPubkey(data.publicKey);
-        if (peerState != null) {
-          onPeerConnected?.call(_peerStateToLegacyPeer(peerState));
+    _messageRouter.onPeerAnnounced =
+        (data, transport, {bool isNew = false, String? previousLibp2pAddress}) {
+      final peerState = store.state.peers.getPeerByPubkey(data.publicKey);
+      if (peerState != null) {
+        if (isNew) {
+          onPeerConnected?.call(_peerStateToPeer(peerState));
+        } else {
+          onPeerUpdated?.call(_peerStateToPeer(peerState));
         }
+      }
+
+      // Detect stale connection: if old address was dropped from ANNOUNCE,
+      // disconnect and reconnect via new addresses.
+      if (previousLibp2pAddress != null &&
+          peerState != null &&
+          peerState.libp2pAddress != previousLibp2pAddress) {
+        // Old address is no longer valid — disconnect stale connection
+        final hostId = peerState.libp2pHostId;
+        if (hostId != null && _libp2pService != null) {
+          _log.i(
+              'Peer ${peerState.nickname}: address changed from $previousLibp2pAddress, disconnecting stale connection');
+          _libp2pService!.disconnectFromPeer(hostId);
+          // Clear libp2pAddress so _tryLibp2pConnectionForPeer doesn't bail
+          store.dispatch(PeerLibp2pDisconnectedAction(data.publicKey));
+        }
+        // Reconnect via new addresses
+        _tryLibp2pConnectionForPeer(data.publicKey);
       } else {
-        final peerState = store.state.peers.getPeerByPubkey(data.publicKey);
-        if (peerState != null) {
-          onPeerUpdated?.call(_peerStateToLegacyPeer(peerState));
-        }
+        // No stale connection — just try connecting if not yet connected
+        _tryLibp2pConnectionForPeer(data.publicKey);
       }
     };
 
@@ -823,7 +845,7 @@ class Bitchat {
   }
 
   /// Convert PeerState to Peer for application callbacks
-  Peer _peerStateToLegacyPeer(PeerState state) {
+  Peer _peerStateToPeer(PeerState state) {
     return Peer(
       publicKey: state.publicKey,
       nickname: state.nickname,
@@ -834,6 +856,42 @@ class Bitchat {
       rssi: state.rssi,
       protocolVersion: state.protocolVersion,
     );
+  }
+
+  /// Try to establish a libp2p connection to a peer using their advertised addresses.
+  /// Called as a side-effect after processing an ANNOUNCE. If the peer already has
+  /// a verified libp2p connection (libp2pAddress set), this is a no-op.
+  void _tryLibp2pConnectionForPeer(Uint8List publicKey) {
+    if (_libp2pService == null) return;
+
+    final peer = store.state.peers.getPeerByPubkey(publicKey);
+    if (peer == null) return;
+    if (peer.libp2pAddress != null) return; // already connected
+    if (peer.libp2pHostId == null || peer.libp2pHostAddrs == null || peer.libp2pHostAddrs!.isEmpty) return;
+
+    final pubkeyHex = peer.pubkeyHex;
+    if (_pendingLibp2pConnections.contains(pubkeyHex)) return; // attempt already in progress
+    _pendingLibp2pConnections.add(pubkeyHex);
+
+    final hostId = peer.libp2pHostId!;
+    final hostAddrs = List<String>.from(peer.libp2pHostAddrs!);
+    final pubkey = Uint8List.fromList(publicKey);
+
+    _log.i('Attempting libp2p connection to ${peer.displayName} with ${hostAddrs.length} addresses');
+
+    // Fire-and-forget: try connecting in the background
+    _libp2pService!.connectToHost(hostId: hostId, hostAddrs: hostAddrs).then((successAddr) {
+      _pendingLibp2pConnections.remove(pubkeyHex);
+      if (successAddr != null) {
+        _log.i('Connected to ${peer.displayName} via $successAddr');
+        store.dispatch(AssociateLibp2pAddressAction(
+          publicKey: pubkey,
+          address: '$successAddr/p2p/$hostId',
+        ));
+      } else {
+        _log.w('Failed to connect to ${peer.displayName} via any advertised address');
+      }
+    });
   }
 
   /// Set up callbacks for BLE transport service
@@ -960,11 +1018,11 @@ class Bitchat {
     }
   }
   
-  /// Broadcast ANNOUNCE to all connected BLE devices
-  Future<void> _broadcastAnnounce() async {
-    if (_bleService == null || !_bleAvailable) return;
-
-    final payload = _protocolHandler.createAnnouncePayload();
+  /// Build a signed ANNOUNCE packet and return serialized bytes.
+  Future<Uint8List> _buildSignedAnnounceBytes(
+      {List<String> addresses = const []}) async {
+    final payload =
+        _protocolHandler.createAnnouncePayload(addresses: addresses);
     final packet = BitchatPacket(
       type: PacketType.announce,
       ttl: 0,
@@ -973,24 +1031,48 @@ class Bitchat {
       signature: Uint8List(64),
     );
     await _protocolHandler.signPacket(packet);
-    await _bleService!.broadcast(packet.serialize());
+    return packet.serialize();
+  }
+
+  /// Broadcast ANNOUNCE to all connected BLE devices.
+  /// Friends receive ANNOUNCE with libp2p addresses; strangers receive
+  /// ANNOUNCE without addresses.
+  Future<void> _broadcastAnnounce() async {
+    if (_bleService == null || !_bleAvailable) return;
+
+    // Basic ANNOUNCE (no addresses) for strangers + unidentified devices
+    final basicBytes = await _buildSignedAnnounceBytes();
+
+    // Friend ANNOUNCE (with libp2p addresses) — only if libp2p available
+    Uint8List? friendBytes;
+    Set<String> friendDeviceIds = {};
+
+    if (_libp2pService != null && _libp2pAvailable) {
+      final addresses = _libp2pService!.getRoutableAddresses();
+      if (addresses.isNotEmpty) {
+        friendBytes = await _buildSignedAnnounceBytes(addresses: addresses);
+        for (final peer in store.state.peers.peersList) {
+          if (peer.isFriend && peer.bleDeviceId != null) {
+            friendDeviceIds.add(peer.bleDeviceId!);
+          }
+        }
+      }
+    }
+
+    await _bleService!.broadcast(
+      basicBytes,
+      friendData: friendBytes,
+      friendDeviceIds: friendDeviceIds.isNotEmpty ? friendDeviceIds : null,
+    );
   }
 
   /// Broadcast ANNOUNCE via libp2p (uses BitchatPacket format, same as BLE)
   Future<void> _broadcastAnnounceViaLibp2p() async {
     if (_libp2pService == null || !_libp2pAvailable) return;
 
-    final addresses = _libp2pService!.getRoutableAddresses();
-    final payload = _protocolHandler.createAnnouncePayload(addresses: addresses);
-    final packet = BitchatPacket(
-      type: PacketType.announce,
-      ttl: 0,
-      senderPubkey: identity.publicKey,
-      payload: payload,
-      signature: Uint8List(64),
-    );
-    await _protocolHandler.signPacket(packet);
-    await _libp2pService!.broadcast(packet.serialize());
+    final bytes = await _buildSignedAnnounceBytes(
+        addresses: _libp2pService!.getRoutableAddresses());
+    await _libp2pService!.broadcast(bytes);
   }
 
   /// Send ANNOUNCE with addresses to a specific friend.

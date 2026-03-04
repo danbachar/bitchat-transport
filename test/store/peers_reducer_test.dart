@@ -705,14 +705,17 @@ void main() {
   // =========================================================================
 
   group('AssociateLibp2pAddressAction', () {
-    test('sets libp2pAddress and parses hostId and hostAddrs', () {
+    test('sets libp2pAddress and hostId without overwriting libp2pHostAddrs', () {
       final pubkey = _testPubkey(1);
       final hex = _pubkeyHex(pubkey);
+      final existingAddrs = ['/ip6/2001:db8::1/udp/4001/quic', '/ip4/5.6.7.8/udp/4001/quic'];
       final initial = PeersState(
         peers: {
           hex: PeerState(
             publicKey: pubkey,
             nickname: 'Alice',
+            libp2pHostId: 'QmTest',
+            libp2pHostAddrs: existingAddrs,
           ),
         },
       );
@@ -726,7 +729,8 @@ void main() {
       final peer = result.peers[hex]!;
       expect(peer.libp2pAddress, '/ip4/1.2.3.4/tcp/4001/p2p/QmTest');
       expect(peer.libp2pHostId, 'QmTest');
-      expect(peer.libp2pHostAddrs, ['/ip4/1.2.3.4/tcp/4001']);
+      // libp2pHostAddrs preserved from ANNOUNCE, not overwritten
+      expect(peer.libp2pHostAddrs, existingAddrs);
     });
 
     test('clears libp2pAddress when address is empty', () {

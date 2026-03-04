@@ -42,8 +42,8 @@ class MessageRouter {
   void Function(String messageId)? onReadReceiptReceived;
 
   /// Called when a peer ANNOUNCE is processed (new or updated peer)
-  void Function(AnnounceData data, PeerTransport transport, {bool isNew})?
-      onPeerAnnounced;
+  void Function(AnnounceData data, PeerTransport transport,
+      {bool isNew, String? previousLibp2pAddress})? onPeerAnnounced;
 
   /// Called when a message needs an ACK sent back to the sender
   void Function(PeerTransport transport, String peerId, String messageId)?
@@ -145,7 +145,9 @@ class MessageRouter {
       }
     }
 
-    final isNew = _peersState.getPeerByPubkey(pubkey) == null;
+    final existingPeer = _peersState.getPeerByPubkey(pubkey);
+    final isNew = existingPeer == null;
+    final previousLibp2pAddress = existingPeer?.libp2pAddress;
 
     // LibP2P-specific: use peerId as fallback address
     var libp2pAddresses = data.libp2pAddresses;
@@ -171,7 +173,8 @@ class MessageRouter {
     _log.i(
         'Peer ${isNew ? "connected" : "updated"}: ${data.nickname} via ${transport.name}');
 
-    onPeerAnnounced?.call(data, transport, isNew: isNew);
+    onPeerAnnounced?.call(data, transport,
+        isNew: isNew, previousLibp2pAddress: previousLibp2pAddress);
   }
 
   void _handleMessage(

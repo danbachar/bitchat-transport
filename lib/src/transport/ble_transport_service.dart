@@ -252,9 +252,15 @@ class BleTransportService extends TransportService {
   }
 
   @override
-  Future<void> broadcast(Uint8List data, {String? excludePeerId}) async {
-    await _central.broadcastData(data, excludeDevice: excludePeerId);
-    await _peripheral.broadcastData(data, excludeDevice: excludePeerId);
+  Future<void> broadcast(
+    Uint8List data, {
+    Uint8List? friendData,
+    Set<String>? friendDeviceIds,
+  }) async {
+    await _central.broadcastData(data,
+        friendData: friendData, friendDeviceIds: friendDeviceIds);
+    await _peripheral.broadcastData(data,
+        friendData: friendData, friendDeviceIds: friendDeviceIds);
   }
 
   @override

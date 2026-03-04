@@ -192,9 +192,13 @@ abstract class TransportService {
 
   /// Broadcast data to all connected peers.
   ///
-  /// [excludePeerId] can be used to exclude a specific peer
-  /// (useful for avoiding echo when relaying).
-  Future<void> broadcast(Uint8List data, {String? excludePeerId});
+  /// If [friendData] and [friendDeviceIds] are provided, peers in
+  /// [friendDeviceIds] receive [friendData] while all others receive [data].
+  Future<void> broadcast(
+    Uint8List data, {
+    Uint8List? friendData,
+    Set<String>? friendDeviceIds,
+  });
 
   /// Associate a peer with a public key.
   ///
