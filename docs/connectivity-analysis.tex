@@ -614,6 +614,441 @@ WiFi drops, no cellular & PIv4 $\to$ BLE & \yes & $\to$\no & Only nearby BLE pee
 \end{table}
 
 % =============================================================================
+\section{Historical Comparison: LibP2P (Previous Stack)}
+% =============================================================================
+
+Before adopting iroh, Bitchat used \textbf{libp2p} (specifically \texttt{dart\_libp2p} with \texttt{dart\_udx}) as its Internet transport layer. This section reconstructs the connectivity assumptions under libp2p and compares them with the current iroh-based architecture.
+
+\subsection{LibP2P Transport Mechanics}
+
+\begin{itemize}
+  \item \textbf{Transports}: Two transport protocols were available:
+    \begin{itemize}
+      \item \textbf{UDX} (UDP-based, custom protocol) --- primary transport, preferred for performance
+      \item \textbf{TCP} --- secondary, used for IPFS ecosystem interoperability
+    \end{itemize}
+  \item \textbf{Security}: Noise protocol for all connections (both UDX and TCP).
+  \item \textbf{Identity}: LibP2P used its own Ed25519 keypair to generate a \texttt{PeerId}, \textbf{separate} from the Bitchat application-layer Ed25519 public key. This required maintaining a double mapping:
+    \begin{enumerate}
+      \item BLE Device ID $\leftrightarrow$ LibP2P PeerId
+      \item LibP2P PeerId $\leftrightarrow$ Bitchat Public Key
+    \end{enumerate}
+  \item \textbf{Addressing}: Multiaddr format (e.g., \texttt{/ip4/1.2.3.4/tcp/4001/p2p/12D3Koo...})
+  \item \textbf{Application protocol}: \texttt{/gever/1.0.0} --- each message sent via a new stream (not persistent connection)
+  \item \textbf{DHT}: Supported but \textbf{disabled} (\texttt{enableDht = false}). Bitchat never used Kademlia for peer discovery.
+  \item \textbf{mDNS}: \textbf{Enabled} (\texttt{enableMdns = true}). Provided automatic local network peer discovery.
+\end{itemize}
+
+\subsection{LibP2P NAT Traversal Stack}
+
+LibP2P provided a multi-layered NAT traversal strategy:
+
+\begin{enumerate}
+  \item \textbf{AutoNAT v2}: Probes reachability by asking other peers to dial back. Classifies the local NAT type (public, restricted, symmetric).
+  \item \textbf{Circuit Relay v2}: Public peers volunteer as relays. NATed peers reserve relay slots. Traffic flows: A $\to$ Relay Peer $\to$ B. \textit{Unlike iroh relays, these are libp2p peers themselves, not dedicated infrastructure.}
+  \item \textbf{AutoRelay}: Automatically discovers and connects to available relay peers when AutoNAT detects the node is behind NAT.
+  \item \textbf{DCUtR (Direct Connection Upgrade through Relay)}: After establishing a relayed connection, peers coordinate hole-punching to upgrade to a direct connection.
+\end{enumerate}
+
+\textbf{Address priority hierarchy} (highest to lowest):
+\begin{enumerate}
+  \item IPv6/UDX --- best performance, globally routable
+  \item IPv4/UDX --- common, good performance
+  \item IPv4/TCP --- IPFS interop, wider firewall compatibility
+  \item Circuit Relay --- last resort, highest latency
+\end{enumerate}
+
+\subsection{LibP2P Bootstrap Requirement}
+
+LibP2P \textbf{required bootstrap peers} for relay discovery:
+
+\begin{verbatim}
+/ip4/40.160.9.115/tcp/4001/p2p/12D3KooWKnDdG3...
+/ip6/2604:2dc0:101:100::138f/tcp/4001/p2p/12D3KooWKnDdG3...
+\end{verbatim}
+
+These bootstrap peers served as:
+\begin{itemize}
+  \item Initial connection points for newly started nodes
+  \item Relay reservation targets (via Circuit Relay v2)
+  \item AutoNAT probing partners
+\end{itemize}
+
+Without the bootstrap peer being reachable, a NATed node could not discover relays and was limited to direct connections or mDNS.
+
+\subsection{Connectivity Matrix: Friend Next to Me (LibP2P)}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{L{2.2cm} C{1.5cm} C{1.3cm} C{1.3cm} C{4.5cm}}
+\toprule
+\textbf{My Addr} & \textbf{Peer Addr} & \textbf{BLE} & \textbf{LP2P} & \textbf{Notes} \\
+\midrule
+BLE only & BLE only & \yes & \no & No IP. Identical to iroh. \\
+\rowcolor{lightgray}
+BLE only & PIv4 & \yes & \no & I have no IP. Identical to iroh. \\
+BLE only & PuIv4 & \yes & \no & Same. \\
+\rowcolor{lightgray}
+BLE only & LLv6 & \yes & \no & Same. \\
+BLE only & PuIv6 & \yes & \no & Same. \\
+\midrule
+PIv4 & PIv4 & \yes & \yes$^*$ & \textbf{Differs from iroh}: mDNS discovers peer on same LAN without relay. If different LANs: needs bootstrap $\to$ relay. \\
+\rowcolor{lightgray}
+PIv4 & PuIv4 & \yes & \yes & Direct TCP or UDX to public peer. No relay needed. \\
+PIv4 & LLv6 & \yes & \prt & mDNS might discover on same link. UDX over link-local unreliable. \\
+\rowcolor{lightgray}
+PIv4 & PuIv6 & \yes & \dgr & Cross-protocol. Needs relay peer that bridges IPv4$\leftrightarrow$IPv6. Not guaranteed. \\
+\midrule
+PuIv4 & PuIv4 & \yes & \yes & Direct. No relay needed. \\
+\rowcolor{lightgray}
+PuIv4 & PIv4 & \yes & \yes & Peer connects to me directly or via relay. \\
+PuIv4 & LLv6 & \yes & \no & Link-local not routable. mDNS possible on same link only. \\
+\rowcolor{lightgray}
+PuIv4 & PuIv6 & \yes & \dgr & Cross-protocol relay uncertain. Relay peer must be dual-stack. \\
+\midrule
+LLv6 & LLv6 & \yes & \prt & mDNS on same link. UDX \textit{might} bind link-local. Better than iroh here due to mDNS. \\
+\rowcolor{lightgray}
+LLv6 & Any public & \yes & \no & Cannot reach bootstrap or peer. \\
+\midrule
+PuIv6 & PuIv6 & \yes & \yes & Direct IPv6/UDX. Optimal. \\
+\rowcolor{lightgray}
+PuIv6 & PIv4 & \yes & \dgr & Cross-protocol via relay. Relay must be dual-stack. \\
+PuIv6 & PuIv4 & \yes & \dgr & Same cross-protocol issue. \\
+\bottomrule
+\end{tabular}
+\caption{LibP2P co-located connectivity. $^*$mDNS provides same-LAN discovery that iroh lacks.}
+\end{table}
+
+\subsection{Connectivity Matrix: Friend Far Away (LibP2P)}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{L{2.2cm} C{1.8cm} C{1.3cm} C{5.5cm}}
+\toprule
+\textbf{My Addr} & \textbf{Peer Addr} & \textbf{LP2P} & \textbf{Notes} \\
+\midrule
+BLE only & Any & \no & No IP. Identical to iroh. \\
+\rowcolor{lightgray}
+PIv4 & BLE only & \no & Peer has no IP. \\
+PIv4 & PIv4 & \dgr & Both NATed. Need bootstrap peer reachable. AutoRelay finds relay. DCUtR attempts hole-punch. More moving parts than iroh relay. \\
+\rowcolor{lightgray}
+PIv4 & PuIv4 & \yes & Direct to peer. Can use TCP or UDX. \\
+PIv4 & LLv6 & \no & Not routable. \\
+\rowcolor{lightgray}
+PIv4 & PuIv6 & \dgr & Need dual-stack relay peer. Not guaranteed in libp2p relay pool. \\
+\midrule
+PuIv4 & PIv4 & \yes & Peer uses relay then DCUtR to me. \\
+\rowcolor{lightgray}
+PuIv4 & PuIv4 & \yes & Direct. Both UDX and TCP work. \\
+PuIv4 & PuIv6 & \dgr & Cross-protocol. Relay or direct only if both dual-stack. \\
+\midrule
+\rowcolor{lightgray}
+LLv6 & Any & \no & Cannot reach bootstrap or any remote peer. \\
+\midrule
+PuIv6 & PIv4 & \dgr & Cross-protocol relay required. \\
+\rowcolor{lightgray}
+PuIv6 & PuIv4 & \dgr & Same issue. Direct only if peer also has IPv6. \\
+PuIv6 & PuIv6 & \yes & Direct IPv6/UDX. Best case. \\
+\bottomrule
+\end{tabular}
+\caption{LibP2P remote connectivity. Cross-protocol scenarios are worse than iroh due to relay peer heterogeneity.}
+\end{table}
+
+\subsection{Potential Relay Peer Under LibP2P}
+
+This is where libp2p and iroh \textbf{differ fundamentally}.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{L{4cm} C{1.5cm} C{1.5cm} C{4.5cm}}
+\toprule
+\textbf{Scenario} & \textbf{LP2P} & \textbf{Iroh} & \textbf{Details} \\
+\midrule
+C is a public peer, A and B are NATed & \yes$^*$ & \no & LibP2P: C can serve as Circuit Relay v2 if it has relay capability enabled. A and B reserve slots on C. \textit{But}: Bitchat application layer still forbids message relaying; this is transport-level only. \\
+\rowcolor{lightgray}
+C is NATed too & \no & \no & NATed peers cannot serve as relays in either stack. \\
+C has BLE to A, iroh to B & \no & \no & Even with libp2p, the BLE$\to$IP bridge was not implemented. \\
+\rowcolor{lightgray}
+C is the bootstrap peer & \yes & \na & Bootstrap peer doubles as relay. This was the primary relay path. \\
+\bottomrule
+\end{tabular}
+\caption{Relay peer comparison. $^*$LibP2P supported transport-level relay via Circuit Relay v2, but Bitchat never relayed application messages through peers.}
+\end{table}
+
+\textbf{Critical distinction}: LibP2P's Circuit Relay v2 allowed \textit{any public peer} to act as a transport-level relay. This meant:
+\begin{itemize}
+  \item A third peer C with a public IP could transparently relay encrypted libp2p connections between A and B
+  \item This happened at the transport layer---C never saw application-level messages (Noise-encrypted)
+  \item In practice, Bitchat primarily relied on the bootstrap peer as the relay, not arbitrary third peers
+\end{itemize}
+
+With iroh, relay is provided by \textbf{dedicated relay servers} (iroh.computer infrastructure), not by peers. No Bitchat peer ever relays for another peer at any layer.
+
+\subsection{Server Scenarios Under LibP2P}
+
+\subsubsection{Bootstrap Peer (LibP2P's ``Server'')}
+
+The bootstrap peer was a server at \texttt{40.160.9.115} with both IPv4 and IPv6 addresses.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{L{3.5cm} C{1.5cm} C{6cm}}
+\toprule
+\textbf{Role} & \textbf{Works?} & \textbf{Details} \\
+\midrule
+Initial peer discovery & \yes & Newly started nodes connect to bootstrap to join the network. \\
+\rowcolor{lightgray}
+Relay server (Circuit Relay) & \yes & NATed peers reserve relay slots on bootstrap. Primary relay path. \\
+AutoNAT probe target & \yes & Bootstrap dials back to test reachability. \\
+\rowcolor{lightgray}
+Single point of failure & \textcolor{no}{\textbf{Risk}} & If bootstrap goes down: no relay for NATed peers, no AutoNAT, new peers cannot join. \\
+\bottomrule
+\end{tabular}
+\caption{Bootstrap peer roles under libp2p.}
+\end{table}
+
+\textbf{Single point of failure}: The bootstrap peer was a critical dependency. If it went offline:
+\begin{itemize}
+  \item Already-connected peers with direct connections continued working
+  \item NATed peers lost their relay path (no new relay reservations)
+  \item New peers could not join the network at all
+  \item AutoNAT could not classify NAT type
+\end{itemize}
+
+\subsubsection{Custom Supernode (LibP2P vs Iroh)}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{L{3cm} C{2cm} C{2cm} C{4.5cm}}
+\toprule
+\textbf{Capability} & \textbf{LP2P} & \textbf{Iroh} & \textbf{Comparison} \\
+\midrule
+Transport relay & \yes & \yes & LP2P: peer-level relay. Iroh: dedicated relay server. \\
+\rowcolor{lightgray}
+Always-on peer & \yes & \yes & Both support this equally. \\
+Redundant relay & Hard & Easy & LP2P: adding relay peers requires config. Iroh: just add relay URL. \\
+\rowcolor{lightgray}
+Discovery hub & \prt & \prt & Both need protocol extensions for non-BLE discovery. \\
+mDNS discovery & \yes & \no & LP2P supernode discoverable on LAN via mDNS. \\
+\bottomrule
+\end{tabular}
+\caption{Supernode comparison between stacks.}
+\end{table}
+
+\subsection{Mobility Under LibP2P}
+
+\subsubsection{WiFi to Cellular Handoff}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{L{3cm} L{2cm} C{1.5cm} C{1.5cm} L{3.5cm}}
+\toprule
+\textbf{Transition} & \textbf{Transport} & \textbf{LP2P} & \textbf{Iroh} & \textbf{LP2P Details} \\
+\midrule
+WiFi (PIv4) $\to$ LTE (PIv4) & UDX/TCP & \no$^*$ & \dgr & \textbf{Connection dies}. UDX/TCP are bound to 4-tuple. No connection migration. Must fully reconnect: new connection to bootstrap, new relay reservation, re-establish peer connections. Recovery: 10--30s. \\
+\rowcolor{lightgray}
+WiFi (PIv4) $\to$ LTE (PuIv6) & UDX/TCP & \no$^*$ & \dgr & Worse: protocol family also changes. Full reconnection required. \\
+WiFi + BLE $\to$ LTE & BLE & \yes & \yes & BLE unaffected (same as iroh). \\
+\bottomrule
+\end{tabular}
+\caption{WiFi$\to$cellular handoff. $^*$LibP2P's UDX and TCP lack connection migration---this is where iroh's QUIC is significantly superior.}
+\end{table}
+
+\textbf{Key difference}: LibP2P over UDX/TCP \textbf{does not support connection migration}. When the IP changes:
+\begin{enumerate}
+  \item All existing connections (UDX and TCP) are severed
+  \item The node must reconnect to the bootstrap peer
+  \item AutoNAT must re-probe
+  \item If NATed, a new relay reservation must be made
+  \item All peer connections must be re-established from scratch
+  \item Total recovery time: \textbf{10--30 seconds} vs iroh's \textbf{$<$5 seconds}
+\end{enumerate}
+
+\subsubsection{Moving Between WiFi Networks}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{L{3.5cm} C{1.5cm} C{1.5cm} L{4cm}}
+\toprule
+\textbf{Scenario} & \textbf{LP2P} & \textbf{Iroh} & \textbf{LP2P Details} \\
+\midrule
+WiFi A $\to$ WiFi B (diff LAN) & \no$^*$ & \dgr & All connections lost. Full reconnection cycle. \\
+\rowcolor{lightgray}
+Same AP, IP unchanged & \yes & \yes & No disruption (identical). \\
+WiFi A $\to$ brief gap $\to$ WiFi B & \no$^*$ & \dgr & LP2P: TCP/UDX timeout during gap. Iroh: QUIC may survive if within idle timeout. \\
+\rowcolor{lightgray}
+Same LAN, diff subnet & \no$^*$ & \dgr & LP2P: IP change = death. Iroh: QUIC migrates. \\
+\bottomrule
+\end{tabular}
+\caption{WiFi roaming. $^*$LibP2P connections do not survive IP changes.}
+\end{table}
+
+\subsubsection{BLE Range Transitions}
+
+BLE behavior is \textbf{identical} between libp2p and iroh---BLE is independent of the Internet transport. The only difference: when BLE drops and iroh/libp2p must take over, iroh's QUIC connection is more likely to still be alive (due to connection migration), while libp2p connections may have already been severed by a concurrent IP change.
+
+\subsubsection{BLE-Only (No Internet)}
+
+\textbf{Identical} to iroh. BLE-only operation does not use the Internet transport layer at all. All scenarios in Section 7.4 apply unchanged.
+
+\subsection{Comparative Summary: LibP2P vs Iroh}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{L{4cm} C{3cm} C{3cm} C{2.5cm}}
+\toprule
+\textbf{Dimension} & \textbf{LibP2P} & \textbf{Iroh} & \textbf{Winner} \\
+\midrule
+\multicolumn{4}{l}{\textbf{Architecture}} \\
+\midrule
+Identity model & Separate PeerId & NodeId = PubKey & Iroh \\
+\rowcolor{lightgray}
+Bootstrap required & Yes (critical) & No & Iroh \\
+Address format & Multiaddr strings & IP:port + relay URL & Iroh \\
+\rowcolor{lightgray}
+Protocol & UDX (UDP) + TCP & QUIC (UDP) & Iroh \\
+Local discovery & mDNS & None (BLE only) & LibP2P \\
+
+\midrule
+\multicolumn{4}{l}{\textbf{NAT Traversal}} \\
+\midrule
+Relay type & Peer-based (Circuit Relay v2) & Dedicated servers & Iroh \\
+\rowcolor{lightgray}
+Relay availability & Depends on peer topology & Managed infrastructure & Iroh \\
+Hole punching & DCUtR (after relay) & Automatic (background) & Iroh \\
+\rowcolor{lightgray}
+NAT detection & AutoNAT v2 & Automatic & Tie \\
+Cross-protocol (v4$\leftrightarrow$v6) & Requires dual-stack relay peer & Relay bridges natively & Iroh \\
+
+\midrule
+\multicolumn{4}{l}{\textbf{Mobility}} \\
+\midrule
+Connection migration & \textcolor{no}{\textbf{None}} & QUIC native & \textbf{Iroh} \\
+\rowcolor{lightgray}
+WiFi$\to$cellular recovery & 10--30s (full reconnect) & $<$5s (migration) & \textbf{Iroh} \\
+WiFi roaming & Connection lost & QUIC survives & \textbf{Iroh} \\
+\rowcolor{lightgray}
+Train / frequent handoff & Unusable & Degraded but functional & \textbf{Iroh} \\
+
+\midrule
+\multicolumn{4}{l}{\textbf{Resilience}} \\
+\midrule
+Single point of failure & Bootstrap peer & Relay cluster & Iroh \\
+\rowcolor{lightgray}
+Self-hosted relay & Complex (run libp2p node) & Simple (iroh relay binary) & Iroh \\
+Relay redundancy & Must configure multiple bootstrap & Multiple relay URLs & Iroh \\
+\rowcolor{lightgray}
+Offline operation (BLE) & Identical & Identical & Tie \\
+
+\midrule
+\multicolumn{4}{l}{\textbf{Where LibP2P Was Better}} \\
+\midrule
+Same-LAN discovery & mDNS (automatic) & None & \textbf{LibP2P} \\
+\rowcolor{lightgray}
+TCP fallback & Works through HTTP proxies & UDP only (QUIC) & \textbf{LibP2P} \\
+Peer-as-relay & Any public peer can relay & Only dedicated servers & \textbf{LibP2P} \\
+\rowcolor{lightgray}
+Ecosystem interop & IPFS-compatible & Iroh-only & \textbf{LibP2P} \\
+\bottomrule
+\end{tabular}
+\caption{Head-to-head comparison. Iroh wins on mobility, simplicity, and reliability. LibP2P had advantages in local discovery (mDNS) and TCP fallback.}
+\end{table}
+
+\subsection{Scenario-by-Scenario Comparison}
+
+\begin{longtable}{L{3.5cm} L{2cm} C{1.5cm} C{1.5cm} L{3cm}}
+\toprule
+\textbf{Scenario} & \textbf{Addr Config} & \textbf{LP2P} & \textbf{Iroh} & \textbf{Key Difference} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Scenario} & \textbf{Addr Config} & \textbf{LP2P} & \textbf{Iroh} & \textbf{Key Difference} \\
+\midrule
+\endhead
+\midrule
+\multicolumn{5}{r}{\textit{continued on next page}} \\
+\bottomrule
+\endfoot
+\bottomrule
+\endlastfoot
+
+\multicolumn{5}{l}{\textbf{Co-located Peers}} \\
+\midrule
+Same WiFi, both NATed & PIv4 / PIv4 & \yes & \yes & LP2P: mDNS finds peer directly. Iroh: must use relay. \textbf{LP2P better.} \\
+\rowcolor{lightgray}
+Same WiFi, firewall blocks UDP & PIv4 / PIv4 & \yes & \no & LP2P: falls back to TCP. Iroh: QUIC is UDP-only. \textbf{LP2P better.} \\
+Different WiFi, same cafe & PIv4 / PIv4 & \dgr & \dgr & Both need relay/NAT traversal. Similar. \\
+\rowcolor{lightgray}
+No Internet, both BLE & BLE / BLE & \yes & \yes & Identical. BLE only. \\
+
+\midrule
+\multicolumn{5}{l}{\textbf{Remote Peers}} \\
+\midrule
+Both home WiFi (NAT) & PIv4 / PIv4 & \dgr & \dgr & LP2P: bootstrap$\to$relay. Iroh: relay server. Similar quality. \\
+\rowcolor{lightgray}
+One public, one NATed & PuIv4 / PIv4 & \yes & \yes & Both handle this well. \\
+Both public IPv6 & PuIv6 / PuIv6 & \yes & \yes & Both: direct. LP2P used UDX, iroh uses QUIC. \\
+\rowcolor{lightgray}
+IPv4 $\leftrightarrow$ IPv6 mismatch & PIv4 / PuIv6 & \dgr & \dgr & LP2P: needs dual-stack relay peer. Iroh: relay bridges natively. \textbf{Iroh slightly better.} \\
+Bootstrap/relay down & PIv4 / PIv4 & \no & \dgr & LP2P: complete failure for NATed peers. Iroh: can try other relays. \textbf{Iroh better.} \\
+
+\midrule
+\multicolumn{5}{l}{\textbf{Mobility}} \\
+\midrule
+WiFi $\to$ cellular & PIv4 $\to$ PIv4 & \no & \dgr & LP2P: 10--30s blackout. Iroh: $<$5s. \textbf{Iroh far better.} \\
+\rowcolor{lightgray}
+Roaming between APs & PIv4 $\to$ PIv4 & \no & \dgr & Same. No connection migration in LP2P. \textbf{Iroh far better.} \\
+On a train & PIv4 (changing) & \no & \dgr & LP2P: constant full reconnects. Iroh: QUIC adapts. \textbf{Iroh far better.} \\
+\rowcolor{lightgray}
+Walking away from BLE peer & PIv4 & \dgr & \yes & LP2P: if IP also changed, both transports lost. Iroh: QUIC survives. \\
+
+\midrule
+\multicolumn{5}{l}{\textbf{Edge Cases}} \\
+\midrule
+Corporate firewall (TCP only) & PIv4 & \yes & \no & LP2P: TCP transport works. Iroh: QUIC blocked. \textbf{LP2P better.} \\
+\rowcolor{lightgray}
+Restrictive mobile carrier (CGNAT + symmetric NAT) & PIv4 & \dgr & \dgr & Both relay-only. LP2P relay depends on bootstrap availability. Iroh relay is managed. \textbf{Iroh slightly better.} \\
+Hostile network (UDP throttled) & PIv4 & \prt & \dgr & LP2P: TCP fallback. Iroh: degraded QUIC. \textbf{LP2P better.} \\
+
+\end{longtable}
+
+\subsection{What Was Lost in the Migration}
+
+Three capabilities were lost when moving from libp2p to iroh:
+
+\begin{enumerate}
+  \item \textbf{mDNS local discovery}: LibP2P automatically discovered peers on the same LAN via mDNS broadcasts. With iroh, same-LAN peers must either be in BLE range or exchange addresses out-of-band. This is a real regression for the ``both on same WiFi but not in BLE range'' scenario.
+
+  \item \textbf{TCP fallback}: LibP2P could fall back to TCP when UDP was blocked (corporate firewalls, some hotel networks). QUIC is UDP-only. If UDP is blocked, iroh cannot connect at all. This matters in restrictive network environments.
+
+  \item \textbf{Peer-as-relay}: Any libp2p peer with a public IP could serve as a Circuit Relay. This provided organic relay infrastructure that grew with the network. With iroh, relay is centralized to iroh.computer's servers (or self-hosted). The network cannot organically grow its own relay capacity.
+\end{enumerate}
+
+\subsection{What Was Gained in the Migration}
+
+\begin{enumerate}
+  \item \textbf{Connection migration (QUIC)}: The single biggest improvement. Mobile users experience dramatically better connectivity during network transitions. This alone may justify the migration for a mobile-first application.
+
+  \item \textbf{No bootstrap dependency}: Eliminating the bootstrap peer removed a critical single point of failure. The network no longer depends on one server being up.
+
+  \item \textbf{Unified identity}: NodeId = public key eliminates the double-mapping complexity and reduces the attack surface for identity confusion.
+
+  \item \textbf{Managed relay infrastructure}: Iroh's relay servers are operated professionally with geographic distribution, monitoring, and redundancy. The bootstrap peer was a single VM.
+
+  \item \textbf{Simpler architecture}: Fewer moving parts (no AutoNAT, no AutoRelay, no DCUtR, no mDNS, no Circuit Relay). Fewer things that can break.
+
+  \item \textbf{Better hole-punching}: Iroh's hole-punching runs continuously in the background and automatically migrates from relay to direct. LibP2P's DCUtR was a one-shot attempt after relay establishment.
+\end{enumerate}
+
+% =============================================================================
 \section{Summary}
 % =============================================================================
 
@@ -636,5 +1071,26 @@ No Internet at all & \yes{} (if in range) & \no \\
 \end{table}
 
 The two transports are \textbf{complementary}: BLE provides resilient local connectivity that is immune to network configuration, while iroh provides global reach that is immune to physical proximity. Together they cover most real-world scenarios. The primary gap---no relaying and no offline delivery---is a deliberate design choice that keeps the protocol simple, private, and predictable.
+
+The migration from libp2p to iroh was a net positive for mobile-first use cases. The loss of mDNS and TCP fallback is real but narrow; the gain in connection migration (QUIC), architectural simplicity, and relay reliability is broad and impactful. The comparison table below distills the trade-off:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{L{5cm} C{2cm} C{2cm}}
+\toprule
+\textbf{Scenario Class} & \textbf{LibP2P} & \textbf{Iroh} \\
+\midrule
+Co-located, same LAN & \yes{} (mDNS) & \dgr{} (no mDNS) \\
+Co-located, BLE range & \yes & \yes \\
+Remote, both NATed & \dgr & \dgr \\
+Remote, one public & \yes & \yes \\
+Corporate firewall (TCP only) & \yes & \no \\
+Mobility (IP change) & \no{} (reconnect) & \dgr{} (migrates) \\
+Mobility (BLE transition) & Identical & Identical \\
+Bootstrap/relay failure & \no{} (SPOF) & \dgr{} (redundant) \\
+\bottomrule
+\end{tabular}
+\caption{LibP2P vs Iroh: high-level comparison by scenario class.}
+\end{table}
 
 \end{document}
