@@ -171,7 +171,12 @@ class MessageRouter {
     }
 
     _log.i(
-        'Peer ${isNew ? "connected" : "updated"}: ${data.nickname} via ${transport.name}');
+        'Peer ${isNew ? "connected" : "updated"}: ${data.nickname} via ${transport.name}'
+        '${libp2pAddresses.isNotEmpty ? ", ${libp2pAddresses.length} libp2p addrs" : ""}'
+        '${previousLibp2pAddress != null ? ", prevAddr=${previousLibp2pAddress.substring(0, previousLibp2pAddress.length.clamp(0, 30))}..." : ""}');
+    if (libp2pAddresses.isNotEmpty) {
+      _log.d('  ANNOUNCE addresses: ${libp2pAddresses.join(", ")}');
+    }
 
     onPeerAnnounced?.call(data, transport,
         isNew: isNew, previousLibp2pAddress: previousLibp2pAddress);

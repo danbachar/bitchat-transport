@@ -814,15 +814,20 @@ class Bitchat {
         final hostId = peerState.libp2pHostId;
         if (hostId != null && _libp2pService != null) {
           _log.i(
-              'Peer ${peerState.nickname}: address changed from $previousLibp2pAddress, disconnecting stale connection');
+              'Stale connection: ${peerState.nickname} address changed '
+              '$previousLibp2pAddress → ${peerState.libp2pAddress}, disconnecting');
           _libp2pService!.disconnectFromPeer(hostId);
           // Clear libp2pAddress so _tryLibp2pConnectionForPeer doesn't bail
           store.dispatch(PeerLibp2pDisconnectedAction(data.publicKey));
         }
-        // Reconnect via new addresses
+        _log.i('Reconnecting to ${peerState.nickname} with '
+            '${peerState.libp2pHostAddrs?.length ?? 0} new addresses');
         _tryLibp2pConnectionForPeer(data.publicKey);
       } else {
         // No stale connection — just try connecting if not yet connected
+        final addrsCount = peerState?.libp2pHostAddrs?.length ?? 0;
+        _log.d('libp2p connection check for ${peerState?.nickname}: '
+            '${peerState?.libp2pAddress != null ? "already connected" : "$addrsCount addresses available"}');
         _tryLibp2pConnectionForPeer(data.publicKey);
       }
 
@@ -874,18 +879,22 @@ class Bitchat {
     final hostAddrs = List<String>.from(peer.libp2pHostAddrs!);
     final pubkey = Uint8List.fromList(publicKey);
 
-    _log.i('Attempting libp2p connection to ${peer.displayName} with ${hostAddrs.length} addresses');
+    _log.i('_tryLibp2pConnectionForPeer: ${peer.displayName} — '
+        'trying ${hostAddrs.length} addresses in hierarchy order');
+    for (var i = 0; i < hostAddrs.length; i++) {
+      _log.d('  [${i + 1}] ${hostAddrs[i]}');
+    }
 
     // Fire-and-forget: try connecting in the background
     _libp2pService!.connectToHost(hostId: hostId, hostAddrs: hostAddrs).then((successAddr) {
       if (successAddr != null) {
-        _log.i('Connected to ${peer.displayName} via $successAddr');
+        _log.i('✓ ${peer.displayName} connected via libp2p: $successAddr');
         store.dispatch(AssociateLibp2pAddressAction(
           publicKey: pubkey,
           address: '$successAddr/p2p/$hostId',
         ));
       } else {
-        _log.w('Failed to connect to ${peer.displayName} via any advertised address');
+        _log.w('✗ ${peer.displayName}: all ${hostAddrs.length} libp2p addresses failed');
       }
     }).whenComplete(() {
       _pendingLibp2pConnections.remove(pubkeyHex);
@@ -1059,9 +1068,15 @@ class Bitchat {
     final friendPayload =
         _protocolHandler.createAnnouncePayload(addresses: addresses);
 
+    _log.d('ANNOUNCE: ${addresses.length} addrs, '
+        '${friendPeers.length} friends, '
+        'payload ${friendPayload.length}B '
+        '(fragment=${_fragmentHandler.needsFragmentation(friendPayload)})');
+
     if (_fragmentHandler.needsFragmentation(friendPayload)) {
       // Friend ANNOUNCE too large for single BLE packet.
       // Broadcast basic to all, then send fragmented to each friend.
+      _log.d('ANNOUNCE: fragmenting friend payload for ${friendPeers.length} friends');
       await _bleService!.broadcast(basicBytes);
       for (final peer in friendPeers) {
         await _sendFragmentedViaBle(
@@ -1072,6 +1087,7 @@ class Bitchat {
       }
     } else {
       // Fits in single packet — efficient single-pass broadcast
+      _log.d('ANNOUNCE: single-pass broadcast (basic + friend)');
       final friendBytes =
           await _buildSignedAnnounceBytes(addresses: addresses);
       final friendDeviceIds = friendPeers.map((p) => p.bleDeviceId!).toSet();

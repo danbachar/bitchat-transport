@@ -68,9 +68,10 @@ class LibP2PConfig {
   /// Set to empty list to disable STUN/NAT manager.
   final List<({String host, int port})> stunServers;
 
-  /// Default IPFS bootstrap peers (pre-resolved IPs since dart_libp2p lacks dnsaddr resolution)
+  /// Default libp2p bootstrap peers (Ed25519 keys only — dart_libp2p Noise requires Ed25519)
   static const defaultBootstrapPeers = [
-    '/ip4/104.131.131.82/tcp/4001/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ',
+    '/ip4/40.160.9.115/tcp/4001/p2p/12D3KooWKnDdG3iXw9eTFijk3EWSunZcFi54Zka4wmtqtt6rPxc8',
+    '/ip6/2604:2dc0:101:100::138f/tcp/4001/p2p/12D3KooWKnDdG3iXw9eTFijk3EWSunZcFi54Zka4wmtqtt6rPxc8',
   ];
 
   /// Default STUN servers (Google's public STUN pool)
@@ -245,7 +246,11 @@ class LibP2PTransportService extends TransportService {
       classify(addr);
     }
 
-    return [...ipv6Udx, ...ipv4Udx, ...ipv4Tcp, ...relay];
+    final result = [...ipv6Udx, ...ipv4Udx, ...ipv4Tcp, ...relay];
+    _log.d('getRoutableAddresses(includeLocal=$includeLocal): '
+        '${ipv6Udx.length} IPv6/UDX, ${ipv4Udx.length} IPv4/UDX, '
+        '${ipv4Tcp.length} IPv4/TCP, ${relay.length} relay = ${result.length} total');
+    return result;
   }
 
   /// Check if a multiaddr is loopback, unspecified, or link-local.
@@ -429,22 +434,24 @@ class LibP2PTransportService extends TransportService {
       return null;
     }
 
-    _log.i('Connecting to host: $hostId with ${hostAddrs.length} addresses');
+    _log.i('connectToHost: ${hostId.substring(0, 8)}... with ${hostAddrs.length} addresses (priority order)');
 
-    for (final addr in hostAddrs) {
+    for (var i = 0; i < hostAddrs.length; i++) {
+      final addr = hostAddrs[i];
       try {
-        _log.i('Trying address: $addr');
+        _log.d('  [${i + 1}/${hostAddrs.length}] Trying: $addr');
         final peerId = PeerId.fromString(hostId);
         final address = MultiAddr(addr);
         final addrInfo = AddrInfo(peerId, [address]);
         await _host!.connect(addrInfo);
-        _log.i('Successfully connected to host: $hostId via $addr');
+        _log.i('connectToHost: connected to ${hostId.substring(0, 8)}... on attempt ${i + 1}/${hostAddrs.length} via $addr');
         return addr;
       } catch (e) {
-        _log.e('Failed to connect to host $hostId via $addr: $e');
+        _log.e('  [${i + 1}/${hostAddrs.length}] Failed: $e');
       }
     }
 
+    _log.w('connectToHost: exhausted all ${hostAddrs.length} addresses for ${hostId.substring(0, 8)}...');
     return null;
   }
 
