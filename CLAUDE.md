@@ -19,19 +19,29 @@
 
 ---
 
-## CRITICAL: NO Store-and-Forward / NO Relaying
+## Peer Relay / Friend Forwarding
 
-**IMPORTANT**: Bitchat does NOT implement store-and-forward or message relaying.
+**IMPORTANT**: SGN supports **peer-to-peer message forwarding** through trusted intermediate peers.
 
-- ❌ **NO caching** messages for offline peers
-- ❌ **NO relaying** messages through intermediate peers
-- ❌ **NO forwarding** packets on behalf of other peers
+If a peer cannot reach the recipient directly (neither via BLE nor iroh), it MAY forward the message through a connected peer that **can** reach the recipient.
 
-Messages are sent **directly** to the recipient:
-- If the recipient is **online and reachable** → message is delivered
-- If the recipient is **offline** → message **fails** and sender must retry later
+### How It Works
 
-This is by design - the application layer (GSG) handles message persistence and retry logic.
+1. **Peer A** wants to send to **Peer B** but has no direct route (no BLE range, no iroh connection)
+2. **Peer C** is connected to both A and B (via any transport combination: BLE, iroh, or mixed)
+3. A sends the message to C with B's public key as the intended recipient
+4. C forwards the message to B on A's behalf
+
+### Rules
+
+- ✅ **DO** forward messages through connected peers when the recipient is not directly reachable
+- ✅ **DO** use end-to-end encryption — relay peers MUST NOT be able to read forwarded message content
+- ✅ **DO** support mixed-transport forwarding (e.g., A→C via BLE, C→B via iroh)
+- ✅ **DO** limit hop count (max 1 relay hop to keep it simple)
+- ✅ **DO** let any peer act as a relay — no special server role required
+- ❌ **NO** multi-hop chains (A→C→D→B) — only single-hop relay (A→C→B)
+- ❌ **NO** storing messages for later delivery — relay is real-time only; if C cannot reach B right now, the forward fails
+- ❌ **NO** automatic retry or queuing at the relay peer
 
 ---
 
@@ -92,23 +102,25 @@ This is by design - the application layer (GSG) handles message persistence and 
 
 ## NO Store-and-Forward
 
-**IMPORTANT**: Bitchat does NOT implement store-and-forward messaging.
+**IMPORTANT**: SGN does NOT implement store-and-forward messaging. Relay is **real-time only**.
 
 - Messages to offline peers simply **fail** - they are NOT cached
 - The sender must retry later when the peer is online
-- This is by design to keep the protocol simple and avoid message accumulation
-- If a peer is unreachable via any enabled transport (BLE or iroh), `send()` returns `false`
+- Relay peers do NOT queue or cache messages — if the recipient is unreachable from the relay peer too, the forward fails immediately
+- If a peer is unreachable via any path (direct BLE, direct iroh, or relay through a connected peer), `send()` returns `false`
 
 ### DO NOT:
 - ❌ Cache messages for offline peers
 - ❌ Implement store-and-forward queues
 - ❌ Automatically retry sending to offline peers
 - ❌ Hold messages in memory waiting for peers to reconnect
+- ❌ Queue messages at relay peers for later delivery
 
 ### DO:
-- ✅ Return `false` immediately if peer is unreachable
+- ✅ Try direct transports first (BLE, then iroh)
+- ✅ If direct fails, try forwarding through connected peers that can reach the recipient
+- ✅ Return `false` immediately if no path exists (direct or relayed)
 - ✅ Let the application layer handle retry logic if needed
-- ✅ Try all available transports (BLE first, then iroh) before failing
 
 ## Redux Architecture for Peers
 
@@ -143,9 +155,10 @@ appStore.onChange.listen((_) => setState(() {}));
 ## Transport Layer Settings
 
 ### Transport Priority
-When both transports are enabled and a peer is reachable via both:
-1. **Bluetooth (BLE)** is preferred - faster, no Internet needed, works for nearby peers
-2. **iroh (Internet)** is fallback - works globally but requires Internet
+When sending a message, transports are tried in this order:
+1. **Bluetooth (BLE)** — preferred; faster, no Internet needed, works for nearby peers
+2. **iroh (Internet)** — fallback; works globally but requires Internet
+3. **Peer relay (forwarding)** — last resort; forward through a connected peer that can reach the recipient
 
 ### Disabling Transports
 - When Bluetooth is disabled: stop advertising, stop scanning, no BLE communication

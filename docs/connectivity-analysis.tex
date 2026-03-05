@@ -60,9 +60,9 @@ This document analyzes the libp2p-based transport as the primary architecture, t
 \subsection{Key Constraints}
 
 \begin{enumerate}
-  \item \textbf{No store-and-forward}: If a peer is unreachable, the message fails. No caching, no queuing.
-  \item \textbf{No message relaying}: A third peer cannot forward application-level messages on behalf of others. (LibP2P's Circuit Relay operates at the transport level only---see \S\ref{sec:relay-peer}.)
-  \item \textbf{BLE is preferred}: When both transports are available, BLE is used first (lower latency, no Internet dependency).
+  \item \textbf{No store-and-forward}: If a peer is unreachable (even via relay), the message fails. No caching, no queuing. Relay is real-time only.
+  \item \textbf{Single-hop peer relay}: A connected peer C \textbf{may} forward messages from A to B if C can reach B. Messages are end-to-end encrypted; C cannot read them. Maximum one relay hop (no multi-hop chains A$\to$C$\to$D$\to$B).
+  \item \textbf{Transport priority}: BLE first, then iroh (direct), then peer relay (last resort).
 \end{enumerate}
 
 \subsection{Address Types Under Analysis}
@@ -315,6 +315,8 @@ When DCUtR hole-punching fails, libp2p falls back to Circuit Relay. Relay always
 
 \textbf{Scenario}: Peer A wants to reach Peer B. Peer C is a third peer connected to both A and B. Can C help?
 
+Under libp2p, SGN did \textbf{not} implement application-level message forwarding. Relay existed only at the libp2p transport level (Circuit Relay v2).
+
 \begin{table}[H]
 \centering
 \small
@@ -324,19 +326,19 @@ When DCUtR hole-punching fails, libp2p falls back to Circuit Relay. Relay always
 \midrule
 C is public, A \& B NATed & \yes$^*$ & C can serve as Circuit Relay v2 if relay capability is enabled. A and B reserve relay slots on C. \textit{Transport-level only}---C never sees application messages (Noise-encrypted). \\
 \rowcolor{lightgray}
-C is NATed too & \no & NATed peers cannot serve as relays. \\
-C has BLE to A, libp2p to B & \no & BLE$\to$IP bridge was never implemented. \\
+C is NATed too & \no & NATed peers cannot serve as transport-level relays. \\
+C has BLE to A, libp2p to B & \no & BLE$\to$IP bridge was never implemented. No application-level forwarding existed. \\
 \rowcolor{lightgray}
-C is the bootstrap peer & \yes & Bootstrap peer doubles as relay. This was the primary relay path in SGN. \\
-A$\leftrightarrow$C (BLE), C$\leftrightarrow$B (BLE), B out of A's range & \no & No BLE mesh / multi-hop. SGN forbids application-level relaying. \\
+C is the bootstrap peer & \yes & Bootstrap peer doubles as transport relay. This was the primary relay path. \\
+A$\leftrightarrow$C (BLE), C$\leftrightarrow$B (BLE), B out of A's range & \no & No BLE mesh. No application-level forwarding in the libp2p era. \\
 \bottomrule
 \end{tabular}
-\caption{Relay peer analysis under libp2p. $^*$Transport-level relay only; application-level message relaying is forbidden by design.}
+\caption{Relay peer analysis under libp2p. $^*$Transport-level relay only; application-level forwarding was not implemented.}
 \end{table}
 
 \subsection{T3 Analysis (LibP2P)}
 
-LibP2P's Circuit Relay v2 is the key differentiator here. It allowed \textit{any public peer} to act as a \textbf{transport-level} relay:
+LibP2P's Circuit Relay v2 allowed \textit{any public peer} to act as a \textbf{transport-level} relay:
 
 \begin{itemize}
   \item A third peer C with a public IP could transparently relay encrypted libp2p connections between A and B
@@ -345,7 +347,7 @@ LibP2P's Circuit Relay v2 is the key differentiator here. It allowed \textit{any
   \item This meant the relay capacity could \textit{theoretically} grow organically with the network (more public peers = more potential relays)
 \end{itemize}
 
-\textbf{Important}: While libp2p provided transport-level relay, SGN \textbf{never} relayed application-level messages through peers. The no-relaying constraint applies to the SGN protocol layer, not the underlying transport.
+\textbf{Limitation}: LibP2P's transport relay only worked when C had a \textit{public IP} and both A and B could establish libp2p connections to C. It did not help with cross-transport scenarios (e.g., A reaches C via BLE, C reaches B via libp2p). Application-level message forwarding was not implemented in this era.
 
 % =============================================================================
 \section{LibP2P Server Scenarios (T4)}
@@ -398,7 +400,7 @@ Always-on peer & \yes & Reachable by any peer with IP connectivity. \\
 Bootstrap redundancy & \yes & Can be added as additional bootstrap peer. Reduces SPOF risk. \\
 \rowcolor{lightgray}
 Discovery hub & \prt & mDNS works on same LAN. Beyond LAN, needs protocol extension. \\
-Message relay for others & \no & SGN forbids application-level relaying. Transport relay only. \\
+Message relay for others & \no$^\dagger$ & Application-level forwarding was not implemented under libp2p. Transport relay only. \\
 \bottomrule
 \end{tabular}
 \caption{Custom supernode capabilities under libp2p.}
@@ -498,7 +500,7 @@ Peer next to me, both BLE-only & \yes & Full communication via BLE. Limited to B
 Peer 50m away, both BLE-only & \prt & At BLE range limit. Unreliable, frequent disconnects. \\
 Peer 200m away, both BLE-only & \no & Out of BLE range. No alternative transport. \\
 \rowcolor{lightgray}
-3 peers in a line, BLE-only & \no & Middle peer in range of both, but no relaying. A$\leftrightarrow$C only if in direct range. \\
+3 peers in a line, BLE-only & \yes$^\dagger$ & Middle peer C forwards for A$\leftrightarrow$B. Single-hop relay. End-to-end encrypted. \textit{New: peer relay enabled.} \\
 Airplane mode with BLE on & \yes & BLE works independently of airplane mode radio restrictions (on most devices). \\
 \rowcolor{lightgray}
 Underground / no cell signal & \yes & BLE unaffected. Only local peers reachable. \\
@@ -507,11 +509,11 @@ Underground / no cell signal & \yes & BLE unaffected. Only local peers reachable
 \caption{BLE-only operation (no Internet). Identical under both libp2p and iroh.}
 \end{table}
 
-\textbf{BLE-only implications} (same for both stacks):
+\textbf{BLE-only implications}:
 \begin{itemize}
-  \item \textbf{Range is the hard limit}: $\sim$10--30m indoors, $\sim$100m outdoors. No way to extend without relaying (forbidden).
-  \item \textbf{Throughput}: BLE GATT writes are $\sim$1--2 KB/s effective. Fine for text messages, insufficient for media.
-  \item \textbf{Resilient}: Works in disaster scenarios, underground, in Faraday cages, on planes---anywhere Bluetooth radio works.
+  \item \textbf{Range}: $\sim$10--30m indoors, $\sim$100m outdoors per hop. With peer relay, effective range doubles to $\sim$60m indoors / $\sim$200m outdoors (single hop through a middle peer).
+  \item \textbf{Throughput}: BLE GATT writes are $\sim$1--2 KB/s effective. Fine for text messages, insufficient for media. Relay adds latency but not throughput reduction (bottleneck is the BLE link itself).
+  \item \textbf{Resilient}: Works in disaster scenarios, underground, in Faraday cages, on planes---anywhere Bluetooth radio works. Peer relay extends this resilience beyond direct BLE range.
 \end{itemize}
 
 % =============================================================================
@@ -586,6 +588,8 @@ WiFi drops, no cellular & PIv4 $\to$ BLE & \yes & $\to$\no & Only nearby BLE pee
   \item \textbf{Double identity mapping}: LibP2P PeerId $\neq$ SGN public key creates complexity and potential for identity confusion.
 
   \item \textbf{Relay peer heterogeneity}: Circuit Relay depends on other peers volunteering relay capacity. In a small network, relay availability is unpredictable.
+
+  \item \textbf{No application-level forwarding}: LibP2P's Circuit Relay only worked at the transport level and required the relay peer to have a public IP. No cross-transport forwarding (e.g., BLE$\to$libp2p bridge) was possible.
 
   \item \textbf{Discovery requires BLE or mDNS}: Remote peers that have never been co-located and are not on the same LAN cannot discover each other without out-of-band exchange.
 \end{enumerate}
@@ -676,13 +680,26 @@ Symmetric $\leftrightarrow$ Symmetric & \dgr & \dgr & Both relay-only. Iroh rela
 \toprule
 \textbf{Scenario} & \textbf{LP2P} & \textbf{Iroh} & \textbf{What Changed} \\
 \midrule
-Public peer C as relay & \yes$^*$ & \no & \textbf{Regression}: No peer-as-relay. Only dedicated servers. Network cannot organically grow relay capacity. \\
+Transport-level relay & \yes$^*$ & \no & Regression: No peer-as-transport-relay. Only dedicated iroh relay servers. \\
 \rowcolor{lightgray}
-App-level message relay & \no & \no & Identical. Forbidden by design. \\
+App-level message forwarding & \no & \yes & \textbf{New}: Peer C can forward end-to-end encrypted messages from A to B. Single hop only. Real-time only (no store-and-forward). \\
+C via BLE to A, iroh to B & \no & \yes & \textbf{New}: Cross-transport forwarding. C bridges BLE and iroh for A$\leftrightarrow$B. \\
+\rowcolor{lightgray}
+C via BLE to both A and B & \no & \yes & \textbf{New}: BLE range extension. C relays between two BLE-only peers. \\
 \bottomrule
 \end{tabular}
-\caption{Relay peer: what changed. $^*$Transport-level only.}
+\caption{Relay peer: what changed. $^*$Transport-level only. App-level forwarding is a new capability under iroh.}
 \end{table}
+
+\textbf{Key improvement}: Under iroh, SGN now supports \textbf{application-level peer forwarding}. This is fundamentally different from libp2p's Circuit Relay:
+
+\begin{itemize}
+  \item \textbf{Cross-transport}: C can receive via BLE from A and forward via iroh to B (or vice versa). LibP2P's Circuit Relay only worked within the libp2p transport.
+  \item \textbf{Any peer can relay}: C does not need a public IP. A NATed peer connected to both A and B via any transport can forward.
+  \item \textbf{End-to-end encrypted}: C sees only the encrypted envelope. Cannot read message content.
+  \item \textbf{Single hop}: Only A$\to$C$\to$B is allowed. No multi-hop chains (A$\to$C$\to$D$\to$B).
+  \item \textbf{Real-time only}: If C cannot reach B right now, the forward fails immediately. No queuing.
+\end{itemize}
 
 \subsubsection{Server (T4) --- Changes from LibP2P}
 
@@ -700,9 +717,11 @@ Redundant relay & Hard & Easy & LP2P: add bootstrap peers (config). Iroh: add re
 \rowcolor{lightgray}
 Self-hosted relay & Complex & Simple & LP2P: run full libp2p node. Iroh: run iroh relay binary. \\
 mDNS discovery & \yes & \no & LP2P supernode discoverable on LAN. Iroh: not. \\
+\rowcolor{lightgray}
+Message forwarding & \no & \yes & \textbf{New}: Supernode can forward messages between peers. Always-on = always available as relay. \\
 \bottomrule
 \end{tabular}
-\caption{Server capabilities: libp2p vs iroh.}
+\caption{Server capabilities: libp2p vs iroh. Supernode gains message forwarding under iroh.}
 \end{table}
 
 \subsection{Mobility: The Critical Difference}
@@ -797,7 +816,7 @@ Offline operation (BLE) & Identical & Identical & Tie \\
 Same-LAN discovery & mDNS (automatic) & None & \textbf{LibP2P} \\
 \rowcolor{lightgray}
 TCP fallback & Works through HTTP proxies & UDP only (QUIC) & \textbf{LibP2P} \\
-Peer-as-relay & Any public peer can relay & Only dedicated servers & \textbf{LibP2P} \\
+Peer-as-relay & Transport-level (public IP only) & App-level forwarding (any peer) & \textbf{Iroh} \\
 \rowcolor{lightgray}
 Ecosystem interop & IPFS-compatible & Iroh-only & \textbf{LibP2P} \\
 \bottomrule
@@ -823,7 +842,7 @@ Ecosystem interop & IPFS-compatible & Iroh-only & \textbf{LibP2P} \\
 4 & UDP-only (QUIC) & Consider QUIC-over-TCP fallback or WebTransport & Work through corporate firewalls \\
 5 & No peer-online notification & Lightweight presence ping via iroh & Know when a remote peer is reachable \\
 \rowcolor{lightgray}
-6 & No peer-as-relay & Accept as design simplification & Managed relays are more reliable \\
+6 & Peer relay is single-hop only & Evaluate multi-hop if needed for mesh scenarios & Extended range at cost of complexity \\
 \bottomrule
 \end{tabular}
 \caption{Recommendations for identified connectivity gaps.}
@@ -848,6 +867,7 @@ Mobility (IP change) & \no{} (reconnect) & \dgr{} (migrates) \\
 Mobility (BLE transition) & Identical & Identical \\
 Bootstrap/relay failure & \no{} (SPOF) & \dgr{} (redundant) \\
 BLE-only (no Internet) & \yes & \yes \\
+Peer relay (friend forwarding) & \prt{} (transport only) & \yes{} (app-level) \\
 \bottomrule
 \end{tabular}
 \caption{High-level comparison by scenario class.}
@@ -855,6 +875,6 @@ BLE-only (no Internet) & \yes & \yes \\
 
 The two transports (BLE + Internet) are \textbf{complementary}: BLE provides resilient local connectivity that is immune to network configuration, while the Internet transport provides global reach that is immune to physical proximity. Together they cover most real-world scenarios.
 
-The migration from libp2p to iroh was a net positive for mobile-first use cases. The loss of mDNS and TCP fallback is real but narrow; the gain in connection migration (QUIC), architectural simplicity, and relay reliability is broad and impactful. The primary remaining gaps---no relaying and no offline delivery---are deliberate design choices that keep the protocol simple, private, and predictable.
+The migration from libp2p to iroh was a net positive for mobile-first use cases. The loss of mDNS and TCP fallback is real but narrow; the gain in connection migration (QUIC), architectural simplicity, and relay reliability is broad and impactful. The addition of \textbf{application-level peer forwarding} under iroh recovers and exceeds libp2p's transport-level relay capability: any peer can now forward end-to-end encrypted messages across any transport combination (BLE$\to$iroh, BLE$\to$BLE, iroh$\to$iroh), limited to a single relay hop and real-time delivery only (no store-and-forward).
 
 \end{document}
