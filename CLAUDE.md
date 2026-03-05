@@ -19,32 +19,6 @@
 
 ---
 
-## Peer Relay / Friend Forwarding
-
-**IMPORTANT**: SGN supports **peer-to-peer message forwarding** through trusted intermediate peers.
-
-If a peer cannot reach the recipient directly (neither via BLE nor libp2p), it MAY forward the message through a connected peer that **can** reach the recipient.
-
-### How It Works
-
-1. **Peer A** wants to send to **Peer B** but has no direct route (no BLE range, no libp2p connection)
-2. **Peer C** is connected to both A and B (via any transport combination: BLE, libp2p, or mixed)
-3. A sends the message to C with B's public key as the intended recipient
-4. C forwards the message to B on A's behalf
-
-### Rules
-
-- ✅ **DO** forward messages through connected peers when the recipient is not directly reachable
-- ✅ **DO** use end-to-end encryption — relay peers MUST NOT be able to read forwarded message content
-- ✅ **DO** support mixed-transport forwarding (e.g., A→C via BLE, C→B via libp2p)
-- ✅ **DO** limit hop count (max 1 relay hop to keep it simple)
-- ✅ **DO** let any peer act as a relay — no special server role required
-- ❌ **NO** multi-hop chains (A→C→D→B) — only single-hop relay (A→C→B)
-- ❌ **NO** queuing at the relay peer — relay is real-time only; if C cannot reach B right now, the forward fails
-- ❌ **NO** automatic retry at the relay peer
-
----
-
 ## Fair Message Delivery (Local Queuing)
 
 **IMPORTANT**: SGN guarantees **fair message delivery** as required by the madGLP runtime. Every message passed to `send()` is eventually delivered, assuming the recipient eventually becomes reachable.
@@ -52,17 +26,18 @@ If a peer cannot reach the recipient directly (neither via BLE nor libp2p), it M
 ### How It Works
 
 - The **sender** queues messages locally when the recipient is temporarily unreachable
-- When the recipient becomes reachable again (via any transport), queued messages are delivered
+- When the recipient becomes reachable again (via BLE or libp2p), queued messages are delivered directly
+- Messages are always direct — no forwarding through intermediate peers
 - Messages are delivered as complete, atomic units (reassembled if fragmented)
 - The networking layer provides encryption and integrity checks
 
-### Sender-Side Queuing vs Relay Queuing
+### Rules
 
 - ✅ **DO** queue messages at the **sender** when the destination is unreachable
-- ✅ **DO** deliver queued messages when the peer reconnects (via BLE, libp2p, or relay)
+- ✅ **DO** deliver queued messages when the peer reconnects (via BLE or libp2p)
 - ✅ **DO** preserve message ordering per destination
-- ❌ **NO** queuing at relay peers — relay forwarding is real-time only
 - ❌ **NO** unbounded queue growth — apply reasonable limits (e.g., max queue size, TTL)
+- ❌ **NO** message relay or forwarding through intermediate peers — all messages are direct
 
 ### Why This Matters
 
@@ -138,16 +113,16 @@ Any friend with a globally routable address can be a routable friend. This inclu
 - **Devices on networks with public IPv4** (less common for mobile)
 - **Dedicated always-on servers** (for reliability, but not required)
 
-Routable friends perform **signaling** in addition to the relay role any friend can play:
+Routable friends perform **signaling** to help NATed peers establish direct connections:
 1. **Address registration**: NATed friends connect via libp2p and report their current public IP:port
 2. **Address notification**: When agent A wants to reach agent B, the routable friend provides A with B's registered address (and vice versa)
 3. **Hole-punch coordination**: Instructs both agents to begin simultaneous UDP sends to each other's addresses, enabling NAT traversal
 
 **Key properties**:
 - **Federated**: Any friend with a public IP is a routable friend. Befriend multiple for redundancy. No single point of failure.
-- **Dual role**: A routable friend does both signaling (hole-punch coordination) AND message relay (forwarding encrypted payloads). These are complementary — signaling establishes direct connections, relay provides fallback.
+- **Signaling only**: Routable friends coordinate hole-punching so peers can establish direct connections. They do NOT relay application messages.
 - **Just a friend**: No special server role in the protocol. The signaling logic is built into every peer; it activates when the peer detects it has a routable address.
-- **Symmetric NAT fallback**: When hole-punching fails (symmetric NAT ↔ symmetric NAT), the routable friend falls back to **message relay** through the social graph.
+- **Symmetric NAT**: When hole-punching fails (symmetric NAT ↔ symmetric NAT), peers cannot connect remotely. The sender queues locally until a direct path becomes available (e.g., co-location via BLE, or network change).
 
 ### NAT Traversal via UDP Hole-Punching
 
@@ -160,7 +135,7 @@ Most mobile devices are behind NAT. UDP hole-punching enables two NATed agents t
 5. B sends a UDP packet to A's address — this opens a mapping in B's NAT
 6. Subsequent packets flow directly between A and B through the opened NAT mappings
 
-This works for cone NAT (full-cone, restricted-cone, port-restricted cone). For symmetric NAT, hole-punching may fail, and the routable friend falls back to message relay.
+This works for cone NAT (full-cone, restricted-cone, port-restricted cone). For symmetric NAT, hole-punching may fail; the sender queues locally until a direct path becomes available.
 
 ### Smartphones as Routable Friends
 
@@ -183,7 +158,8 @@ LibP2P does NOT discover peers autonomously (DHT is disabled). Discovery happens
 ### DO NOT:
 - ❌ Require a centralized bootstrap server (use federated routable friends)
 - ❌ Assume libp2p has built-in peer discovery (DHT is disabled)
-- ❌ Use libp2p Circuit Relay as the primary NAT traversal (use routable-friend-coordinated hole-punching)
+- ❌ Use libp2p Circuit Relay (no message relay — all messages are direct)
+- ❌ Forward/relay messages through intermediate peers
 
 ### DO:
 - ✅ Use Ed25519 public key as the canonical identity (libp2p PeerId derived from it)
@@ -200,7 +176,8 @@ LibP2P does NOT discover peers autonomously (DHT is disabled). Discovery happens
 When sending a message, transports are tried in this order:
 1. **Bluetooth (BLE)** — preferred; faster, no Internet needed, works for nearby peers
 2. **LibP2P (Internet)** — fallback; UDX/TCP, works globally but requires Internet
-3. **Peer relay (forwarding)** — last resort; forward through a connected peer that can reach the recipient
+
+If neither transport can reach the recipient, the sender queues locally until a direct path becomes available.
 
 ### Disabling Transports
 - When Bluetooth is disabled: stop advertising, stop scanning, no BLE communication
@@ -211,8 +188,8 @@ When sending a message, transports are tried in this order:
 Each peer can have both a BLE address and a libp2p connection:
 - `PeerState.bleDeviceId` - BLE device ID (MAC on Android, UUID on iOS)
 - `PeerState.libp2pConnected` - whether libp2p connection is active
-- `PeerState.ipAddresses` - peer's known IP addresses (from ANNOUNCE or GLP server)
-- Messages route through the best available transport based on peer availability
+- `PeerState.ipAddresses` - peer's known IP addresses (from ANNOUNCE)
+- Messages are sent directly via the best available transport based on peer availability
 
 ---
 

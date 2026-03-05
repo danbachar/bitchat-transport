@@ -39,9 +39,9 @@
 \section{Introduction}
 % =============================================================================
 
-SGN uses two transport layers---\textbf{BLE} (short-range, no Internet) and \textbf{libp2p} (UDX/TCP over UDP, global reach)---plus \textbf{application-level peer relay} where a connected peer C forwards end-to-end encrypted messages between A and B when no direct path exists.
+SGN uses two transport layers---\textbf{BLE} (short-range, no Internet) and \textbf{libp2p} (UDX/TCP over UDP, global reach). All messages are \textbf{direct}---delivered over a connection between sender and recipient. Routable friends (peers with globally routable IP addresses) provide \textbf{signaling} to help NATed peers establish direct connections via UDP hole-punching.
 
-\textbf{Key constraints}: (1)~\textbf{Fair message delivery}: every \texttt{send()} is eventually delivered---the sender queues locally when the recipient is temporarily unreachable; (2)~Single-hop relay only (A$\to$C$\to$B, no multi-hop); relay peers do NOT queue---forwarding is real-time only; (3)~Transport priority: BLE $\to$ libp2p (direct) $\to$ peer relay.
+\textbf{Key constraints}: (1)~\textbf{Fair message delivery}: every \texttt{send()} is eventually delivered---the sender queues locally when the recipient is temporarily unreachable; (2)~Messages are always direct (no forwarding through intermediate peers); (3)~Transport priority: BLE $\to$ libp2p (direct).
 
 \textbf{Address types}: BLE-only (no IP), Private IPv4 (PIv4, behind NAT), Public IPv4 (PuIv4), Link-local IPv6 (LLv6, not routable), Public IPv6 (PuIv6).
 
@@ -52,9 +52,9 @@ SGN uses two transport layers---\textbf{BLE} (short-range, no Internet) and \tex
   \item \textbf{Port-restricted cone NAT}: Like restricted-cone, but also checks the external port. The internal host must have sent to that exact IP:port pair.
   \item \textbf{Symmetric NAT}: Creates a \emph{different} external mapping for each destination IP:port pair. Because the mapped port is unpredictable, a third party (routable friend) cannot tell peer B which port to send to---hole-punching fails. Symmetric$\leftrightarrow$symmetric is the worst case; symmetric$\leftrightarrow$cone sometimes works with port prediction.
 \end{itemize}
-Hole-punching (Section~\ref{sec:routable-friend}) works reliably for all three cone types. Symmetric NAT requires fallback to message relay.
+Hole-punching (Section~\ref{sec:routable-friend}) works reliably for all three cone types. Symmetric NAT$\leftrightarrow$symmetric NAT cannot be hole-punched; sender queues locally until a direct path becomes available.
 
-\textbf{Topologies}: T1~(co-located, $<$30m), T2~(remote), T3~(friend in the middle --- relay and signaling).
+\textbf{Topologies}: T1~(co-located, $<$30m), T2~(remote), T3~(routable friend --- signaling).
 
 % =============================================================================
 \section{Transport Mechanics}
@@ -62,9 +62,7 @@ Hole-punching (Section~\ref{sec:routable-friend}) works reliably for all three c
 
 \textbf{BLE}: 10--100m range, no IP required. Each device advertises a GATT service UUID with a fixed 8-byte Grassroots prefix (enables scan filtering) and an 8-byte agent suffix derived from the Ed25519 public key (SHA-256 hash). After connection, ANNOUNCE packets are exchanged (full 32-byte public key, nickname, IP addresses).
 
-\textbf{LibP2P}: UDX (primary, UDP-based) and TCP (fallback) transports, secured with \textbf{Noise XX} (Curve25519 DH, ChaCha20-Poly1305, SHA-256) providing mutual authentication and forward secrecy. LibP2P generates a \texttt{PeerId} from the Ed25519 key; the SGN public key remains the canonical identity. DHT disabled; mDNS enabled for LAN discovery. NAT traversal via routable-friend-coordinated UDP hole-punching (see Section~\ref{sec:routable-friend}).
-
-\textbf{Application-level peer relay}: Any connected peer C can forward messages across transport boundaries (e.g., BLE$\to$libp2p). C sees only encrypted envelopes. Single hop, real-time only (C does not queue). The \emph{sender} queues locally if no path exists, preserving fair message delivery.
+\textbf{LibP2P}: UDX (primary, UDP-based) and TCP (fallback) transports, secured with \textbf{Noise XX} (Curve25519 DH, ChaCha20-Poly1305, SHA-256) providing mutual authentication and forward secrecy. LibP2P generates a \texttt{PeerId} from the Ed25519 key; the SGN public key remains the canonical identity. DHT disabled; mDNS enabled for LAN discovery. NAT traversal via routable-friend-coordinated UDP hole-punching (see Section~\ref{sec:routable-friend}). When no direct path exists, the sender queues locally until one becomes available.
 
 % =============================================================================
 \section{Connectivity by Topology}
@@ -80,7 +78,7 @@ Hole-punching (Section~\ref{sec:routable-friend}) works reliably for all three c
 \midrule
 Any + BLE-only peer & \yes & \no & BLE always works when co-located. No IP = no libp2p. \\
 \rowcolor{lightgray}
-PIv4 / PIv4 (same LAN) & \yes & \yes & mDNS discovers peer without relay. \\
+PIv4 / PIv4 (same LAN) & \yes & \yes & mDNS discovers peer on LAN. \\
 PIv4 / PuIv4 & \yes & \yes & Direct to public peer. \\
 \rowcolor{lightgray}
 PuIv6 / PuIv6 & \yes & \yes & Direct IPv6/UDX. Optimal. \\
@@ -89,7 +87,7 @@ IPv4-only / IPv6-only & \yes & \dgr & Cross-protocol needs dual-stack routable f
 \end{tabular}
 \end{table}
 
-\textbf{Key insight}: BLE is always available when co-located, providing a reliable connectivity floor regardless of network configuration. Peer relay is unnecessary here.
+\textbf{Key insight}: BLE is always available when co-located, providing a reliable connectivity floor regardless of network configuration.
 
 \subsection{T2: Remote Peers}
 
@@ -99,9 +97,9 @@ IPv4-only / IPv6-only & \yes & \dgr & Cross-protocol needs dual-stack routable f
 \toprule
 \textbf{Address Combination} & \textbf{LP2P} & \textbf{Notes} \\
 \midrule
-Either peer BLE-only or LLv6 & \no & \textbf{Unreachable} without co-located relay peer. Sender queues locally. \\
+Either peer BLE-only or LLv6 & \no & \textbf{Unreachable remotely}. Sender queues locally until co-located. \\
 \rowcolor{lightgray}
-PIv4 / PIv4 (both NATed) & \dgr & Need mutual routable friend for hole-punch coordination. Symmetric NAT = relay-only. \\
+PIv4 / PIv4 (both NATed) & \dgr & Need mutual routable friend for hole-punch coordination. Symmetric NAT = unreachable remotely; sender queues. \\
 Any / PuIv4 or PuIv6 & \yes & Direct connection to public peer. \\
 \rowcolor{lightgray}
 IPv4-only / IPv6-only & \dgr & Cross-protocol: needs dual-stack routable friend. \\
@@ -110,42 +108,10 @@ PuIv6 / PuIv6 & \yes & Direct IPv6/UDX. Best case. \\
 \end{tabular}
 \end{table}
 
-\textbf{Peer relay impact}: Significant for BLE-only peers. If a BLE-only Peer A has a co-located Peer C with libp2p, C can forward to the remote Peer B---transforming ``unreachable'' into reachable.
+\textbf{NAT traversal}: Hole-punching is coordinated by a mutual routable friend (Section~\ref{sec:routable-friend}). Works for cone NAT (full, restricted, port-restricted). Symmetric NAT$\leftrightarrow$symmetric NAT fails hole-punching; sender queues locally until a direct path becomes available (e.g., peers become co-located via BLE, or network conditions change).
 
-\textbf{NAT traversal}: Hole-punching is coordinated by a mutual routable friend (Section~\ref{sec:routable-friend}). Works for cone NAT (full, restricted, port-restricted). Symmetric NAT$\leftrightarrow$symmetric NAT fails hole-punching; falls back to app-level peer relay through the routable friend's social graph.
-
-\subsection{T3: Friend in the Middle (Relay + Signaling)}
+\subsection{T3: Routable Friend (Signaling)}
 \label{sec:routable-friend}
-
-A third peer C exists between peers A and B. C can help in two ways, depending on whether C has a \textbf{globally routable IP address}:
-
-\begin{enumerate}[nosep]
-  \item \textbf{Message relay}: C forwards end-to-end encrypted messages from A to B (or vice versa). Any peer can do this regardless of IP type. C sees only encrypted envelopes.
-  \item \textbf{Signaling}: C coordinates UDP hole-punching between A and B so they can establish a direct connection. This requires C to have a globally routable address (PuIv6 or PuIv4)---making C a \textbf{routable friend}.
-\end{enumerate}
-
-A friend with a routable address can do \emph{both} simultaneously. Signaling establishes direct connections (reducing the need for relay), while relay provides a fallback when signaling fails (e.g., symmetric NAT).
-
-\subsubsection{Message Relay}
-
-\begin{table}[H]
-\centering\small
-\begin{tabular}{L{4.5cm} C{1.2cm} C{4.8cm}}
-\toprule
-\textbf{Scenario} & \textbf{Works?} & \textbf{Notes} \\
-\midrule
-C connected to both A\&B via libp2p & \yes & C forwards. No public IP required. \\
-\rowcolor{lightgray}
-C has BLE to A, libp2p to B & \yes & \textbf{Cross-transport bridging}. C bridges BLE$\leftrightarrow$libp2p. \\
-BLE-only: A--C--B in a line & \yes & BLE range extension. Effective range doubles ($\sim$60m / $\sim$200m). \\
-\rowcolor{lightgray}
-Multi-hop (A$\to$C$\to$D$\to$B) & \no & Forbidden. Single hop only. \\
-C connected to A but B offline & \no & Real-time only. Sender queues locally; C does not queue. \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\subsubsection{Signaling (Routable Friends)}
 
 A \textbf{routable friend} is an ordinary SGN agent that currently has a \textbf{globally routable IP address}. It is not a server---it is a regular friend running the same app, who happens to be directly reachable from the Internet right now.
 
@@ -163,7 +129,7 @@ A \textbf{routable friend} is an ordinary SGN agent that currently has a \textbf
   \item \textbf{Hole-punch coordination}: Instructs both agents to begin simultaneous UDP sends, opening NAT mappings.
 \end{enumerate}
 
-\textbf{Symmetric NAT fallback}: When hole-punching fails (both peers behind symmetric NAT), the routable friend falls back to \emph{message relay}---it is just another friend in the social graph.
+\textbf{Symmetric NAT}: When hole-punching fails (both peers behind symmetric NAT), the peers cannot establish a direct connection remotely. The sender queues locally; delivery occurs when a direct path becomes available (e.g., co-location via BLE, or network conditions change).
 
 \textbf{No SPOF}: The model is inherently redundant. An agent befriends multiple routable friends; if one goes offline, others provide signaling. Any new friend with a public IP automatically becomes a potential routable friend.
 
@@ -185,7 +151,7 @@ For hole-punch coordination, A and B need a \emph{mutual} routable friend S simu
 
 \begin{itemize}[nosep]
   \item S must know both A's and B's current public IP:port (both must have registered with S).
-  \item If A and B share no mutual routable friend, hole-punching cannot be coordinated. Communication falls back to message relay through whatever peers connect A to B.
+  \item If A and B share no mutual routable friend, hole-punching cannot be coordinated. Sender queues locally until a direct path becomes available.
   \item In practice, the social graph grows through BLE encounters. Two remote friends likely share mutual friends. The introduction protocol (GLP application layer) can explicitly introduce friends to routable peers.
 \end{itemize}
 
@@ -211,15 +177,15 @@ WiFi A $\to$ WiFi B (diff LAN) & \na & \no & Same---new IP kills all connections
 Peer enters BLE range & \yes & -- & BLE scan discovers peer. New transport available. \\
 \rowcolor{lightgray}
 Peer leaves BLE range, has IP & \no & \yes & BLE drops; libp2p unaffected. \\
-Peer leaves BLE, no Internet & \no & \no & Both transports lost. Relay peer needed. Sender queues locally. \\
+Peer leaves BLE, no Internet & \no & \no & Both transports lost. Sender queues locally. \\
 \rowcolor{lightgray}
-On train, passing through cells & \no & \no & Constant reconnects. Effectively unusable for libp2p. BLE relay during stops. Sender queues locally. \\
-Airplane mode + BLE on & \yes & \no & BLE works. Relay extends to friends-of-friends. \\
+On train, passing through cells & \no & \no & Constant reconnects. Effectively unusable for libp2p. BLE during stops. Sender queues locally. \\
+Airplane mode + BLE on & \yes & \no & BLE works for co-located peers. \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\textbf{No connection migration is libp2p's biggest weakness for mobile.} When IP changes, all UDX/TCP connections die and must reconnect from scratch (re-register with routable friends, re-coordinate hole-punches). A co-located BLE peer can relay during the blackout. The sender's local queue preserves messages during the gap, ensuring fair delivery once connectivity is restored.
+\textbf{No connection migration is libp2p's biggest weakness for mobile.} When IP changes, all UDX/TCP connections die and must reconnect from scratch (re-register with routable friends, re-coordinate hole-punches). The sender's local queue preserves messages during the gap, ensuring fair delivery once connectivity is restored.
 
 % =============================================================================
 \section{Summary \& Gap Analysis}
@@ -227,91 +193,42 @@ Airplane mode + BLE on & \yes & \no & BLE works. Relay extends to friends-of-fri
 
 \begin{table}[H]
 \centering\small
-\begin{tabular}{L{4.5cm} C{1.3cm} C{1.3cm} C{1.3cm}}
+\begin{tabular}{L{4.5cm} C{1.3cm} C{1.3cm} L{4cm}}
 \toprule
-\textbf{Scenario} & \textbf{BLE} & \textbf{LibP2P} & \textbf{Relay} \\
+\textbf{Scenario} & \textbf{BLE} & \textbf{LibP2P} & \textbf{Notes} \\
 \midrule
-Co-located, same LAN & \yes & \yes & \na \\
-Co-located, BLE range & \yes & \na & \na \\
+Co-located, same LAN & \yes & \yes & Both transports available. \\
+Co-located, BLE range & \yes & \na & BLE provides connectivity floor. \\
 \rowcolor{lightgray}
-Remote, both NATed & \no & \dgr$^\dagger$ & \prt$^\dagger$ \\
-Remote, one public & \no & \yes & \na \\
+Remote, both NATed & \no & \dgr$^\dagger$ & Hole-punch via routable friend. \\
+Remote, one public & \no & \yes & Direct connection. \\
 \rowcolor{lightgray}
-Remote, BLE-only peer & \no & \no & \yes$^*$ \\
-Mobility (IP change) & -- & \no & \prt$^*$ \\
+Remote, BLE-only peer & \no & \no & Unreachable. Sender queues. \\
+Mobility (IP change) & -- & \no & Reconnect needed. Sender queues. \\
 \rowcolor{lightgray}
-BLE-only (no Internet) & \yes & \no & \yes$^*$ \\
-All routable friends offline & \na & \dgr & -- \\
+BLE-only (no Internet) & \yes & \no & Co-located peers only. \\
+All routable friends offline & \na & \dgr & Direct to public peers only. \\
 \bottomrule
 \end{tabular}
-\caption*{\small $^*$Requires co-located relay peer. $^\dagger$Requires mutual routable friend for hole-punch coordination.}
+\caption*{\small $^\dagger$Requires mutual routable friend for hole-punch coordination. Symmetric NAT$\leftrightarrow$symmetric NAT: unreachable remotely.}
 \end{table}
 
-BLE, libp2p, and peer relay are \textbf{complementary}: BLE provides resilient local connectivity immune to network configuration; libp2p provides global reach immune to physical proximity; peer relay bridges the two. \textbf{Local queuing at the sender} ensures fair message delivery across transient disconnections.
+BLE and libp2p are \textbf{complementary}: BLE provides resilient local connectivity immune to network configuration; libp2p provides global reach immune to physical proximity. \textbf{Local queuing at the sender} ensures fair message delivery across transient disconnections---messages are always delivered directly once a path is available.
 
 \textbf{Primary gaps}:
 \begin{enumerate}[nosep]
   \item \textbf{No connection migration}---libp2p UDX/TCP connections die on IP change. QUIC-based transport would solve this.
-  \item \textbf{Cross-protocol bridging}---IPv4$\leftrightarrow$IPv6 needs a dual-stack routable friend; app relay partially mitigates.
-  \item \textbf{Relay peer availability}---sparse networks may lack suitable relay peers; multiple routable friends mitigate.
-  \item \textbf{Single relay hop limit}---deliberate simplicity trade-off; see future work.
+  \item \textbf{Cross-protocol bridging}---IPv4$\leftrightarrow$IPv6 needs a dual-stack routable friend for hole-punch coordination.
+  \item \textbf{Symmetric NAT}---both peers behind symmetric NAT cannot hole-punch; must wait for a direct path (BLE co-location or network change).
   \item \textbf{PeerId $\neq$ SGN public key}---libp2p derives PeerId from the Ed25519 key, but maintaining the bidirectional mapping adds complexity.
 \end{enumerate}
 
 \textbf{Resolved gaps} (vs.\ previous analysis):
 \begin{itemize}[nosep]
   \item \textbf{Bootstrap SPOF}: Eliminated. Routable friends are federated---any friend with a public IP. No single point of failure.
-  \item \textbf{No store-and-forward}: Resolved. Sender-side local queuing provides fair message delivery. Relay peers still do not queue (real-time forwarding only).
+  \item \textbf{No store-and-forward}: Resolved. Sender-side local queuing provides fair message delivery.
 \end{itemize}
 
 \textbf{Recommendations}: (1)~Evaluate QUIC-based transport for connection migration; (2)~Unify PeerId with SGN public key if possible; (3)~Enable address exchange via QR code/link for remote-first friendships.
-
-% =============================================================================
-\section{Future Work: Geographic-Optimized Multi-Hop Routing}
-% =============================================================================
-
-The single-hop relay constraint (Section~3.3) exists because standard multi-hop routing (e.g., AODV) requires flooding-based route discovery---broadcasting RREQ to all peers. In a mobile BLE mesh with volatile topology, this is expensive and unreliable. \textbf{Geohash-guided AODV} can make multi-hop viable by constraining route discovery spatially.
-
-\subsection{Geohash-Guided AODV}
-
-\begin{enumerate}[nosep]
-  \item \textbf{Geohash in ANNOUNCE}: Each peer includes a truncated geohash (5--6 characters, $\sim$5\,km$^2$ precision) in its ANNOUNCE packet. All peers maintain a \texttt{nodeId $\to$ geohash} mapping.
-
-  \item \textbf{Directional RREQ}: When A needs a route to B and knows B's approximate geohash, A tags the RREQ with B's geohash. Intermediate peers only re-broadcast if their own geohash is geographically \emph{closer} to the destination (or within a configurable angular cone). This prunes the flood dramatically compared to standard AODV.
-
-  \item \textbf{Geohash ring expansion}: If directional RREQ fails (no peers in the cone), reduce geohash precision (fewer characters = larger area) and retry---analogous to AODV's expanding ring search, but spatially informed.
-
-  \item \textbf{Route maintenance}: Standard AODV RERR messages when a hop breaks. Geo-awareness helps select alternate next-hops that are still in the right geographic direction.
-\end{enumerate}
-
-\textbf{Why geohash?} Hierarchical (truncating characters widens the area---no distance math), prefix-matchable (shared prefix = spatial proximity), privacy-preserving (5-char $\approx$ 5\,km$^2$, reveals neighborhood, not location), and compact (5--6 ASCII characters per ANNOUNCE).
-
-\subsection{Trade-offs}
-
-\begin{table}[H]
-\centering\small
-\begin{tabular}{L{3cm} L{4.5cm} L{4.5cm}}
-\toprule
-& \textbf{Single-hop (current)} & \textbf{Geo-AODV} \\
-\midrule
-Complexity & Trivial & Moderate (RREQ/RREP/RERR state machines) \\
-\rowcolor{lightgray}
-Reach & 2 BLE hops max & Unbounded (with TTL cap, likely 3--4) \\
-Latency & Low & Additive per hop \\
-\rowcolor{lightgray}
-Privacy & 1 relay sees metadata & N relays see metadata; geohash reveals approximate location \\
-Use case & Friends nearby & Dense mesh (protests, festivals, disasters) \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\subsection{Open Questions}
-
-\begin{itemize}[nosep]
-  \item \textbf{Location permission}: Mobile OS requires explicit consent; geohash must be opt-in.
-  \item \textbf{Hybrid routing}: Geo-AODV only for BLE mesh (physical proximity); libp2p for long-range. Geographic routing is irrelevant for Internet transport.
-  \item \textbf{Geohash spoofing}: A peer could lie about its geohash to attract or deflect traffic. Mitigations: cross-reference BLE RSSI, require signed geohash attestations from multiple neighbors.
-  \item \textbf{TTL cap}: Practical limit likely 3--4 hops before latency and reliability degrade unacceptably.
-\end{itemize}
 
 \end{document}
