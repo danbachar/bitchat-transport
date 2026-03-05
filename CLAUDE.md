@@ -129,46 +129,46 @@ Each agent's **Ed25519 public key IS the transport identity**. The same key is u
 
 LibP2P generates a `PeerId` from the Ed25519 key, but the SGN public key remains the canonical identity. The runtime maintains the bidirectional mapping `PeerId ↔ SGN PublicKey`.
 
-### GLP Servers (Friends with Public IPs)
+### Routable Friends (Friends with Public IPs)
 
-A **GLP server** is an ordinary SGN agent that happens to have a **globally routable IP address** (typically PuIv6, but also PuIv4). It requires no special protocol — it is a regular peer that participates in the social graph and speaks the same networking API.
+A **routable friend** is an ordinary SGN agent that currently has a **globally routable IP address** (typically PuIv6, but also PuIv4). It is not a server — it is a regular friend running the same app, who happens to be directly reachable from the Internet right now.
 
-Any friend with a globally routable address can serve as a GLP server. This includes:
+Any friend with a globally routable address can be a routable friend. This includes:
 - **Smartphones on carriers that assign public IPv6** (increasingly common)
 - **Devices on networks with public IPv4** (less common for mobile)
 - **Dedicated always-on servers** (for reliability, but not required)
 
-GLP servers perform **signaling**, not relaying:
-1. **Address registration**: Mobile agents connect to their GLP server friend via libp2p and report their current public IP:port
-2. **Address notification**: When agent A wants to reach agent B, the GLP server provides A with B's registered address (and vice versa)
-3. **Hole-punch coordination**: The GLP server instructs both agents to begin simultaneous UDP sends to each other's addresses, enabling NAT traversal
+Routable friends perform **signaling** in addition to the relay role any friend can play:
+1. **Address registration**: NATed friends connect via libp2p and report their current public IP:port
+2. **Address notification**: When agent A wants to reach agent B, the routable friend provides A with B's registered address (and vice versa)
+3. **Hole-punch coordination**: Instructs both agents to begin simultaneous UDP sends to each other's addresses, enabling NAT traversal
 
 **Key properties**:
-- **Federated**: Anyone can be a GLP server. An agent may befriend multiple GLP servers for redundancy. No single point of failure.
-- **Not a relay**: GLP servers do NOT carry application data. Only signaling.
-- **Just a friend**: A GLP server is an ordinary peer in the social graph. No special role in the protocol.
-- **Symmetric NAT fallback**: When hole-punching fails (symmetric NAT ↔ symmetric NAT), the GLP server can fall back to **application-level message forwarding** through the social graph (peer relay).
+- **Federated**: Any friend with a public IP is a routable friend. Befriend multiple for redundancy. No single point of failure.
+- **Dual role**: A routable friend does both signaling (hole-punch coordination) AND message relay (forwarding encrypted payloads). These are complementary — signaling establishes direct connections, relay provides fallback.
+- **Just a friend**: No special server role in the protocol. The signaling logic is built into every peer; it activates when the peer detects it has a routable address.
+- **Symmetric NAT fallback**: When hole-punching fails (symmetric NAT ↔ symmetric NAT), the routable friend falls back to **message relay** through the social graph.
 
 ### NAT Traversal via UDP Hole-Punching
 
-Most mobile devices are behind NAT. UDP hole-punching enables two NATed agents to establish a direct connection, coordinated by their mutual GLP server friend:
+Most mobile devices are behind NAT. UDP hole-punching enables two NATed agents to establish a direct connection, coordinated by their mutual routable friend:
 
-1. Agent A and agent B both maintain a libp2p connection to GLP server S and have registered their public IP:port with S
+1. Agent A and agent B both maintain a libp2p connection to routable friend S and have registered their public IP:port with S
 2. A requests a connection to B through S
 3. S sends B's public IP:port to A and A's public IP:port to B
 4. A sends a UDP packet to B's address — this opens a mapping in A's NAT
 5. B sends a UDP packet to A's address — this opens a mapping in B's NAT
 6. Subsequent packets flow directly between A and B through the opened NAT mappings
 
-This works for cone NAT (full-cone, restricted-cone, port-restricted cone). For symmetric NAT, hole-punching may fail, and the GLP server falls back to forwarding via peer relay.
+This works for cone NAT (full-cone, restricted-cone, port-restricted cone). For symmetric NAT, hole-punching may fail, and the routable friend falls back to message relay.
 
-### Can Smartphones Be GLP Servers?
+### Smartphones as Routable Friends
 
-Yes. Many mobile carriers assign globally routable IPv6 addresses to smartphones. A phone with PuIv6:
+Many mobile carriers assign globally routable IPv6 addresses to smartphones. A phone with PuIv6:
 - **IS directly reachable** — can receive incoming UDP packets
 - **CAN coordinate hole-punching** — both NATed friends connect to it, it exchanges their addresses
 - **Less reliable than a dedicated server** — goes offline, changes carriers, battery constraints
-- **Mitigated by redundancy** — befriend multiple GLP server peers
+- **Mitigated by redundancy** — befriend multiple routable friends
 
 This is the grassroots model: no dedicated infrastructure required. Peers with public IPs naturally emerge as signaling nodes.
 
@@ -181,15 +181,15 @@ LibP2P does NOT discover peers autonomously (DHT is disabled). Discovery happens
 4. After discovery, the app calls `send(pubKey, payload)` — the networking layer routes via the best available transport
 
 ### DO NOT:
-- ❌ Require a centralized bootstrap server (use federated GLP server friends)
+- ❌ Require a centralized bootstrap server (use federated routable friends)
 - ❌ Assume libp2p has built-in peer discovery (DHT is disabled)
-- ❌ Use libp2p Circuit Relay as the primary NAT traversal (use GLP-server-coordinated hole-punching)
+- ❌ Use libp2p Circuit Relay as the primary NAT traversal (use routable-friend-coordinated hole-punching)
 
 ### DO:
 - ✅ Use Ed25519 public key as the canonical identity (libp2p PeerId derived from it)
 - ✅ Use Noise XX pattern for mutual authentication and forward secrecy
-- ✅ Use GLP server friends (peers with public IPs) for signaling and hole-punch coordination
-- ✅ Befriend multiple GLP servers for redundancy
+- ✅ Use routable friends (peers with public IPs) for signaling and hole-punch coordination
+- ✅ Befriend multiple routable friends for redundancy
 - ✅ Use BLE ANNOUNCE and mDNS for peer discovery
 
 ---
