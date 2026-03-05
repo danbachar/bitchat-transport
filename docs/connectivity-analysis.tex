@@ -45,6 +45,15 @@ SGN uses two transport layers---\textbf{BLE} (short-range, no Internet) and \tex
 
 \textbf{Address types}: BLE-only (no IP), Private IPv4 (PIv4, behind NAT), Public IPv4 (PuIv4), Link-local IPv6 (LLv6, not routable), Public IPv6 (PuIv6).
 
+\textbf{NAT types} (relevant for PIv4 peers behind NAT):
+\begin{itemize}[nosep]
+  \item \textbf{Full-cone NAT}: Once an internal host has sent a packet out, \emph{any} external host can send packets back to the mapped address:port. Easiest to traverse.
+  \item \textbf{Restricted-cone NAT}: Like full-cone, but only allows incoming packets from an external IP that the internal host has previously sent to. The port does not matter.
+  \item \textbf{Port-restricted cone NAT}: Like restricted-cone, but also checks the external port. The internal host must have sent to that exact IP:port pair.
+  \item \textbf{Symmetric NAT}: Creates a \emph{different} external mapping for each destination IP:port pair. Because the mapped port is unpredictable, a third party (routable friend) cannot tell peer B which port to send to---hole-punching fails. Symmetric$\leftrightarrow$symmetric is the worst case; symmetric$\leftrightarrow$cone sometimes works with port prediction.
+\end{itemize}
+Hole-punching (Section~\ref{sec:routable-friend}) works reliably for all three cone types. Symmetric NAT requires fallback to message relay.
+
 \textbf{Topologies}: T1~(co-located, $<$30m), T2~(remote), T3~(friend in the middle --- relay and signaling).
 
 % =============================================================================
