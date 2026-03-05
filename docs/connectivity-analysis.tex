@@ -151,6 +151,36 @@ A \textbf{GLP server} is an ordinary SGN agent that happens to have a \textbf{gl
 
 \textbf{No SPOF}: Unlike a dedicated bootstrap peer, the GLP server model is inherently redundant. An agent befriends multiple GLP servers; if one goes offline, others provide signaling. Any new friend with a public IP automatically becomes a potential GLP server.
 
+\subsubsection{GLP Server Discovery}
+
+How does agent A know which friends currently have a routable address and can serve as GLP servers?
+
+\begin{enumerate}[nosep]
+  \item \textbf{ANNOUNCE packets}: Each peer includes its current IP addresses in ANNOUNCE (sent over BLE and libp2p). Friends that receive the ANNOUNCE see whether the address is globally routable (PuIv6 or PuIv4) and can mark that peer as a potential GLP server.
+  \item \textbf{Address change notifications}: When a peer's network changes (WiFi$\to$LTE, gaining/losing PuIv6), it pushes an updated address set to all connected friends. This lets friends dynamically track which peers are currently routable.
+  \item \textbf{Probing}: If A has a stale address for friend C, A attempts a UDX connection. If it succeeds, C is reachable and can serve as GLP server. If it fails, A tries the next known GLP server friend.
+\end{enumerate}
+
+The set of available GLP servers is inherently dynamic---friends gain and lose routable addresses as they move between networks. Redundancy (befriending multiple GLP server-capable peers) absorbs this churn.
+
+\subsubsection{Mutual Friend Requirement}
+
+For hole-punch coordination, A and B need a \emph{mutual} GLP server friend S that is simultaneously connected to both:
+
+\begin{itemize}[nosep]
+  \item S must know both A's and B's current public IP:port (both must have registered with S).
+  \item If A and B have no mutual GLP server friend, hole-punching cannot be coordinated, and communication falls back to app-level relay through whatever peers connect A to B.
+  \item In practice, the social graph grows organically through BLE encounters. Two remote friends A and B likely share mutual friends (the social graph is dense locally). The introduction protocol (part of the GLP application layer, not networking) can explicitly introduce friends to GLP server peers.
+\end{itemize}
+
+\subsubsection{IPv6 Firewalling}
+
+Some carriers assign globally routable IPv6 addresses but \textbf{firewall incoming UDP}. The phone has a PuIv6 address but cannot actually receive unsolicited packets. This creates a false positive: the peer appears routable but is not.
+
+\textbf{Detection}: Each peer must probe its own reachability. When a peer detects it has a PuIv6 address, it asks a connected friend to attempt an incoming UDP connection. If the connection succeeds, the peer is genuinely routable and advertises itself as a GLP server candidate. If it fails (firewalled), the peer does not advertise GLP server capability.
+
+This is analogous to libp2p's AutoNAT: a peer asks others to ``dial me back'' to verify reachability. The probe can be implemented as a simple ping/pong exchange: peer C asks friend D to send a UDP packet to C's public address; if C receives it, C is routable.
+
 % =============================================================================
 \section{Mobility}
 % =============================================================================
