@@ -23,12 +23,12 @@
 
 **IMPORTANT**: SGN supports **peer-to-peer message forwarding** through trusted intermediate peers.
 
-If a peer cannot reach the recipient directly (neither via BLE nor iroh), it MAY forward the message through a connected peer that **can** reach the recipient.
+If a peer cannot reach the recipient directly (neither via BLE nor libp2p), it MAY forward the message through a connected peer that **can** reach the recipient.
 
 ### How It Works
 
-1. **Peer A** wants to send to **Peer B** but has no direct route (no BLE range, no iroh connection)
-2. **Peer C** is connected to both A and B (via any transport combination: BLE, iroh, or mixed)
+1. **Peer A** wants to send to **Peer B** but has no direct route (no BLE range, no libp2p connection)
+2. **Peer C** is connected to both A and B (via any transport combination: BLE, libp2p, or mixed)
 3. A sends the message to C with B's public key as the intended recipient
 4. C forwards the message to B on A's behalf
 
@@ -36,91 +36,185 @@ If a peer cannot reach the recipient directly (neither via BLE nor iroh), it MAY
 
 - ✅ **DO** forward messages through connected peers when the recipient is not directly reachable
 - ✅ **DO** use end-to-end encryption — relay peers MUST NOT be able to read forwarded message content
-- ✅ **DO** support mixed-transport forwarding (e.g., A→C via BLE, C→B via iroh)
+- ✅ **DO** support mixed-transport forwarding (e.g., A→C via BLE, C→B via libp2p)
 - ✅ **DO** limit hop count (max 1 relay hop to keep it simple)
 - ✅ **DO** let any peer act as a relay — no special server role required
 - ❌ **NO** multi-hop chains (A→C→D→B) — only single-hop relay (A→C→B)
-- ❌ **NO** storing messages for later delivery — relay is real-time only; if C cannot reach B right now, the forward fails
-- ❌ **NO** automatic retry or queuing at the relay peer
+- ❌ **NO** queuing at the relay peer — relay is real-time only; if C cannot reach B right now, the forward fails
+- ❌ **NO** automatic retry at the relay peer
+
+---
+
+## Fair Message Delivery (Local Queuing)
+
+**IMPORTANT**: SGN guarantees **fair message delivery** as required by the madGLP runtime. Every message passed to `send()` is eventually delivered, assuming the recipient eventually becomes reachable.
+
+### How It Works
+
+- The **sender** queues messages locally when the recipient is temporarily unreachable
+- When the recipient becomes reachable again (via any transport), queued messages are delivered
+- Messages are delivered as complete, atomic units (reassembled if fragmented)
+- The networking layer provides encryption and integrity checks
+
+### Sender-Side Queuing vs Relay Queuing
+
+- ✅ **DO** queue messages at the **sender** when the destination is unreachable
+- ✅ **DO** deliver queued messages when the peer reconnects (via BLE, libp2p, or relay)
+- ✅ **DO** preserve message ordering per destination
+- ❌ **NO** queuing at relay peers — relay forwarding is real-time only
+- ❌ **NO** unbounded queue growth — apply reasonable limits (e.g., max queue size, TTL)
+
+### Why This Matters
+
+The madGLP runtime assumes fair message delivery: every `send()` eventually succeeds if the recipient eventually becomes reachable. Without local queuing, madGLP's correctness guarantees break — global link assignments could be lost during transient disconnections.
 
 ---
 
 ## BLE Service UUID Architecture
 
-**IMPORTANT**: Each Bitchat device MUST advertise its own **unique** service UUID derived from its public key.
+**IMPORTANT**: Each SGN device advertises a BLE GATT service UUID with a **fixed Grassroots prefix** and an **agent-specific suffix** derived from its public key.
 
-### Why Unique UUIDs?
+### UUID Structure
 
-1. **Identity**: The service UUID is derived from the device's Ed25519 public key (last 128 bits)
-2. **Security**: Provides cryptographic binding between BLE identity and cryptographic identity
-3. **Discovery**: Devices scan broadly and discover ALL devices with service UUIDs
-4. **Verification**: After connection, devices exchange ANNOUNCE packets containing full public keys and verify identity
+The 128-bit (16-byte) service UUID has two parts:
+1. **Fixed 8-byte Grassroots prefix**: Common to all SGN agents. Enables efficient scan filtering — scanners can filter by prefix to find only SGN devices without connecting to every BLE device.
+2. **8-byte agent suffix**: Derived from the agent's Ed25519 public key (first 8 bytes of SHA-256 hash of the public key). Enables recognition of a specific agent before connection, by anyone who knows that agent's public key.
 
 ### How It Works
 
 1. **Advertising (Peripheral Mode)**:
-   - Each device advertises with UUID = `last_128_bits(publicKey)`
-   - Example: Device A with pubkey `0x1234...` advertises UUID `12345678-9abc-def0-1234-567890abcdef`
+   - Each device advertises with UUID = `grassroots_prefix | sha256(publicKey)[0:8]`
+   - The prefix enables scan-time filtering; the suffix enables pre-connection identification
 
 2. **Scanning (Central Mode)**:
-   - Devices scan for ALL devices advertising ANY service UUID
-   - Do NOT filter by specific UUID during scan
-   - The scan is opportunistic - we discover any device that might be a peer
+   - Devices scan for devices whose service UUID matches the Grassroots prefix
+   - This filters out non-SGN devices (headphones, etc.) at scan time — no need to connect and disconnect
+   - Known friends can be recognized by their suffix before connection
 
-3. **Connection & Service Discovery**:
-   - After BLE connection established, perform GATT service discovery
-   - Check if device has the Bitchat GATT characteristic (UUID: `0000ff01-0000-1000-8000-00805f9b34fb`)
-   - If characteristic NOT found → disconnect (not a Bitchat peer, e.g., headphones)
-   - If characteristic found → it's a Bitchat peer, proceed to step 4
-   
-   **IMPORTANT**: We cannot know if a device is a Bitchat peer until AFTER connection and service discovery.
-   This is why we connect to all devices and disconnect from non-peers after discovery.
+3. **Connection & ANNOUNCE Exchange**:
+   - After BLE connection, exchange ANNOUNCE packets
+   - ANNOUNCE contains: full 32-byte public key, nickname, IP addresses (for libp2p transport)
+   - No Bluetooth bonding/pairing required — application-level encryption (Noise XX with Ed25519 keys) is used instead
+   - Receiving device verifies identity and stores the mapping: `BLE_Device_ID → PublicKey`
 
-4. **ANNOUNCE Exchange & Verification**:
-   - After service discovery confirms Bitchat peer, exchange ANNOUNCE packets
-   - ANNOUNCE contains: full public key, nickname, signature
-   - Receiving device verifies the signature and stores the mapping: `BLE_Device_ID -> PublicKey`
-
-5. **Identity Mapping**:
+4. **Identity Mapping**:
    - BLE layer knows devices by MAC address / device ID
-   - Application layer (GSG) knows peers by Ed25519 public key
-   - Bitchat maintains the mapping between these identities
+   - Application layer knows peers by Ed25519 public key
+   - SGN maintains the mapping between these identities
 
 ### DO NOT:
-- ❌ Use a single fixed service UUID for all devices
-- ❌ Filter scans to only look for specific UUIDs during discovery
-- ❌ Assume a device is a Bitchat peer before service discovery
+- ❌ Use a fully random UUID with no shared prefix
+- ❌ Connect to every BLE device to check if it's an SGN peer
 - ❌ Assume UUID uniqueness means peer uniqueness (verify via ANNOUNCE)
 
 ### DO:
-- ✅ Derive unique service UUID from each device's public key
-- ✅ Scan broadly for all devices with service UUIDs
-- ✅ Connect to devices, then perform service discovery to check for Bitchat characteristic
-- ✅ Disconnect from non-Bitchat devices after service discovery
-- ✅ Exchange ANNOUNCE packets after confirming Bitchat peer
+- ✅ Use fixed Grassroots prefix + public-key-derived suffix
+- ✅ Filter scans by Grassroots prefix to find SGN devices
+- ✅ Exchange ANNOUNCE packets after BLE connection
 - ✅ Maintain BLE Device ID ↔ Public Key mapping
 
-## NO Store-and-Forward
+---
 
-**IMPORTANT**: SGN does NOT implement store-and-forward messaging. Relay is **real-time only**.
+## IP Transport (LibP2P: UDX/TCP + Noise XX)
 
-- Messages to offline peers simply **fail** - they are NOT cached
-- The sender must retry later when the peer is online
-- Relay peers do NOT queue or cache messages — if the recipient is unreachable from the relay peer too, the forward fails immediately
-- If a peer is unreachable via any path (direct BLE, direct iroh, or relay through a connected peer), `send()` returns `false`
+**IMPORTANT**: The IP transport uses **libp2p** with **UDX** (primary, reliable multiplexed streams over UDP) and **TCP** (fallback). All connections are secured with **Noise XX** (Curve25519 DH, ChaCha20-Poly1305, SHA-256) for mutual authentication and forward secrecy.
+
+### Identity
+
+Each agent's **Ed25519 public key IS the transport identity**. The same key is used for:
+- BLE advertising (UUID suffix)
+- LibP2P Noise XX authentication
+- Message addressing (`send(pubKey, payload)`)
+- madGLP agent identity
+
+LibP2P generates a `PeerId` from the Ed25519 key, but the SGN public key remains the canonical identity. The runtime maintains the bidirectional mapping `PeerId ↔ SGN PublicKey`.
+
+### GLP Servers (Friends with Public IPs)
+
+A **GLP server** is an ordinary SGN agent that happens to have a **globally routable IP address** (typically PuIv6, but also PuIv4). It requires no special protocol — it is a regular peer that participates in the social graph and speaks the same networking API.
+
+Any friend with a globally routable address can serve as a GLP server. This includes:
+- **Smartphones on carriers that assign public IPv6** (increasingly common)
+- **Devices on networks with public IPv4** (less common for mobile)
+- **Dedicated always-on servers** (for reliability, but not required)
+
+GLP servers perform **signaling**, not relaying:
+1. **Address registration**: Mobile agents connect to their GLP server friend via libp2p and report their current public IP:port
+2. **Address notification**: When agent A wants to reach agent B, the GLP server provides A with B's registered address (and vice versa)
+3. **Hole-punch coordination**: The GLP server instructs both agents to begin simultaneous UDP sends to each other's addresses, enabling NAT traversal
+
+**Key properties**:
+- **Federated**: Anyone can be a GLP server. An agent may befriend multiple GLP servers for redundancy. No single point of failure.
+- **Not a relay**: GLP servers do NOT carry application data. Only signaling.
+- **Just a friend**: A GLP server is an ordinary peer in the social graph. No special role in the protocol.
+- **Symmetric NAT fallback**: When hole-punching fails (symmetric NAT ↔ symmetric NAT), the GLP server can fall back to **application-level message forwarding** through the social graph (peer relay).
+
+### NAT Traversal via UDP Hole-Punching
+
+Most mobile devices are behind NAT. UDP hole-punching enables two NATed agents to establish a direct connection, coordinated by their mutual GLP server friend:
+
+1. Agent A and agent B both maintain a libp2p connection to GLP server S and have registered their public IP:port with S
+2. A requests a connection to B through S
+3. S sends B's public IP:port to A and A's public IP:port to B
+4. A sends a UDP packet to B's address — this opens a mapping in A's NAT
+5. B sends a UDP packet to A's address — this opens a mapping in B's NAT
+6. Subsequent packets flow directly between A and B through the opened NAT mappings
+
+This works for cone NAT (full-cone, restricted-cone, port-restricted cone). For symmetric NAT, hole-punching may fail, and the GLP server falls back to forwarding via peer relay.
+
+### Can Smartphones Be GLP Servers?
+
+Yes. Many mobile carriers assign globally routable IPv6 addresses to smartphones. A phone with PuIv6:
+- **IS directly reachable** — can receive incoming UDP packets
+- **CAN coordinate hole-punching** — both NATed friends connect to it, it exchanges their addresses
+- **Less reliable than a dedicated server** — goes offline, changes carriers, battery constraints
+- **Mitigated by redundancy** — befriend multiple GLP server peers
+
+This is the grassroots model: no dedicated infrastructure required. Peers with public IPs naturally emerge as signaling nodes.
+
+### Peer Discovery
+
+LibP2P does NOT discover peers autonomously (DHT is disabled). Discovery happens via:
+1. **BLE ANNOUNCE packets** — include the sender's IP addresses
+2. **mDNS** — automatic discovery on the same LAN (no BLE required)
+3. **Out-of-band exchange** — QR code, link sharing
+4. After discovery, the app calls `send(pubKey, payload)` — the networking layer routes via the best available transport
 
 ### DO NOT:
-- ❌ Cache messages for offline peers
-- ❌ Implement store-and-forward queues
-- ❌ Automatically retry sending to offline peers
-- ❌ Hold messages in memory waiting for peers to reconnect
-- ❌ Queue messages at relay peers for later delivery
+- ❌ Require a centralized bootstrap server (use federated GLP server friends)
+- ❌ Assume libp2p has built-in peer discovery (DHT is disabled)
+- ❌ Use libp2p Circuit Relay as the primary NAT traversal (use GLP-server-coordinated hole-punching)
 
 ### DO:
-- ✅ Try direct transports first (BLE, then iroh)
-- ✅ If direct fails, try forwarding through connected peers that can reach the recipient
-- ✅ Return `false` immediately if no path exists (direct or relayed)
-- ✅ Let the application layer handle retry logic if needed
+- ✅ Use Ed25519 public key as the canonical identity (libp2p PeerId derived from it)
+- ✅ Use Noise XX pattern for mutual authentication and forward secrecy
+- ✅ Use GLP server friends (peers with public IPs) for signaling and hole-punch coordination
+- ✅ Befriend multiple GLP servers for redundancy
+- ✅ Use BLE ANNOUNCE and mDNS for peer discovery
+
+---
+
+## Transport Layer Settings
+
+### Transport Priority
+When sending a message, transports are tried in this order:
+1. **Bluetooth (BLE)** — preferred; faster, no Internet needed, works for nearby peers
+2. **LibP2P (Internet)** — fallback; UDX/TCP, works globally but requires Internet
+3. **Peer relay (forwarding)** — last resort; forward through a connected peer that can reach the recipient
+
+### Disabling Transports
+- When Bluetooth is disabled: stop advertising, stop scanning, no BLE communication
+- When libp2p is disabled: stop libp2p endpoint, no Internet communication
+- At least one transport should remain enabled for the app to function
+
+### Per-Peer Addresses
+Each peer can have both a BLE address and a libp2p connection:
+- `PeerState.bleDeviceId` - BLE device ID (MAC on Android, UUID on iOS)
+- `PeerState.libp2pConnected` - whether libp2p connection is active
+- `PeerState.ipAddresses` - peer's known IP addresses (from ANNOUNCE or GLP server)
+- Messages route through the best available transport based on peer availability
+
+---
 
 ## Redux Architecture for Peers
 
@@ -143,7 +237,7 @@ All peer state is managed through Redux:
 // Read peers from Redux store
 Map<String, Peer> get _peers {
   return {
-    for (var p in appStore.state.peers.connectedPeers) 
+    for (var p in appStore.state.peers.connectedPeers)
       p.pubkeyHex: _peerStateToLegacy(p)
   };
 }
@@ -152,71 +246,10 @@ Map<String, Peer> get _peers {
 appStore.onChange.listen((_) => setState(() {}));
 ```
 
-## Transport Layer Settings
-
-### Transport Priority
-When sending a message, transports are tried in this order:
-1. **Bluetooth (BLE)** — preferred; faster, no Internet needed, works for nearby peers
-2. **iroh (Internet)** — fallback; works globally but requires Internet
-3. **Peer relay (forwarding)** — last resort; forward through a connected peer that can reach the recipient
-
-### Disabling Transports
-- When Bluetooth is disabled: stop advertising, stop scanning, no BLE communication
-- When iroh is disabled: stop iroh endpoint, no Internet communication
-- At least one transport should remain enabled for the app to function
-
-### Per-Peer Addresses
-Each peer can have both a BLE address and an iroh connection:
-- `PeerState.bleDeviceId` - BLE device ID (MAC on Android, UUID on iOS)
-- `PeerState.irohConnected` - whether iroh connection is active
-- `PeerState.irohRelayUrl` - iroh relay URL
-- `PeerState.irohDirectAddresses` - iroh direct addresses
-- Messages route through the best available transport based on peer availability
-
-## Iroh Connection Assumptions
-
-**IMPORTANT**: Iroh is a P2P networking library (iroh.computer) that uses QUIC over UDP. It does NOT use a DHT or bootstrap nodes.
-
-### How Iroh Connects Peers
-
-1. **Identity = NodeId**: Each peer's Ed25519 public key IS their iroh NodeId. No separate addressing.
-2. **Relay servers** (e.g., `https://use1-1.relay.iroh.network.`) provide NAT traversal:
-   - Connections start through relay when peers are behind NAT/firewalls
-   - Iroh automatically hole-punches and migrates to direct connections when possible
-   - Relay servers are NOT message relays — they only facilitate connection establishment
-3. **No bootstrap node required**: Iroh does not use DHT/Kademlia. Peer discovery is handled at the application layer via BLE ANNOUNCE packets.
-4. **Direct connections**: If peers have public IPs or are on the same LAN, relay is not needed.
-
-### Peer Discovery Flow
-
-Iroh does NOT discover peers on its own. Discovery happens via:
-1. **BLE ANNOUNCE** packets — include the sender's iroh relay URL + direct addresses
-2. **Out-of-band** exchange (e.g., QR code, manual entry)
-3. After discovery, the app calls `connectToNode(nodeIdHex, relayUrl, directAddresses)` to establish an iroh connection
-
-### Connection Requirements
-
-| Scenario | Internet Required? | Notes |
-|----------|-------------------|-------|
-| Same LAN / public IP | No | Direct addresses suffice |
-| Behind NAT/firewall | Yes | Needs relay server for hole punching |
-| No relay configured | Only works with direct reachability | |
-
-### DO NOT:
-- ❌ Assume iroh has built-in peer discovery (it doesn't)
-- ❌ Use iroh relay servers to relay/store messages (they only do NAT traversal)
-- ❌ Require a custom bootstrap/signaling server
-
-### DO:
-- ✅ Use BLE ANNOUNCE for peer discovery (includes iroh addresses)
-- ✅ Pass relay URL + direct addresses when connecting to a peer
-- ✅ Rely on iroh's automatic relay-to-direct migration
-- ✅ Use default iroh relay servers (`IrohConfig.defaultRelayUrls`)
-
 ## Code References
 
 - Service UUID derivation: `lib/src/models/identity.dart` → `bleServiceUuid` getter
 - Peripheral advertising: `lib/src/ble/ble_peripheral_service.dart` → `startAdvertising()`
 - Central scanning: `lib/src/ble/ble_central_service.dart` → `startScan()` and `_onScanResults()`
-- ANNOUNCE handling: `lib/src/transport/ble_transport_service.dart` → `_handleAnnounce()`
+- ANNOUNCE handling: `lib/src/routing/message_router.dart` → `_handleAnnounce()`
 - Redux store: `lib/src/store/` → `peers_state.dart`, `peers_actions.dart`, `peers_reducer.dart`
