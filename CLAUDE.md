@@ -2,221 +2,112 @@
 
 ## Critical: always be precise, critical, but helpful.
 
-## CRITICAL: NO Legacy or Compatibility Code — EVER
+## NO Legacy or Compatibility Code
 
-**IMPORTANT**: NEVER write backward-compatible code, migration shims, or compatibility layers. This applies to ALL code changes including protocol changes, API changes, data format changes, and refactors.
-
-- ❌ **NO** `// Legacy - kept for compatibility` comments
-- ❌ **NO** keeping both old and new implementations
-- ❌ **NO** backward-compatible encoding/decoding (e.g., "old receivers will still parse this")
-- ❌ **NO** migration paths or version-gated behavior
-- ❌ **NO** fallback logic for old formats or protocols
-- ✅ **DO** fully replace old code with new implementation
-- ✅ **DO** remove unused imports and dead code
-- ✅ **DO** update all call sites when changing APIs
-- ✅ **DO** change protocols/formats cleanly without worrying about old versions
-- ❌ **NO** `PeerStore` - use Redux store (`AppState.peers`) only
+NEVER write backward-compatible code, migration shims, or compatibility layers. Fully replace old code. Remove dead code. Update all call sites. No `PeerStore` — use Redux store (`AppState.peers`) only.
 
 ---
 
 ## Peer Relay / Friend Forwarding
 
-**IMPORTANT**: SGN supports **peer-to-peer message forwarding** through trusted intermediate peers.
+SGN supports **single-hop peer-to-peer message forwarding** through trusted intermediate peers.
 
-If a peer cannot reach the recipient directly (neither via BLE nor iroh), it MAY forward the message through a connected peer that **can** reach the recipient.
+If Peer A can't reach Peer B directly (BLE or iroh), it forwards through Peer C who is connected to both. Mixed-transport forwarding is supported (e.g., A→C via BLE, C→B via iroh). End-to-end encryption required — relay peers MUST NOT read content. Any peer can relay; no special server role.
 
-### How It Works
-
-1. **Peer A** wants to send to **Peer B** but has no direct route (no BLE range, no iroh connection)
-2. **Peer C** is connected to both A and B (via any transport combination: BLE, iroh, or mixed)
-3. A sends the message to C with B's public key as the intended recipient
-4. C forwards the message to B on A's behalf
-
-### Rules
-
-- ✅ **DO** forward messages through connected peers when the recipient is not directly reachable
-- ✅ **DO** use end-to-end encryption — relay peers MUST NOT be able to read forwarded message content
-- ✅ **DO** support mixed-transport forwarding (e.g., A→C via BLE, C→B via iroh)
-- ✅ **DO** limit hop count (max 1 relay hop to keep it simple)
-- ✅ **DO** let any peer act as a relay — no special server role required
-- ❌ **NO** multi-hop chains (A→C→D→B) — only single-hop relay (A→C→B)
-- ❌ **NO** storing messages for later delivery — relay is real-time only; if C cannot reach B right now, the forward fails
-- ❌ **NO** automatic retry or queuing at the relay peer
+- **Max 1 relay hop** (A→C→B only, no A→C→D→B)
+- **Real-time only** — no store-and-forward, no queuing at relay peers
+- **No automatic retry** — if relay can't reach recipient now, forward fails immediately
+- `send()` returns `false` if no path exists (direct or relayed)
 
 ---
 
 ## BLE Service UUID Architecture
 
-**IMPORTANT**: Each Bitchat device MUST advertise its own **unique** service UUID derived from its public key.
+Each device advertises a **unique** service UUID = `last_128_bits(Ed25519_publicKey)`.
 
-### Why Unique UUIDs?
+**Flow**: Scan broadly for all devices → Connect → GATT service discovery → Check for Bitchat characteristic (`0000ff01-0000-1000-8000-00805f9b34fb`) → If absent, disconnect (not a peer) → If present, exchange ANNOUNCE packets (full pubkey, nickname, signature) → Verify signature → Store `BLE_Device_ID ↔ PublicKey` mapping.
 
-1. **Identity**: The service UUID is derived from the device's Ed25519 public key (last 128 bits)
-2. **Security**: Provides cryptographic binding between BLE identity and cryptographic identity
-3. **Discovery**: Devices scan broadly and discover ALL devices with service UUIDs
-4. **Verification**: After connection, devices exchange ANNOUNCE packets containing full public keys and verify identity
+- Scan ALL devices (no UUID filtering during scan)
+- Cannot know if a device is a Bitchat peer until AFTER service discovery
+- Verify identity via ANNOUNCE, not UUID alone
 
-### How It Works
-
-1. **Advertising (Peripheral Mode)**:
-   - Each device advertises with UUID = `last_128_bits(publicKey)`
-   - Example: Device A with pubkey `0x1234...` advertises UUID `12345678-9abc-def0-1234-567890abcdef`
-
-2. **Scanning (Central Mode)**:
-   - Devices scan for ALL devices advertising ANY service UUID
-   - Do NOT filter by specific UUID during scan
-   - The scan is opportunistic - we discover any device that might be a peer
-
-3. **Connection & Service Discovery**:
-   - After BLE connection established, perform GATT service discovery
-   - Check if device has the Bitchat GATT characteristic (UUID: `0000ff01-0000-1000-8000-00805f9b34fb`)
-   - If characteristic NOT found → disconnect (not a Bitchat peer, e.g., headphones)
-   - If characteristic found → it's a Bitchat peer, proceed to step 4
-   
-   **IMPORTANT**: We cannot know if a device is a Bitchat peer until AFTER connection and service discovery.
-   This is why we connect to all devices and disconnect from non-peers after discovery.
-
-4. **ANNOUNCE Exchange & Verification**:
-   - After service discovery confirms Bitchat peer, exchange ANNOUNCE packets
-   - ANNOUNCE contains: full public key, nickname, signature
-   - Receiving device verifies the signature and stores the mapping: `BLE_Device_ID -> PublicKey`
-
-5. **Identity Mapping**:
-   - BLE layer knows devices by MAC address / device ID
-   - Application layer (GSG) knows peers by Ed25519 public key
-   - Bitchat maintains the mapping between these identities
-
-### DO NOT:
-- ❌ Use a single fixed service UUID for all devices
-- ❌ Filter scans to only look for specific UUIDs during discovery
-- ❌ Assume a device is a Bitchat peer before service discovery
-- ❌ Assume UUID uniqueness means peer uniqueness (verify via ANNOUNCE)
-
-### DO:
-- ✅ Derive unique service UUID from each device's public key
-- ✅ Scan broadly for all devices with service UUIDs
-- ✅ Connect to devices, then perform service discovery to check for Bitchat characteristic
-- ✅ Disconnect from non-Bitchat devices after service discovery
-- ✅ Exchange ANNOUNCE packets after confirming Bitchat peer
-- ✅ Maintain BLE Device ID ↔ Public Key mapping
-
-## NO Store-and-Forward
-
-**IMPORTANT**: SGN does NOT implement store-and-forward messaging. Relay is **real-time only**.
-
-- Messages to offline peers simply **fail** - they are NOT cached
-- The sender must retry later when the peer is online
-- Relay peers do NOT queue or cache messages — if the recipient is unreachable from the relay peer too, the forward fails immediately
-- If a peer is unreachable via any path (direct BLE, direct iroh, or relay through a connected peer), `send()` returns `false`
-
-### DO NOT:
-- ❌ Cache messages for offline peers
-- ❌ Implement store-and-forward queues
-- ❌ Automatically retry sending to offline peers
-- ❌ Hold messages in memory waiting for peers to reconnect
-- ❌ Queue messages at relay peers for later delivery
-
-### DO:
-- ✅ Try direct transports first (BLE, then iroh)
-- ✅ If direct fails, try forwarding through connected peers that can reach the recipient
-- ✅ Return `false` immediately if no path exists (direct or relayed)
-- ✅ Let the application layer handle retry logic if needed
+---
 
 ## Redux Architecture for Peers
 
-All peer state is managed through Redux:
+All peer state via Redux (`AppState.peers` → `PeersState`):
+- `discoveredBlePeers: Map<String, DiscoveredPeerState>` — pre-ANNOUNCE BLE devices
+- `peers: Map<String, PeerState>` — post-ANNOUNCE identified peers
 
-### State Structure
-- `AppState.peers` → `PeersState`
-  - `discoveredBlePeers: Map<String, DiscoveredPeerState>` - Pre-ANNOUNCE BLE devices
-  - `peers: Map<String, PeerState>` - Post-ANNOUNCE identified peers
+**Actions**: `BleDeviceDiscoveredAction`, `BleDeviceConnectedAction`, `BleDeviceDisconnectedAction`, `PeerAnnounceReceivedAction`, `PeerRssiUpdatedAction`, `StaleDiscoveredBlePeersRemovedAction`, `StalePeersRemovedAction`
 
-### Key Actions
-- `BleDeviceDiscoveredAction` - BLE scan found a device
-- `BleDeviceConnectedAction` / `BleDeviceDisconnectedAction` - Connection state
-- `PeerAnnounceReceivedAction` - ANNOUNCE packet received (peer identified)
-- `PeerRssiUpdatedAction` - Signal strength updated
-- `StaleDiscoveredBlePeersRemovedAction` / `StalePeersRemovedAction` - Cleanup
+---
 
-### UI Pattern
-```dart
-// Read peers from Redux store
-Map<String, Peer> get _peers {
-  return {
-    for (var p in appStore.state.peers.connectedPeers) 
-      p.pubkeyHex: _peerStateToLegacy(p)
-  };
-}
+## Transport Layer
 
-// Subscribe to store changes
-appStore.onChange.listen((_) => setState(() {}));
-```
+**Priority**: BLE (preferred) → iroh (fallback) → Peer relay (last resort)
 
-## Transport Layer Settings
+**Per-peer state**: `PeerState.bleDeviceId`, `PeerState.irohConnected`, `PeerState.irohRelayUrl`, `PeerState.irohDirectAddresses`. Messages route through best available transport.
 
-### Transport Priority
-When sending a message, transports are tried in this order:
-1. **Bluetooth (BLE)** — preferred; faster, no Internet needed, works for nearby peers
-2. **iroh (Internet)** — fallback; works globally but requires Internet
-3. **Peer relay (forwarding)** — last resort; forward through a connected peer that can reach the recipient
+**Disabling**: When BLE disabled — stop advertising/scanning. When iroh disabled — stop endpoint. At least one transport must remain enabled.
 
-### Disabling Transports
-- When Bluetooth is disabled: stop advertising, stop scanning, no BLE communication
-- When iroh is disabled: stop iroh endpoint, no Internet communication
-- At least one transport should remain enabled for the app to function
+---
 
-### Per-Peer Addresses
-Each peer can have both a BLE address and an iroh connection:
-- `PeerState.bleDeviceId` - BLE device ID (MAC on Android, UUID on iOS)
-- `PeerState.irohConnected` - whether iroh connection is active
-- `PeerState.irohRelayUrl` - iroh relay URL
-- `PeerState.irohDirectAddresses` - iroh direct addresses
-- Messages route through the best available transport based on peer availability
+## Iroh Connection
 
-## Iroh Connection Assumptions
+Iroh (iroh.computer) uses QUIC/UDP. No DHT, no bootstrap nodes.
 
-**IMPORTANT**: Iroh is a P2P networking library (iroh.computer) that uses QUIC over UDP. It does NOT use a DHT or bootstrap nodes.
+- **Identity = NodeId**: Ed25519 public key IS the iroh NodeId
+- **Relay servers** provide NAT traversal only (not message relaying); iroh auto-migrates to direct connections via hole-punching
+- **No built-in peer discovery**: Discovery happens via BLE ANNOUNCE (includes iroh relay URL + direct addresses) or out-of-band (QR code, manual)
+- Connect via `connectToNode(nodeIdHex, relayUrl, directAddresses)`
+- Use default relay servers (`IrohConfig.defaultRelayUrls`)
 
-### How Iroh Connects Peers
-
-1. **Identity = NodeId**: Each peer's Ed25519 public key IS their iroh NodeId. No separate addressing.
-2. **Relay servers** (e.g., `https://use1-1.relay.iroh.network.`) provide NAT traversal:
-   - Connections start through relay when peers are behind NAT/firewalls
-   - Iroh automatically hole-punches and migrates to direct connections when possible
-   - Relay servers are NOT message relays — they only facilitate connection establishment
-3. **No bootstrap node required**: Iroh does not use DHT/Kademlia. Peer discovery is handled at the application layer via BLE ANNOUNCE packets.
-4. **Direct connections**: If peers have public IPs or are on the same LAN, relay is not needed.
-
-### Peer Discovery Flow
-
-Iroh does NOT discover peers on its own. Discovery happens via:
-1. **BLE ANNOUNCE** packets — include the sender's iroh relay URL + direct addresses
-2. **Out-of-band** exchange (e.g., QR code, manual entry)
-3. After discovery, the app calls `connectToNode(nodeIdHex, relayUrl, directAddresses)` to establish an iroh connection
-
-### Connection Requirements
-
-| Scenario | Internet Required? | Notes |
-|----------|-------------------|-------|
-| Same LAN / public IP | No | Direct addresses suffice |
-| Behind NAT/firewall | Yes | Needs relay server for hole punching |
-| No relay configured | Only works with direct reachability | |
-
-### DO NOT:
-- ❌ Assume iroh has built-in peer discovery (it doesn't)
-- ❌ Use iroh relay servers to relay/store messages (they only do NAT traversal)
-- ❌ Require a custom bootstrap/signaling server
-
-### DO:
-- ✅ Use BLE ANNOUNCE for peer discovery (includes iroh addresses)
-- ✅ Pass relay URL + direct addresses when connecting to a peer
-- ✅ Rely on iroh's automatic relay-to-direct migration
-- ✅ Use default iroh relay servers (`IrohConfig.defaultRelayUrls`)
+---
 
 ## Code References
 
-- Service UUID derivation: `lib/src/models/identity.dart` → `bleServiceUuid` getter
-- Peripheral advertising: `lib/src/ble/ble_peripheral_service.dart` → `startAdvertising()`
-- Central scanning: `lib/src/ble/ble_central_service.dart` → `startScan()` and `_onScanResults()`
-- ANNOUNCE handling: `lib/src/transport/ble_transport_service.dart` → `_handleAnnounce()`
+- Service UUID: `lib/src/models/identity.dart` → `bleServiceUuid`
+- BLE peripheral: `lib/src/ble/ble_peripheral_service.dart` → `startAdvertising()`
+- BLE central: `lib/src/ble/ble_central_service.dart` → `startScan()`, `_onScanResults()`
+- ANNOUNCE: `lib/src/transport/ble_transport_service.dart` → `_handleAnnounce()`
 - Redux store: `lib/src/store/` → `peers_state.dart`, `peers_actions.dart`, `peers_reducer.dart`
+
+---
+
+## Future Work: Geographic-Optimized Multi-Hop Routing (Geo-AODV)
+
+The current single-hop relay constraint exists because naive multi-hop requires expensive flooding-based route discovery (standard AODV broadcasts RREQ to all peers). In a mobile BLE mesh with volatile topology, this is wasteful and slow.
+
+**Geohash-guided AODV** can make multi-hop viable by constraining route discovery spatially:
+
+### Concept
+
+1. **Geohash in ANNOUNCE**: Each peer includes a truncated geohash (e.g., 5-6 chars, ~5km² precision) in its ANNOUNCE packet. Peers maintain a `nodeId → geohash` mapping for all known peers.
+2. **Directional RREQ**: When A needs to route to B and knows B's approximate geohash, A's RREQ is tagged with B's geohash. Intermediate peers only re-broadcast the RREQ if their own geohash is geographically "closer" to the destination's geohash (or within a configurable angular cone). This prunes the flood dramatically.
+3. **Geohash ring expansion**: If directional RREQ fails (no peers in the cone), expand the search radius by reducing geohash precision (fewer chars = larger area) and retry — analogous to expanding ring search in standard AODV, but spatially informed.
+4. **Route maintenance**: Standard AODV RERR (route error) messages when a hop breaks. Geo-awareness helps pick alternate next-hops that are still in the right direction.
+
+### Why Geohash?
+
+- **Hierarchical**: Truncating characters naturally widens the area — no complex distance math
+- **Prefix-matching**: Two peers sharing a geohash prefix are spatially close — fast comparison
+- **Privacy-preserving**: 5-char geohash (~5km²) reveals neighborhood, not exact location; can be further truncated or randomized with a per-session offset
+- **Compact**: 5-6 ASCII chars in an ANNOUNCE packet — negligible overhead
+
+### Tradeoffs vs. Current Single-Hop
+
+| | Single-hop (current) | Geo-AODV (future) |
+|---|---|---|
+| Complexity | Trivial | Moderate (RREQ/RREP/RERR state machines) |
+| Reach | 2 BLE hops max | Unbounded (with TTL cap) |
+| Latency | Low | Additive per hop |
+| Privacy | 1 relay sees metadata | N relays see metadata; geohash reveals approximate location |
+| Use case | Friends nearby | Dense mesh (protests, festivals, disasters) |
+
+### Open Questions
+
+- **Location permission**: Mobile OS requires explicit user consent for location; geohash is opt-in
+- **TTL cap**: Practical limit likely 3-4 hops before latency and reliability degrade
+- **Hybrid**: Geo-AODV for BLE mesh, iroh for long-range — geo-routing only makes sense for the physical-proximity transport
+- **Spoofing**: A peer could lie about its geohash to attract or deflect traffic; mitigations include cross-referencing BLE RSSI or requiring signed geohash attestations from multiple neighbors
