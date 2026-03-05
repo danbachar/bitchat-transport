@@ -41,7 +41,7 @@
 
 SGN uses two transport layers---\textbf{BLE} (short-range, no Internet) and \textbf{libp2p} (UDX/TCP over UDP, global reach). All messages are \textbf{direct}---delivered over a connection between sender and recipient. Routable friends (peers with globally routable IP addresses) provide \textbf{signaling} to help NATed peers establish direct connections via UDP hole-punching.
 
-\textbf{Key constraints}: (1)~\textbf{Fair message delivery}: every \texttt{send()} is eventually delivered---the sender queues locally when the recipient is temporarily unreachable; (2)~Messages are always direct (no forwarding through intermediate peers); (3)~Transport priority: BLE $\to$ libp2p (direct).
+\textbf{Key constraints}: (1)~\textbf{Fair message delivery}: every \texttt{send()} is eventually delivered---the sender queues locally when the recipient is temporarily unreachable; (2)~Messages are always direct (no forwarding through intermediate peers); (3)~Both BLE and libp2p are always enabled.
 
 \textbf{Address types}: BLE-only (no IP), Private IPv4 (PIv4, behind NAT), Public IPv4 (PuIv4), Link-local IPv6 (LLv6, not routable), Public IPv6 (PuIv6).
 
@@ -72,17 +72,16 @@ Hole-punching (Section~\ref{sec:routable-friend}) works reliably for all three c
 
 \begin{table}[H]
 \centering\small
-\begin{tabular}{L{3.5cm} C{1cm} C{1cm} L{5.5cm}}
+\begin{tabular}{L{4cm} C{2cm} L{5.5cm}}
 \toprule
-\textbf{Address Combination} & \textbf{BLE} & \textbf{LP2P} & \textbf{Notes} \\
+\textbf{Scenario} & \textbf{Reachable?} & \textbf{Notes} \\
 \midrule
-Any + BLE-only peer & \yes & \no & BLE always works when co-located. No IP = no libp2p. \\
+Any address combination & \yes & BLE always works when co-located. \\
 \rowcolor{lightgray}
-PIv4 / PIv4 (same LAN) & \yes & \yes & mDNS discovers peer on LAN. \\
-PIv4 / PuIv4 & \yes & \yes & Direct to public peer. \\
+Same LAN (PIv4 / PIv4) & \yes & BLE + mDNS discovers peer on LAN. \\
+Both have routable IP & \yes & BLE + direct libp2p. Optimal. \\
 \rowcolor{lightgray}
-PuIv6 / PuIv6 & \yes & \yes & Direct IPv6/UDX. Optimal. \\
-IPv4-only / IPv6-only & \yes & \dgr & Cross-protocol needs dual-stack routable friend. \\
+IPv4-only / IPv6-only & \yes & BLE works. LibP2P cross-protocol needs dual-stack routable friend for hole-punch. \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -93,17 +92,17 @@ IPv4-only / IPv6-only & \yes & \dgr & Cross-protocol needs dual-stack routable f
 
 \begin{table}[H]
 \centering\small
-\begin{tabular}{L{3.5cm} C{1cm} C{5.5cm}}
+\begin{tabular}{L{4cm} C{2cm} L{5.5cm}}
 \toprule
-\textbf{Address Combination} & \textbf{LP2P} & \textbf{Notes} \\
+\textbf{Scenario} & \textbf{Reachable?} & \textbf{Notes} \\
 \midrule
-Either peer BLE-only or LLv6 & \no & \textbf{Unreachable remotely}. Sender queues locally until co-located. \\
+Either peer has no IP & \no & \textbf{Unreachable remotely}. Sender queues until co-located. \\
 \rowcolor{lightgray}
-PIv4 / PIv4 (both NATed) & \dgr & Need mutual routable friend for hole-punch coordination. Symmetric NAT = unreachable remotely; sender queues. \\
-Any / PuIv4 or PuIv6 & \yes & Direct connection to public peer. \\
+Both NATed (cone NAT) & \dgr & Need mutual routable friend for hole-punch. \\
+Both NATed (symmetric) & \no & Hole-punch fails. Sender queues until co-located or network changes. \\
 \rowcolor{lightgray}
-IPv4-only / IPv6-only & \dgr & Cross-protocol: needs dual-stack routable friend. \\
-PuIv6 / PuIv6 & \yes & Direct IPv6/UDX. Best case. \\
+One or both have public IP & \yes & Direct connection. Best case. \\
+IPv4-only / IPv6-only & \dgr & Cross-protocol: needs dual-stack routable friend for hole-punch. \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -167,20 +166,17 @@ Some carriers assign globally routable IPv6 addresses but \textbf{firewall incom
 
 \begin{table}[H]
 \centering\small
-\begin{tabular}{L{4cm} C{1cm} C{1cm} L{5cm}}
+\begin{tabular}{L{4cm} C{2cm} L{5.5cm}}
 \toprule
-\textbf{Scenario} & \textbf{BLE} & \textbf{LP2P} & \textbf{Impact} \\
+\textbf{Scenario} & \textbf{Impact} & \textbf{Notes} \\
 \midrule
-WiFi $\to$ cellular (IP change) & \na & \no & \textbf{All connections die}. UDX/TCP bound to 4-tuple. Must reconnect to routable friends, re-register address, re-establish peer connections. \textbf{10--30s blackout.} Sender queues locally during gap. \\
+IP change (WiFi$\to$cell, WiFi$\to$WiFi) & Blackout & \textbf{All libp2p connections die} (4-tuple bound). Must reconnect to routable friends, re-register, re-hole-punch. \textbf{10--30s gap.} BLE unaffected. Sender queues. \\
 \rowcolor{lightgray}
-WiFi A $\to$ WiFi B (diff LAN) & \na & \no & Same---new IP kills all connections. \\
-Peer enters BLE range & \yes & -- & BLE scan discovers peer. New transport available. \\
+Peer enters BLE range & Gained & BLE scan discovers peer. Direct delivery possible. \\
+Peer leaves BLE range & Partial & BLE lost; libp2p unaffected if both have IP. \\
 \rowcolor{lightgray}
-Peer leaves BLE range, has IP & \no & \yes & BLE drops; libp2p unaffected. \\
-Peer leaves BLE, no Internet & \no & \no & Both transports lost. Sender queues locally. \\
-\rowcolor{lightgray}
-On train, passing through cells & \no & \no & Constant reconnects. Effectively unusable for libp2p. BLE during stops. Sender queues locally. \\
-Airplane mode + BLE on & \yes & \no & BLE works for co-located peers. \\
+Peer leaves BLE, no Internet & Lost & Both transports lost. Sender queues. \\
+On train, passing through cells & Lost & Constant IP changes. Effectively unusable for libp2p. BLE during stops. Sender queues. \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -193,24 +189,23 @@ Airplane mode + BLE on & \yes & \no & BLE works for co-located peers. \\
 
 \begin{table}[H]
 \centering\small
-\begin{tabular}{L{4.5cm} C{1.3cm} C{1.3cm} L{4cm}}
+\begin{tabular}{L{4.5cm} C{2cm} L{5cm}}
 \toprule
-\textbf{Scenario} & \textbf{BLE} & \textbf{LibP2P} & \textbf{Notes} \\
+\textbf{Scenario} & \textbf{Reachable?} & \textbf{Notes} \\
 \midrule
-Co-located, same LAN & \yes & \yes & Both transports available. \\
-Co-located, BLE range & \yes & \na & BLE provides connectivity floor. \\
+Co-located & \yes & BLE always works. LibP2P also if both have IP. \\
 \rowcolor{lightgray}
-Remote, both NATed & \no & \dgr$^\dagger$ & Hole-punch via routable friend. \\
-Remote, one public & \no & \yes & Direct connection. \\
+Remote, both NATed (cone) & \dgr$^\dagger$ & Hole-punch via mutual routable friend. \\
+Remote, both NATed (symmetric) & \no & Hole-punch fails. Sender queues. \\
 \rowcolor{lightgray}
-Remote, BLE-only peer & \no & \no & Unreachable. Sender queues. \\
-Mobility (IP change) & -- & \no & Reconnect needed. Sender queues. \\
+Remote, one/both public & \yes & Direct connection. \\
+Remote, peer has no IP & \no & Unreachable. Sender queues until co-located. \\
 \rowcolor{lightgray}
-BLE-only (no Internet) & \yes & \no & Co-located peers only. \\
-All routable friends offline & \na & \dgr & Direct to public peers only. \\
+Mobility (IP change) & Blackout & 10--30s reconnect. Sender queues. \\
+All routable friends offline & \dgr & Direct to public peers only; NATed peers unreachable. \\
 \bottomrule
 \end{tabular}
-\caption*{\small $^\dagger$Requires mutual routable friend for hole-punch coordination. Symmetric NAT$\leftrightarrow$symmetric NAT: unreachable remotely.}
+\caption*{\small $^\dagger$Requires mutual routable friend for hole-punch coordination.}
 \end{table}
 
 BLE and libp2p are \textbf{complementary}: BLE provides resilient local connectivity immune to network configuration; libp2p provides global reach immune to physical proximity. \textbf{Local queuing at the sender} ensures fair message delivery across transient disconnections---messages are always delivered directly once a path is available.

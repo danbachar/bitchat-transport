@@ -170,26 +170,19 @@ LibP2P does NOT discover peers autonomously (DHT is disabled). Discovery happens
 
 ---
 
-## Transport Layer Settings
+## Transport Layer
 
-### Transport Priority
-When sending a message, transports are tried in this order:
-1. **Bluetooth (BLE)** — preferred; faster, no Internet needed, works for nearby peers
-2. **LibP2P (Internet)** — fallback; UDX/TCP, works globally but requires Internet
+Both BLE and libp2p are always enabled. Messages are sent directly via the best available transport:
+- **BLE** — preferred for co-located peers; faster, no Internet needed
+- **LibP2P** — for remote peers; UDX/TCP, works globally
 
 If neither transport can reach the recipient, the sender queues locally until a direct path becomes available.
-
-### Disabling Transports
-- When Bluetooth is disabled: stop advertising, stop scanning, no BLE communication
-- When libp2p is disabled: stop libp2p endpoint, no Internet communication
-- At least one transport should remain enabled for the app to function
 
 ### Per-Peer Addresses
 Each peer can have both a BLE address and a libp2p connection:
 - `PeerState.bleDeviceId` - BLE device ID (MAC on Android, UUID on iOS)
 - `PeerState.libp2pConnected` - whether libp2p connection is active
 - `PeerState.ipAddresses` - peer's known IP addresses (from ANNOUNCE)
-- Messages are sent directly via the best available transport based on peer availability
 
 ---
 
