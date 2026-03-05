@@ -2,27 +2,20 @@
 
 \usepackage[margin=1in]{geometry}
 \usepackage{booktabs}
-\usepackage{longtable}
 \usepackage{array}
-\usepackage{multirow}
 \usepackage{xcolor}
 \usepackage{colortbl}
-\usepackage{tikz}
 \usepackage{enumitem}
 \usepackage{amsmath}
 \usepackage{hyperref}
 \usepackage{float}
-\usepackage{caption}
 \usepackage{tabularx}
-
-\usetikzlibrary{arrows.meta, positioning, shapes.geometric, calc}
 
 \definecolor{yes}{HTML}{2E7D32}
 \definecolor{no}{HTML}{C62828}
 \definecolor{partial}{HTML}{F57F17}
 \definecolor{degraded}{HTML}{E65100}
 \definecolor{lightgray}{HTML}{F5F5F5}
-\definecolor{sectionblue}{HTML}{1565C0}
 
 \newcommand{\yes}{\textcolor{yes}{\textbf{Yes}}}
 \newcommand{\no}{\textcolor{no}{\textbf{No}}}
@@ -41,664 +34,216 @@
 \begin{document}
 
 \maketitle
-\tableofcontents
-\newpage
 
 % =============================================================================
 \section{Introduction}
 % =============================================================================
 
-This document provides a comprehensive analysis of connectivity between Social Grassroots Networking (SGN) peers across all combinations of network address types, peer topologies, and mobility scenarios. SGN uses two transport layers:
+SGN uses two transport layers---\textbf{BLE} (short-range, no Internet) and \textbf{libp2p} (UDX/TCP, global reach)---plus \textbf{application-level peer relay} where a connected peer C forwards end-to-end encrypted messages between A and B when no direct path exists.
 
-\begin{itemize}
-  \item \textbf{BLE (Bluetooth Low Energy)} --- short-range, no Internet required, used for local peer discovery and communication
-  \item \textbf{LibP2P} (UDX/TCP) --- used for global connectivity beyond BLE range
-\end{itemize}
+\textbf{Key constraints}: (1)~No store-and-forward---unreachable means failure; (2)~Single-hop relay only (A$\to$C$\to$B, no multi-hop); (3)~Transport priority: BLE $\to$ libp2p $\to$ peer relay.
 
-In addition to direct transports, SGN supports \textbf{application-level peer relay}: a connected peer C can forward end-to-end encrypted messages between peers A and B when no direct path exists.
+\textbf{Address types}: BLE-only (no IP), Private IPv4 (PIv4, behind NAT), Public IPv4 (PuIv4), Link-local IPv6 (LLv6, not routable), Public IPv6 (PuIv6).
 
-\subsection{Key Constraints}
-
-\begin{enumerate}
-  \item \textbf{No store-and-forward}: If a peer is unreachable (even via relay), the message fails. No caching, no queuing. Relay is real-time only.
-  \item \textbf{Single-hop peer relay}: A connected peer C \textbf{may} forward messages from A to B if C can reach B. Messages are end-to-end encrypted; C cannot read them. Maximum one relay hop (no multi-hop chains A$\to$C$\to$D$\to$B).
-  \item \textbf{Transport priority}: BLE first, then libp2p (direct), then peer relay (last resort).
-\end{enumerate}
-
-\subsection{Address Types Under Analysis}
-
-\begin{table}[H]
-\centering
-\begin{tabular}{llp{7cm}}
-\toprule
-\textbf{Address Type} & \textbf{Abbreviation} & \textbf{Description} \\
-\midrule
-BLE only & BLE & Bluetooth Low Energy; $\sim$10--100m range, no IP stack \\
-Private IPv4 & PIv4 & Behind NAT (e.g., \texttt{192.168.x.x}, \texttt{10.x.x.x}); not routable from Internet \\
-Public IPv4 & PuIv4 & Directly routable IPv4; rare for mobile devices \\
-Link-local IPv6 & LLv6 & \texttt{fe80::/10}; only valid on local link, not routable \\
-Public IPv6 & PuIv6 & Globally routable IPv6; increasingly common on mobile carriers \\
-\bottomrule
-\end{tabular}
-\caption{Network address types evaluated in this document.}
-\end{table}
-
-\subsection{Peer Topology Definitions}
-
-We evaluate four peer topologies:
-
-\begin{enumerate}[label=\textbf{T\arabic*}]
-  \item \textbf{Friend Next to Me} --- Both peers are physically co-located ($<$30m). Both BLE and Internet transport are potentially available.
-  \item \textbf{Friend Far Away} --- Peers are geographically separated. Only Internet transport is possible. No BLE.
-  \item \textbf{Relay Peer (``Friend in the Middle'')} --- A third peer C exists between peers A and B. We evaluate whether C can facilitate A$\leftrightarrow$B communication via transport-level relay (Circuit Relay) or application-level message forwarding.
-  \item \textbf{Server} --- Either (a) public relay/bootstrap infrastructure, or (b) a custom always-on supernode with a stable public IP.
-\end{enumerate}
+\textbf{Topologies}: T1~(co-located, $<$30m), T2~(remote), T3~(relay peer ``friend in the middle''), T4~(server/supernode).
 
 % =============================================================================
 \section{Transport Mechanics}
 % =============================================================================
 
-\subsection{BLE Transport}
+\textbf{BLE}: 10--100m range, no IP required. Each device advertises a unique service UUID derived from its Ed25519 public key. After GATT service discovery confirms an SGN peer, ANNOUNCE packets are exchanged (public key, nickname, signature).
 
-\begin{itemize}
-  \item \textbf{Range}: Typically 10--30m indoors, up to 100m outdoors with line of sight.
-  \item \textbf{Discovery}: Each device advertises a unique service UUID derived from its Ed25519 public key. Scanning discovers all nearby BLE devices; service discovery confirms SGN peers.
-  \item \textbf{Data}: After GATT service discovery and ANNOUNCE exchange, data flows over the SGN GATT characteristic.
-  \item \textbf{No IP required}: BLE operates below the IP layer. Works without any Internet or WiFi connectivity.
-  \item \textbf{Symmetric}: Both peers must be in range; there is no multi-hop BLE.
-\end{itemize}
+\textbf{LibP2P}: UDX (primary) and TCP (fallback) transports, Noise encryption. Identity via separate Ed25519 keypair (PeerId $\neq$ SGN public key---requires double identity mapping). DHT disabled; mDNS enabled for LAN discovery. NAT traversal via AutoNAT v2, Circuit Relay v2, AutoRelay, and DCUtR hole-punching. Requires a bootstrap peer (\texttt{40.160.9.115}) for relay discovery.
 
-\subsection{LibP2P Transport}
-
-\begin{itemize}
-  \item \textbf{Transports}: Two transport protocols are available:
-    \begin{itemize}
-      \item \textbf{UDX} (UDP-based, custom protocol) --- primary transport, preferred for performance
-      \item \textbf{TCP} --- secondary, used for IPFS ecosystem interoperability and as firewall fallback
-    \end{itemize}
-  \item \textbf{Security}: Noise protocol for all connections (both UDX and TCP).
-  \item \textbf{Identity}: LibP2P uses its own Ed25519 keypair to generate a \texttt{PeerId}, \textbf{separate} from the SGN application-layer Ed25519 public key. This requires maintaining a double mapping:
-    \begin{enumerate}
-      \item BLE Device ID $\leftrightarrow$ LibP2P PeerId
-      \item LibP2P PeerId $\leftrightarrow$ SGN Public Key
-    \end{enumerate}
-  \item \textbf{Addressing}: Multiaddr format (e.g., \texttt{/ip4/1.2.3.4/tcp/4001/p2p/12D3Koo...})
-  \item \textbf{Application protocol}: \texttt{/gever/1.0.0} --- each message sent via a new stream (not persistent connection)
-  \item \textbf{DHT}: Supported but \textbf{disabled} (\texttt{enableDht = false}). SGN never uses Kademlia for peer discovery.
-  \item \textbf{mDNS}: \textbf{Enabled} (\texttt{enableMdns = true}). Provides automatic local network peer discovery without BLE.
-\end{itemize}
-
-\subsubsection{LibP2P NAT Traversal Stack}
-
-LibP2P provides a multi-layered NAT traversal strategy:
-
-\begin{enumerate}
-  \item \textbf{AutoNAT v2}: Probes reachability by asking other peers to dial back. Classifies the local NAT type (public, restricted, symmetric).
-  \item \textbf{Circuit Relay v2}: Public peers volunteer as relays. NATed peers reserve relay slots. Traffic flows: A $\to$ Relay Peer $\to$ B. \textit{Unlike dedicated relay servers, these are libp2p peers themselves.}
-  \item \textbf{AutoRelay}: Automatically discovers and connects to available relay peers when AutoNAT detects the node is behind NAT.
-  \item \textbf{DCUtR (Direct Connection Upgrade through Relay)}: After establishing a relayed connection, peers coordinate hole-punching to upgrade to a direct connection.
-\end{enumerate}
-
-\textbf{Address priority hierarchy} (highest to lowest):
-\begin{enumerate}
-  \item IPv6/UDX --- best performance, globally routable
-  \item IPv4/UDX --- common, good performance
-  \item IPv4/TCP --- IPFS interop, wider firewall compatibility
-  \item Circuit Relay --- last resort, highest latency
-\end{enumerate}
-
-\subsubsection{LibP2P Bootstrap Requirement}
-
-LibP2P \textbf{requires bootstrap peers} for relay discovery:
-
-\begin{verbatim}
-/ip4/40.160.9.115/tcp/4001/p2p/12D3KooWKnDdG3...
-/ip6/2604:2dc0:101:100::138f/tcp/4001/p2p/12D3KooWKnDdG3...
-\end{verbatim}
-
-These bootstrap peers serve as:
-\begin{itemize}
-  \item Initial connection points for newly started nodes
-  \item Relay reservation targets (via Circuit Relay v2)
-  \item AutoNAT probing partners
-\end{itemize}
-
-Without the bootstrap peer being reachable, a NATed node cannot discover relays and is limited to direct connections or mDNS.
-
-\subsubsection{LibP2P Peer Discovery}
-
-LibP2P does \textbf{not} discover peers autonomously (DHT is disabled). Discovery happens via:
-\begin{enumerate}
-  \item \textbf{BLE ANNOUNCE packets} --- peers discovered via BLE include their libp2p multiaddrs
-  \item \textbf{mDNS} --- automatic discovery on the same LAN (no BLE required)
-  \item \textbf{Out-of-band exchange} --- manual address sharing (QR code, link)
-  \item After discovery, the app calls \texttt{connectToHost(hostId, hostAddrs)} with learned addresses
-\end{enumerate}
-
-\subsection{Application-Level Peer Relay}
-
-In addition to the direct transports (BLE and libp2p), SGN supports \textbf{application-level message forwarding} through connected peers.
-
-\begin{itemize}
-  \item \textbf{How it works}: If Peer A cannot reach Peer B directly (neither BLE nor libp2p), but Peer C is connected to both A and B, then A can send the message to C, and C forwards it to B.
-  \item \textbf{Cross-transport}: C can receive via BLE from A and forward via libp2p to B (or any combination). This bridges transports that could not otherwise interoperate.
-  \item \textbf{End-to-end encrypted}: C sees only the encrypted envelope. It cannot read, modify, or inspect message content.
-  \item \textbf{Single hop only}: Only A$\to$C$\to$B is permitted. No multi-hop chains (A$\to$C$\to$D$\to$B).
-  \item \textbf{Real-time only}: If C cannot reach B right now, the forward fails immediately. C does not queue or cache messages.
-  \item \textbf{Any peer can relay}: No special server role required. Any connected peer can forward messages for others.
-\end{itemize}
-
-This is distinct from libp2p's Circuit Relay v2, which operates at the transport level. Application-level relay works \textit{across} transport boundaries and does not require C to have a public IP.
+\textbf{Application-level peer relay}: Any connected peer C can forward messages across transport boundaries (e.g., BLE$\to$libp2p). C sees only encrypted envelopes. Single hop, real-time only, no queuing. Distinct from Circuit Relay (which requires C to have a public IP and operates within libp2p only).
 
 % =============================================================================
-\section{Connectivity: Friend Next to Me (T1)}
+\section{Connectivity by Topology}
 % =============================================================================
 
-Both peers are within BLE range ($<$30m). Each row represents the peer's network address type. We evaluate whether each transport works.
+\subsection{T1: Co-located Peers ($<$30m)}
 
 \begin{table}[H]
-\centering
-\small
-\begin{tabular}{L{2.2cm} C{1.5cm} C{1.3cm} C{1.3cm} C{4.5cm}}
+\centering\small
+\begin{tabular}{L{3.5cm} C{1cm} C{1cm} L{5.5cm}}
 \toprule
-\textbf{My Addr} & \textbf{Peer Addr} & \textbf{BLE} & \textbf{LP2P} & \textbf{Notes} \\
+\textbf{Address Combination} & \textbf{BLE} & \textbf{LP2P} & \textbf{Notes} \\
 \midrule
-BLE only & BLE only & \yes & \no & BLE works. No IP = no libp2p. \\
+Any + BLE-only peer & \yes & \no & BLE always works when co-located. No IP = no libp2p. \\
 \rowcolor{lightgray}
-BLE only & PIv4 & \yes & \no & I have no IP; cannot use libp2p. \\
-BLE only & PuIv4 & \yes & \no & Same---I have no IP stack. \\
+PIv4 / PIv4 (same LAN) & \yes & \yes & mDNS discovers peer without relay. \\
+PIv4 / PuIv4 & \yes & \yes & Direct to public peer. \\
 \rowcolor{lightgray}
-BLE only & LLv6 & \yes & \no & Same. \\
-BLE only & PuIv6 & \yes & \no & Same. \\
-\midrule
-PIv4 & PIv4 & \yes & \yes$^*$ & \textbf{mDNS discovers peer on same LAN} without relay. If different LANs: needs bootstrap $\to$ relay. \\
-\rowcolor{lightgray}
-PIv4 & PuIv4 & \yes & \yes & Direct TCP or UDX to public peer. No relay needed. \\
-PIv4 & LLv6 & \yes & \prt & mDNS might discover on same link. UDX over link-local unreliable. \\
-\rowcolor{lightgray}
-PIv4 & PuIv6 & \yes & \dgr & Cross-protocol. Needs relay peer that bridges IPv4$\leftrightarrow$IPv6. Not guaranteed. \\
-\midrule
-PuIv4 & PuIv4 & \yes & \yes & Direct. No relay needed. \\
-\rowcolor{lightgray}
-PuIv4 & PIv4 & \yes & \yes & Peer connects to me directly or via relay. \\
-PuIv4 & LLv6 & \yes & \no & Link-local not routable. mDNS possible on same link only. \\
-\rowcolor{lightgray}
-PuIv4 & PuIv6 & \yes & \dgr & Cross-protocol relay uncertain. Relay peer must be dual-stack. \\
-\midrule
-LLv6 & LLv6 & \yes & \prt & mDNS on same link. UDX \textit{might} bind link-local. \\
-\rowcolor{lightgray}
-LLv6 & Any public & \yes & \no & Cannot reach bootstrap or peer. \\
-\midrule
-PuIv6 & PuIv6 & \yes & \yes & Direct IPv6/UDX. Optimal. \\
-\rowcolor{lightgray}
-PuIv6 & PIv4 & \yes & \dgr & Cross-protocol via relay. Relay must be dual-stack. \\
-PuIv6 & PuIv4 & \yes & \dgr & Same cross-protocol issue. \\
+PuIv6 / PuIv6 & \yes & \yes & Direct IPv6/UDX. Optimal. \\
+IPv4-only / IPv6-only & \yes & \dgr & Cross-protocol needs dual-stack relay peer. Not guaranteed. \\
 \bottomrule
 \end{tabular}
-\caption{Co-located connectivity (T1). $^*$mDNS provides same-LAN discovery without relay.}
 \end{table}
 
-\subsection{T1 Analysis}
+\textbf{Key insight}: BLE is always available when co-located, providing a reliable connectivity floor regardless of network configuration. Peer relay is unnecessary here.
 
-\textbf{Key insight}: When peers are co-located, \textbf{BLE is always available} regardless of network configuration. BLE provides the reliable connectivity floor.
-
-LibP2P adds value beyond BLE when co-located:
-\begin{itemize}
-  \item Higher throughput than BLE (UDX/TCP vs GATT characteristic writes)
-  \item \textbf{mDNS} discovers peers on the same LAN without needing BLE at all---useful when devices are on the same WiFi but beyond BLE range
-  \item TCP fallback works through firewalls that block UDP
-\end{itemize}
-
-\textbf{Cross-protocol weakness}: When one peer has only IPv4 and the other only IPv6, libp2p requires a dual-stack relay peer. Since relay peers are other libp2p nodes (not dedicated infrastructure), dual-stack availability is not guaranteed.
-
-\textbf{Peer relay impact on T1}: Minimal. Co-located peers already have BLE as a reliable direct transport. Peer relay is unnecessary when direct connectivity exists.
-
-% =============================================================================
-\section{Connectivity: Friend Far Away (T2)}
-% =============================================================================
-
-Peers are geographically separated. BLE is not available. Only libp2p can work.
+\subsection{T2: Remote Peers}
 
 \begin{table}[H]
-\centering
-\small
-\begin{tabular}{L{2.2cm} C{1.8cm} C{1.3cm} C{6cm}}
+\centering\small
+\begin{tabular}{L{3.5cm} C{1cm} C{5.5cm}}
 \toprule
-\textbf{My Addr} & \textbf{Peer Addr} & \textbf{LP2P} & \textbf{Notes} \\
+\textbf{Address Combination} & \textbf{LP2P} & \textbf{Notes} \\
 \midrule
-BLE only & Any & \no & No IP = no libp2p. \textbf{Unreachable.} \\
+Either peer BLE-only or LLv6 & \no & \textbf{Unreachable} without co-located relay peer. \\
 \rowcolor{lightgray}
-PIv4 & BLE only & \no & Peer has no IP. \textbf{Unreachable.} \\
-PIv4 & PIv4 & \dgr & Both NATed. Need bootstrap peer reachable. AutoRelay finds relay. DCUtR attempts hole-punch. More moving parts than dedicated relay. \\
+PIv4 / PIv4 (both NATed) & \dgr & Need bootstrap $\to$ AutoRelay $\to$ DCUtR. Symmetric NAT = relay-only. \\
+Any / PuIv4 or PuIv6 & \yes & Direct connection to public peer. \\
 \rowcolor{lightgray}
-PIv4 & PuIv4 & \yes & Direct to peer. Can use TCP or UDX. \\
-PIv4 & LLv6 & \no & Not routable. \\
-\rowcolor{lightgray}
-PIv4 & PuIv6 & \dgr & Need dual-stack relay peer. Not guaranteed in libp2p relay pool. \\
-\midrule
-PuIv4 & PIv4 & \yes & Peer uses relay then DCUtR to me. \\
-\rowcolor{lightgray}
-PuIv4 & PuIv4 & \yes & Direct. Both UDX and TCP work. \\
-PuIv4 & PuIv6 & \dgr & Cross-protocol. Relay or direct only if both dual-stack. \\
-\midrule
-\rowcolor{lightgray}
-LLv6 & Any & \no & Cannot reach bootstrap or any remote peer. \textbf{Unreachable.} \\
-\midrule
-PuIv6 & PIv4 & \dgr & Cross-protocol relay required. \\
-\rowcolor{lightgray}
-PuIv6 & PuIv4 & \dgr & Same issue. Direct only if peer also has IPv6. \\
-PuIv6 & PuIv6 & \yes & Direct IPv6/UDX. Best case. \\
+IPv4-only / IPv6-only & \dgr & Cross-protocol relay required. \\
+PuIv6 / PuIv6 & \yes & Direct IPv6/UDX. Best case. \\
 \bottomrule
 \end{tabular}
-\caption{Remote connectivity (T2). Cross-protocol scenarios limited by relay peer heterogeneity.}
 \end{table}
 
-\subsection{T2 Analysis}
+\textbf{Peer relay impact}: Significant for BLE-only peers. If a BLE-only Peer A has a co-located Peer C with libp2p, C can forward to the remote Peer B---transforming ``unreachable'' into reachable.
 
-\textbf{Critical dependency}: Without BLE, the \textit{only} direct transport is libp2p. If either peer lacks a routable IP address (BLE-only or link-local IPv6), communication is \textbf{impossible} unless a peer relay can bridge the gap.
+\textbf{NAT traversal}: Hole-punching (DCUtR) succeeds for most NAT combinations except Symmetric$\leftrightarrow$Symmetric (common on mobile carrier-grade NAT), which falls back to Circuit Relay. Single bootstrap peer = single point of failure.
 
-\textbf{Peer relay impact on T2}: Significant for BLE-only peers. If Peer A is BLE-only but has a co-located Peer C who has both BLE and libp2p connectivity, C can forward messages from A to the remote Peer B. This transforms previously ``unreachable'' scenarios into reachable ones---provided a suitable relay peer C exists.
-
-\subsubsection{NAT Traversal Success Rates}
-\label{sec:nat}
-
-Hole-punching success (via DCUtR) depends on NAT types:
+\subsection{T3: Relay Peer (``Friend in the Middle'')}
 
 \begin{table}[H]
-\centering
-\begin{tabular}{lcccc}
+\centering\small
+\begin{tabular}{L{4.5cm} C{1.2cm} C{1.2cm} L{4.5cm}}
 \toprule
-& \textbf{Full Cone} & \textbf{Restricted} & \textbf{Port Restricted} & \textbf{Symmetric} \\
+\textbf{Scenario} & \textbf{Circuit} & \textbf{App} & \textbf{Notes} \\
 \midrule
-\textbf{Full Cone} & \yes & \yes & \yes & \yes \\
-\textbf{Restricted} & \yes & \yes & \yes & \prt \\
-\textbf{Port Restricted} & \yes & \yes & \prt & \no \\
-\textbf{Symmetric} & \yes & \prt & \no & \no \\
+C public, A\&B NATed, all libp2p & \yes & \yes & Both relay types work. \\
+\rowcolor{lightgray}
+C NATed too, all libp2p & \no & \yes & Circuit Relay needs public IP. App relay doesn't. \\
+C has BLE to A, libp2p to B & \no & \yes & \textbf{Cross-transport bridging}. Previously impossible. \\
+\rowcolor{lightgray}
+BLE-only: A--C--B in a line & \no & \yes & BLE range extension. Effective range doubles. \\
+Multi-hop (A$\to$C$\to$D$\to$B) & \no & \no & Forbidden. Single hop only. \\
 \bottomrule
 \end{tabular}
-\caption{Hole-punching success by NAT type combination. Symmetric NAT (common on carrier-grade NAT / mobile networks) is the hardest case.}
 \end{table}
 
-When DCUtR hole-punching fails, libp2p falls back to Circuit Relay. Relay always works as long as both peers can reach the relay peer. However:
-\begin{itemize}
-  \item \textbf{Relay availability}: Depends on the bootstrap peer being online. If bootstrap is down, NATed peers have no relay.
-  \item \textbf{Symmetric NAT $\leftrightarrow$ Symmetric NAT}: Relay-only; no direct upgrade possible. Higher latency ($\sim$50--150ms added round-trip depending on relay location).
-  \item \textbf{Single relay}: In practice, SGN uses primarily one bootstrap peer as relay---a single point of failure.
-\end{itemize}
+App-level relay's biggest gains: \textbf{cross-transport bridging} (BLE$\leftrightarrow$libp2p), no public IP requirement, and BLE range extension ($\sim$60m indoors / $\sim$200m outdoors with one relay hop).
+
+\subsection{T4: Server / Supernode}
+
+\textbf{Bootstrap peer}: Initial discovery, Circuit Relay reservation, AutoNAT probing. \textbf{SPOF}---if down, NATed peers lose relay, new peers cannot join.
+
+\textbf{Always-on supernode}: Ideal app-level relay hub. Always reachable, connected to many peers. Bridges symmetric NAT, cross-protocol, and BLE-to-libp2p gaps. Requires running full \texttt{dart\_libp2p} node.
 
 % =============================================================================
-\section{Connectivity: Relay Peer (T3) --- ``Friend in the Middle''}
-\label{sec:relay-peer}
+\section{Mobility}
 % =============================================================================
-
-\textbf{Scenario}: Peer A wants to reach Peer B. Peer C is a third peer connected to both A and B. Can C help?
-
-SGN supports relay at \textbf{two levels}:
-\begin{enumerate}
-  \item \textbf{Transport-level} (Circuit Relay v2): LibP2P's built-in relay. Requires C to have a public IP. Operates within the libp2p transport only.
-  \item \textbf{Application-level} (Peer Forwarding): SGN's own forwarding. Any peer C can relay. Works across transport boundaries (BLE$\to$libp2p, etc.). End-to-end encrypted.
-\end{enumerate}
 
 \begin{table}[H]
-\centering
-\small
-\begin{tabular}{L{4cm} C{1.2cm} C{1.2cm} C{5cm}}
+\centering\small
+\begin{tabular}{L{4cm} C{1cm} C{1cm} L{5cm}}
 \toprule
-\textbf{Scenario} & \textbf{Circuit Relay} & \textbf{App Relay} & \textbf{Details} \\
+\textbf{Scenario} & \textbf{BLE} & \textbf{LP2P} & \textbf{Impact} \\
 \midrule
-C is public, A \& B NATed, all on libp2p & \yes & \yes & Circuit Relay: transport-level, Noise-encrypted. App relay: also works, end-to-end encrypted. \\
+WiFi $\to$ cellular (IP change) & \na & \no & \textbf{All connections die}. UDX/TCP bound to 4-tuple. Full reconnect: 10--30s blackout. \\
 \rowcolor{lightgray}
-C is NATed too, all on libp2p & \no & \yes & Circuit Relay requires public IP. \textbf{App relay works regardless}---C just needs libp2p connections to both A and B. \\
-C has BLE to A, libp2p to B & \no & \yes & \textbf{Cross-transport forwarding}: C bridges BLE and libp2p. A$\to$C via BLE, C$\to$B via libp2p. Previously impossible. \\
+WiFi A $\to$ WiFi B (diff LAN) & \na & \no & Same---new IP kills all connections. \\
+Peer enters BLE range & \yes & -- & BLE scan discovers peer. New transport available. \\
 \rowcolor{lightgray}
-C is the bootstrap peer & \yes & \yes & Bootstrap peer serves as both transport relay and potential app relay. \\
-A$\leftrightarrow$C (BLE), C$\leftrightarrow$B (BLE), B out of A's range & \no & \yes & \textbf{BLE range extension}: C forwards between two BLE-only peers. End-to-end encrypted. \\
+Peer leaves BLE range, has IP & \no & \yes & BLE drops; libp2p unaffected. \\
+Peer leaves BLE, no Internet & \no & \no & Both transports lost. Relay peer needed. \\
 \rowcolor{lightgray}
-A$\to$C$\to$D$\to$B (multi-hop) & \no & \no & Multi-hop forbidden. Single relay hop only. \\
-C connected to A but B is offline & \no & \no & Real-time only. No queuing at C. \\
+On train, passing through cells & \no & \no & Constant reconnects. Effectively unusable. \\
+Airplane mode + BLE on & \yes & \no & BLE works. Relay extends to friends-of-friends. \\
 \bottomrule
 \end{tabular}
-\caption{Relay peer analysis. Transport-level (Circuit Relay) vs application-level (peer forwarding).}
 \end{table}
 
-\subsection{T3 Analysis}
-
-Application-level peer relay significantly expands the relay peer's utility compared to Circuit Relay alone:
-
-\begin{itemize}
-  \item \textbf{Cross-transport bridging}: The biggest gain. A BLE-only peer can now communicate with a remote libp2p peer through a co-located intermediary. This was previously impossible---BLE and libp2p were completely separate worlds.
-  \item \textbf{No public IP requirement}: Unlike Circuit Relay, any connected peer can forward, including NATed peers. This means relay capacity grows organically with the network.
-  \item \textbf{BLE range extension}: Three peers in a line (A--C--B) where C is in BLE range of both A and B can now communicate. Effective BLE range doubles to $\sim$60m indoors / $\sim$200m outdoors.
-  \item \textbf{End-to-end encrypted}: C sees only encrypted envelopes. No trust required in the relay peer beyond connectivity.
-\end{itemize}
-
-\textbf{Limitations}:
-\begin{itemize}
-  \item \textbf{Single hop}: Only one relay peer in the path. Cannot chain relays.
-  \item \textbf{Real-time}: If C cannot reach B immediately, the forward fails. No store-and-forward.
-  \item \textbf{Relay peer must exist}: Requires a Peer C that happens to be connected to both A and B. In sparse networks, this may not exist.
-\end{itemize}
+\textbf{No connection migration is libp2p's biggest weakness for mobile.} When IP changes, all UDX/TCP connections die and must reconnect from scratch (bootstrap $\to$ AutoNAT $\to$ relay reservation $\to$ peer connections). A co-located BLE peer can relay during the blackout.
 
 % =============================================================================
-\section{Server Scenarios (T4)}
-% =============================================================================
-
-\subsection{T4a: Bootstrap Peer (LibP2P Infrastructure)}
-
-The bootstrap peer is a server at \texttt{40.160.9.115} with both IPv4 and IPv6 addresses.
-
-\begin{table}[H]
-\centering
-\small
-\begin{tabular}{L{3.5cm} C{1.5cm} C{6cm}}
-\toprule
-\textbf{Role} & \textbf{Works?} & \textbf{Details} \\
-\midrule
-Initial peer discovery & \yes & Newly started nodes connect to bootstrap to join the network. \\
-\rowcolor{lightgray}
-Relay server (Circuit Relay) & \yes & NATed peers reserve relay slots on bootstrap. Primary relay path. \\
-AutoNAT probe target & \yes & Bootstrap dials back to test reachability. \\
-\rowcolor{lightgray}
-Single point of failure & \textcolor{no}{\textbf{Risk}} & If bootstrap goes down: no relay for NATed peers, no AutoNAT, new peers cannot join. \\
-\bottomrule
-\end{tabular}
-\caption{Bootstrap peer roles.}
-\end{table}
-
-\textbf{Single point of failure}: The bootstrap peer is a critical dependency. If it goes offline:
-\begin{itemize}
-  \item Already-connected peers with direct connections continue working
-  \item NATed peers lose their relay path (no new relay reservations)
-  \item New peers cannot join the network at all
-  \item AutoNAT cannot classify NAT type
-\end{itemize}
-
-\subsection{T4b: Custom Always-On Supernode}
-
-A server with a stable public IP running a full libp2p peer.
-
-\begin{table}[H]
-\centering
-\small
-\begin{tabular}{L{3.5cm} C{1.5cm} C{6.5cm}}
-\toprule
-\textbf{Capability} & \textbf{Works?} & \textbf{Details} \\
-\midrule
-Transport relay & \yes & Can serve as Circuit Relay v2. Any peer can reserve relay slots. \\
-\rowcolor{lightgray}
-Always-on peer & \yes & Reachable by any peer with IP connectivity. \\
-Bootstrap redundancy & \yes & Can be added as additional bootstrap peer. Reduces SPOF risk. \\
-\rowcolor{lightgray}
-Discovery hub & \prt & mDNS works on same LAN. Beyond LAN, needs protocol extension. \\
-Message forwarding & \yes & As an always-on peer, can forward messages between peers via app-level relay. Especially valuable: always available as relay for any connected peer. \\
-\bottomrule
-\end{tabular}
-\caption{Custom supernode capabilities. Gains message forwarding via app-level peer relay.}
-\end{table}
-
-\textbf{Supernode as relay hub}: An always-on supernode with a public IP is an ideal app-level relay peer. Since it is always reachable and connected to many peers, it can forward messages for any pair of connected peers. This is particularly valuable for:
-\begin{itemize}
-  \item Peers behind symmetric NAT where Circuit Relay + DCUtR fails
-  \item Cross-protocol bridging (IPv4$\leftrightarrow$IPv6) without requiring a dual-stack Circuit Relay peer
-  \item BLE-only peers that have a co-located peer with libp2p connectivity to the supernode
-\end{itemize}
-
-\textbf{Complexity}: Running a libp2p supernode requires running a full \texttt{dart\_libp2p} node with all subsystems (AutoNAT, Circuit Relay, Noise, etc.). Non-trivial to deploy and maintain.
-
-% =============================================================================
-\section{Mobility Analysis}
-% =============================================================================
-
-\subsection{M1: WiFi to Cellular Handoff}
-
-\begin{table}[H]
-\centering
-\small
-\begin{tabular}{L{3cm} L{2cm} C{1.5cm} L{5cm}}
-\toprule
-\textbf{Transition} & \textbf{Transport} & \textbf{LP2P} & \textbf{Details} \\
-\midrule
-WiFi (PIv4) $\to$ LTE (PIv4) & UDX/TCP & \no$^*$ & \textbf{Connection dies}. UDX and TCP are bound to the 4-tuple (src IP, src port, dst IP, dst port). When IP changes, all connections are severed. Recovery requires: reconnect to bootstrap, new relay reservation, re-establish all peer connections. \textbf{Recovery: 10--30 seconds.} \\
-\rowcolor{lightgray}
-WiFi (PIv4) $\to$ LTE (PuIv6) & UDX/TCP & \no$^*$ & Worse: protocol family also changes. Full reconnection required. \\
-WiFi (PuIv6) $\to$ LTE (PIv4) & UDX/TCP & \no$^*$ & Downgrade from public to NATed. All connections lost; must re-establish via relay. \\
-\rowcolor{lightgray}
-WiFi + BLE $\to$ LTE (no BLE peer) & BLE & \yes & BLE unaffected by IP transition. \\
-\bottomrule
-\end{tabular}
-\caption{WiFi$\to$cellular handoff. $^*$No connection migration---all connections die on IP change.}
-\end{table}
-
-\textbf{This is libp2p's biggest weakness for mobile}: Neither UDX nor TCP support connection migration. When the device's IP changes:
-\begin{enumerate}
-  \item All existing connections (UDX and TCP) are severed instantly
-  \item The node must reconnect to the bootstrap peer from scratch
-  \item AutoNAT must re-probe reachability
-  \item If NATed, a new relay reservation must be made
-  \item All peer connections must be re-established from scratch
-  \item \textbf{Total recovery time: 10--30 seconds} of complete blackout
-\end{enumerate}
-
-\textbf{Peer relay during handoff}: If the disconnected peer has a co-located BLE peer that maintains libp2p connectivity, that BLE peer can serve as an app-level relay during the handoff period. This partially mitigates the blackout---messages can still flow through the BLE relay while libp2p reconnects.
-
-\subsection{M2: Moving Between WiFi Networks}
-
-\begin{table}[H]
-\centering
-\small
-\begin{tabular}{L{3.5cm} C{1.5cm} L{5.5cm}}
-\toprule
-\textbf{Scenario} & \textbf{LP2P} & \textbf{Details} \\
-\midrule
-WiFi A $\to$ WiFi B (diff LAN) & \no$^*$ & New private IP. All connections lost. Full reconnection cycle (10--30s). \\
-\rowcolor{lightgray}
-Same AP, IP unchanged & \yes & No disruption. \\
-WiFi A $\to$ brief gap $\to$ WiFi B & \no$^*$ & TCP/UDX timeout during gap. Even if new IP acquired quickly, connections are dead. \\
-\rowcolor{lightgray}
-Same LAN, different subnet & \no$^*$ & IP change = connection death. \\
-\bottomrule
-\end{tabular}
-\caption{WiFi roaming. $^*$Connections do not survive IP changes.}
-\end{table}
-
-\subsection{M3: BLE Range Transitions}
-
-\begin{table}[H]
-\centering
-\small
-\begin{tabular}{L{3.5cm} C{1.5cm} C{1.5cm} L{4.5cm}}
-\toprule
-\textbf{Scenario} & \textbf{BLE} & \textbf{LP2P} & \textbf{Details} \\
-\midrule
-Peer walks into BLE range & \yes & unchanged & BLE scan discovers peer. ANNOUNCE exchanged. New transport available. \\
-\rowcolor{lightgray}
-Peer walks out of BLE range & \no & unchanged & BLE disconnects. LibP2P unaffected if both have IP. \\
-Peer walks out, no Internet & \no & \no & Both transports lost. \textbf{Peer unreachable} unless a relay peer exists. \\
-\rowcolor{lightgray}
-BLE flapping (edge of range) & \dgr & unchanged & Repeated connect/disconnect. Should debounce. LibP2P provides stable fallback \textit{if IP hasn't changed}. \\
-\bottomrule
-\end{tabular}
-\caption{BLE range transitions. BLE is independent of Internet transport.}
-\end{table}
-
-\textbf{Peer relay impact}: When BLE drops and the device is simultaneously experiencing an IP change (e.g., walking away from a WiFi AP), both direct transports fail simultaneously. However, if a third peer C maintains connectivity to both A and B (e.g., C is on the same WiFi as B and has libp2p to A's remote peer), C can relay messages during the transition.
-
-\subsection{M4: BLE-Only Operation (No Internet)}
-
-\begin{table}[H]
-\centering
-\small
-\begin{tabular}{L{4cm} C{1.5cm} C{6cm}}
-\toprule
-\textbf{Scenario} & \textbf{Works?} & \textbf{Details} \\
-\midrule
-Peer next to me, both BLE-only & \yes & Full communication via BLE. Limited to BLE throughput ($\sim$1--2 KB/s). \\
-\rowcolor{lightgray}
-Peer 50m away, both BLE-only & \prt & At BLE range limit. Unreliable, frequent disconnects. \\
-Peer 200m away, both BLE-only & \no & Out of BLE range. No alternative transport. No relay peer in between. \\
-\rowcolor{lightgray}
-3 peers in a line, BLE-only & \yes & Middle peer C forwards for A$\leftrightarrow$B. Single-hop relay. End-to-end encrypted. Effective range doubles. \\
-Airplane mode with BLE on & \yes & BLE works independently of airplane mode radio restrictions (on most devices). \\
-\rowcolor{lightgray}
-Underground / no cell signal & \yes & BLE unaffected. Only local peers reachable. Relay extends range to friends-of-friends. \\
-\bottomrule
-\end{tabular}
-\caption{BLE-only operation (no Internet). Peer relay enables the 3-peers-in-a-line scenario.}
-\end{table}
-
-\textbf{BLE-only implications}:
-\begin{itemize}
-  \item \textbf{Range}: $\sim$10--30m indoors, $\sim$100m outdoors per hop. With peer relay, effective range doubles to $\sim$60m indoors / $\sim$200m outdoors (single hop through a middle peer).
-  \item \textbf{Throughput}: BLE GATT writes are $\sim$1--2 KB/s effective. Fine for text messages, insufficient for media. Relay adds latency but not throughput reduction (bottleneck is the BLE link itself).
-  \item \textbf{Resilient}: Works in disaster scenarios, underground, in Faraday cages, on planes---anywhere Bluetooth radio works. Peer relay extends this resilience beyond direct BLE range.
-\end{itemize}
-
-% =============================================================================
-\section{Combined Scenario Matrix}
-% =============================================================================
-
-\begin{longtable}{L{3.5cm} L{2.5cm} C{1cm} C{1cm} C{1cm} L{3cm}}
-\toprule
-\textbf{Scenario} & \textbf{Address Config} & \textbf{BLE} & \textbf{LP2P} & \textbf{Relay} & \textbf{Effective Connectivity} \\
-\midrule
-\endfirsthead
-\toprule
-\textbf{Scenario} & \textbf{Address Config} & \textbf{BLE} & \textbf{LP2P} & \textbf{Relay} & \textbf{Effective Connectivity} \\
-\midrule
-\endhead
-\midrule
-\multicolumn{6}{r}{\textit{continued on next page}} \\
-\bottomrule
-\endfoot
-\bottomrule
-\endlastfoot
-
-% --- Co-located scenarios ---
-\multicolumn{6}{l}{\textbf{Co-located Peers ($<$30m)}} \\
-\midrule
-Coffee shop, both on WiFi & PIv4 / PIv4 & \yes & \yes & \na & Excellent. BLE preferred. mDNS finds peer on same LAN. \\
-\rowcolor{lightgray}
-Coffee shop, one on LTE & PIv4 / PIv4 & \yes & \dgr & \na & BLE works. LibP2P via relay (different NATs). \\
-Park, no WiFi & BLE / LTE(PIv4) & \yes & \prt & \na & BLE works. One peer has libp2p. \\
-\rowcolor{lightgray}
-Underground, no signal & BLE / BLE & \yes & \no & \prt$^*$ & BLE only. Relay if 3rd peer present. \\
-
-\midrule
-% --- Remote scenarios ---
-\multicolumn{6}{l}{\textbf{Remote Peers (different cities)}} \\
-\midrule
-Both on home WiFi & PIv4 / PIv4 & \no & \dgr & \prt$^\dagger$ & Relay via bootstrap peer. Hole-punch depends on router. App relay if supernode connected. \\
-\rowcolor{lightgray}
-One on fiber (PuIv4) & PuIv4 / PIv4 & \no & \yes & \na & Direct connection to public peer. Fast. \\
-Both on LTE & PIv4 / PIv4 & \no & \dgr & \prt$^\dagger$ & Carrier-grade NAT = symmetric. Relay-only likely. App relay through supernode if available. \\
-\rowcolor{lightgray}
-Both have IPv6 & PuIv6 / PuIv6 & \no & \yes & \na & Direct IPv6/UDX. Optimal for remote. \\
-One offline & Any / BLE only & \no & \no & \prt$^*$ & \textbf{App relay}: if BLE peer has a co-located friend with libp2p, that friend can forward. Otherwise unreachable. \\
-
-\midrule
-% --- Mobility scenarios ---
-\multicolumn{6}{l}{\textbf{Mobility}} \\
-\midrule
-Walking away from BLE peer, have LTE & PIv4 & $\to$\no & \dgr$^*$ & \prt & BLE drops. LibP2P \textit{if still connected}. App relay through remaining BLE peers. \\
-\rowcolor{lightgray}
-Walking toward peer, gaining BLE & PIv4 & $\to$\yes & \yes & \na & BLE discovered. Becomes preferred transport. \\
-On train, passing through cells & PIv4 $\to$ PIv4 & \no & \no & \prt & \textbf{Constant full reconnects}. App relay through stable peer if available. \\
-\rowcolor{lightgray}
-Entering airplane mode + BLE & BLE & \yes & $\to$\no & \prt$^*$ & LibP2P lost. BLE works for nearby peers. Relay extends reach. \\
-Leaving subway (no signal $\to$ LTE) & BLE $\to$ PIv4 & \yes & $\to$\dgr & \prt & LibP2P must bootstrap from scratch. 10--30s delay. BLE relay during gap. \\
-\rowcolor{lightgray}
-WiFi drops, no cellular & PIv4 $\to$ BLE & \yes & $\to$\no & \prt$^*$ & Only nearby BLE peers reachable. Relay extends to friends-of-friends. \\
-
-\end{longtable}
-
-\noindent $^*$Requires a co-located relay peer with BLE connectivity.\\
-$^\dagger$Requires a supernode or other always-on peer connected to both parties.
-
-% =============================================================================
-\section{Gap Analysis}
-% =============================================================================
-
-\begin{enumerate}
-  \item \textbf{No connection migration}: The single biggest problem. Mobile users on cellular experience constant disconnections. Train/car scenarios are effectively unusable. Peer relay through a stable BLE peer partially mitigates this.
-
-  \item \textbf{Bootstrap SPOF}: One server down = entire transport-level relay infrastructure gone for NATed peers. Adding bootstrap peers is possible but requires configuration changes.
-
-  \item \textbf{Cross-protocol bridging}: IPv4$\leftrightarrow$IPv6 requires a dual-stack Circuit Relay peer at the transport level. App-level peer relay can bridge this if a connected peer has connectivity to both parties (regardless of IP version).
-
-  \item \textbf{Double identity mapping}: LibP2P PeerId $\neq$ SGN public key creates complexity and potential for identity confusion.
-
-  \item \textbf{Relay peer availability}: App-level relay requires a Peer C connected to both A and B. In sparse networks with few peers, suitable relay peers may not exist. An always-on supernode mitigates this.
-
-  \item \textbf{Discovery requires BLE or mDNS}: Remote peers that have never been co-located and are not on the same LAN cannot discover each other without out-of-band exchange.
-
-  \item \textbf{Single relay hop limit}: Only one relay hop is allowed. In scenarios where A can reach C and C can reach D and D can reach B, but no single peer connects A to B, communication is impossible. This is a deliberate simplicity trade-off.
-\end{enumerate}
-
-% =============================================================================
-\section{Recommendations}
+\section{Summary \& Gap Analysis}
 % =============================================================================
 
 \begin{table}[H]
-\centering
-\begin{tabular}{C{0.5cm} L{4cm} L{3cm} L{4cm}}
+\centering\small
+\begin{tabular}{L{4.5cm} C{1.3cm} C{1.3cm} C{1.3cm}}
 \toprule
-\textbf{\#} & \textbf{Gap} & \textbf{Recommendation} & \textbf{Impact} \\
+\textbf{Scenario} & \textbf{BLE} & \textbf{LibP2P} & \textbf{Relay} \\
 \midrule
-1 & No connection migration & Evaluate QUIC-based transport (e.g., iroh) & Survive IP changes on mobile \\
-\rowcolor{lightgray}
-2 & Bootstrap SPOF & Deploy redundant bootstrap peers & Resilience for NATed peers \\
-3 & Double identity mapping & Unify PeerId with SGN public key & Simpler architecture \\
-\rowcolor{lightgray}
-4 & Discovery beyond BLE & Address exchange via QR code, link & Enable remote-first friendships \\
-5 & Relay peer availability & Deploy always-on supernode as relay hub & Guarantee relay availability \\
-\rowcolor{lightgray}
-6 & Peer relay is single-hop only & Evaluate multi-hop if needed for mesh scenarios & Extended range at cost of complexity \\
-\bottomrule
-\end{tabular}
-\caption{Recommendations for identified connectivity gaps.}
-\end{table}
-
-% =============================================================================
-\section{Summary}
-% =============================================================================
-
-\begin{table}[H]
-\centering
-\begin{tabular}{L{5cm} C{2cm} C{2cm} C{2cm}}
-\toprule
-\textbf{Scenario Class} & \textbf{BLE} & \textbf{LibP2P} & \textbf{App Relay} \\
-\midrule
-Co-located, same LAN & \yes & \yes{} (mDNS) & \na \\
+Co-located, same LAN & \yes & \yes & \na \\
 Co-located, BLE range & \yes & \na & \na \\
-Co-located, beyond BLE, within relay range & \no & \na & \yes \\
+\rowcolor{lightgray}
 Remote, both NATed & \no & \dgr & \prt$^\dagger$ \\
 Remote, one public & \no & \yes & \na \\
+\rowcolor{lightgray}
 Remote, BLE-only peer & \no & \no & \yes$^*$ \\
-Corporate firewall (TCP only) & \no & \yes & \na \\
-Mobility (IP change) & unchanged & \no{} (reconnect) & \prt$^*$ \\
-Mobility (BLE transition) & varies & unchanged & \prt$^*$ \\
-Bootstrap failure & \na & \no{} (SPOF) & unchanged \\
+Mobility (IP change) & -- & \no & \prt$^*$ \\
+\rowcolor{lightgray}
 BLE-only (no Internet) & \yes & \no & \yes$^*$ \\
+Bootstrap failure & \na & \no & -- \\
 \bottomrule
 \end{tabular}
-\caption{High-level comparison by scenario class. $^*$Requires co-located relay peer. $^\dagger$Requires supernode.}
+\caption*{\small $^*$Requires co-located relay peer. $^\dagger$Requires supernode.}
 \end{table}
 
-The three connectivity mechanisms (BLE, libp2p, and application-level peer relay) are \textbf{complementary}:
+BLE, libp2p, and peer relay are \textbf{complementary}: BLE provides resilient local connectivity immune to network configuration; libp2p provides global reach immune to physical proximity; peer relay bridges the two.
 
-\begin{itemize}
-  \item \textbf{BLE} provides resilient local connectivity that is immune to network configuration.
-  \item \textbf{LibP2P} provides global reach that is immune to physical proximity.
-  \item \textbf{Peer relay} bridges the gap between the two: it extends BLE range, bridges transport boundaries (BLE$\leftrightarrow$libp2p), and provides a fallback path when direct transports fail.
+\textbf{Primary gaps}:
+\begin{enumerate}[nosep]
+  \item \textbf{No connection migration}---libp2p connections die on IP change. A QUIC-based transport (e.g., iroh) would solve this.
+  \item \textbf{Bootstrap SPOF}---single bootstrap peer = single point of failure for NATed peers.
+  \item \textbf{Double identity mapping}---libp2p PeerId $\neq$ SGN public key adds complexity.
+  \item \textbf{Cross-protocol bridging}---IPv4$\leftrightarrow$IPv6 needs dual-stack relay; app relay partially mitigates.
+  \item \textbf{Relay peer availability}---sparse networks may lack suitable relay peers; supernode mitigates.
+  \item \textbf{Single relay hop limit}---deliberate simplicity trade-off; see future work.
+\end{enumerate}
+
+\textbf{Recommendations}: (1)~Evaluate QUIC-based transport for connection migration; (2)~Deploy redundant bootstrap peers; (3)~Unify PeerId with SGN public key; (4)~Deploy always-on supernode as relay hub; (5)~Enable address exchange via QR code/link for remote-first friendships.
+
+% =============================================================================
+\section{Future Work: Geographic-Optimized Multi-Hop Routing}
+% =============================================================================
+
+The single-hop relay constraint (Section~3.3) exists because standard multi-hop routing (e.g., AODV) requires flooding-based route discovery---broadcasting RREQ to all peers. In a mobile BLE mesh with volatile topology, this is expensive and unreliable. \textbf{Geohash-guided AODV} can make multi-hop viable by constraining route discovery spatially.
+
+\subsection{Geohash-Guided AODV}
+
+\begin{enumerate}[nosep]
+  \item \textbf{Geohash in ANNOUNCE}: Each peer includes a truncated geohash (5--6 characters, $\sim$5\,km$^2$ precision) in its ANNOUNCE packet. All peers maintain a \texttt{nodeId $\to$ geohash} mapping.
+
+  \item \textbf{Directional RREQ}: When A needs a route to B and knows B's approximate geohash, A tags the RREQ with B's geohash. Intermediate peers only re-broadcast if their own geohash is geographically \emph{closer} to the destination (or within a configurable angular cone). This prunes the flood dramatically compared to standard AODV.
+
+  \item \textbf{Geohash ring expansion}: If directional RREQ fails (no peers in the cone), reduce geohash precision (fewer characters = larger area) and retry---analogous to AODV's expanding ring search, but spatially informed.
+
+  \item \textbf{Route maintenance}: Standard AODV RERR messages when a hop breaks. Geo-awareness helps select alternate next-hops that are still in the right geographic direction.
+\end{enumerate}
+
+\textbf{Why geohash?} Hierarchical (truncating characters widens the area---no distance math), prefix-matchable (shared prefix = spatial proximity), privacy-preserving (5-char $\approx$ 5\,km$^2$, reveals neighborhood, not location), and compact (5--6 ASCII characters per ANNOUNCE).
+
+\subsection{Trade-offs}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{L{3cm} L{4.5cm} L{4.5cm}}
+\toprule
+& \textbf{Single-hop (current)} & \textbf{Geo-AODV} \\
+\midrule
+Complexity & Trivial & Moderate (RREQ/RREP/RERR state machines) \\
+\rowcolor{lightgray}
+Reach & 2 BLE hops max & Unbounded (with TTL cap, likely 3--4) \\
+Latency & Low & Additive per hop \\
+\rowcolor{lightgray}
+Privacy & 1 relay sees metadata & N relays see metadata; geohash reveals approximate location \\
+Use case & Friends nearby & Dense mesh (protests, festivals, disasters) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Open Questions}
+
+\begin{itemize}[nosep]
+  \item \textbf{Location permission}: Mobile OS requires explicit consent; geohash must be opt-in.
+  \item \textbf{Hybrid routing}: Geo-AODV only for BLE mesh (physical proximity); iroh/libp2p for long-range. Geographic routing is irrelevant for Internet transport.
+  \item \textbf{Geohash spoofing}: A peer could lie about its geohash to attract or deflect traffic. Mitigations: cross-reference BLE RSSI, require signed geohash attestations from multiple neighbors.
+  \item \textbf{TTL cap}: Practical limit likely 3--4 hops before latency and reliability degrade unacceptably.
 \end{itemize}
-
-The primary remaining gaps are:
-\begin{itemize}
-  \item \textbf{No connection migration}: LibP2P's UDX/TCP connections die on IP change. This is the single biggest problem for mobile users. A QUIC-based transport would solve this.
-  \item \textbf{Bootstrap SPOF}: The bootstrap peer is a single point of failure for NATed peers' transport-level relay.
-  \item \textbf{No store-and-forward}: By design. Relay is real-time only. If the recipient is unreachable via any path (direct or relayed), the message fails.
-\end{itemize}
-
-Peer relay mitigates some of these gaps (e.g., a co-located BLE peer can relay during a libp2p handoff), but it does not eliminate the fundamental limitations of the transport layer. The relay is only as good as the connectivity of the relay peer itself.
 
 \end{document}
