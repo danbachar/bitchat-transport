@@ -120,6 +120,9 @@ class Bitchat {
   /// Whether the coordinator has been started
   bool _started = false;
 
+  /// Lock to serialize transport settings changes (prevents overlapping init/dispose)
+  Future<void>? _transportUpdateLock;
+
   /// Protocol handler for encoding/decoding packets
   late final ProtocolHandler _protocolHandler;
 
@@ -434,10 +437,12 @@ class Bitchat {
     }
   }
   
-  /// Handle transport settings changes
+  /// Handle transport settings changes.
+  /// Serializes updates so overlapping init/dispose sequences cannot occur.
   void _onTransportSettingsChanged() {
     _log.i('Transport settings changed');
-    _updateTransportsFromSettings();
+    final previous = _transportUpdateLock ?? Future.value();
+    _transportUpdateLock = previous.then((_) => _updateTransportsFromSettings());
   }
   
   /// Update transports based on current settings
@@ -551,9 +556,12 @@ class Bitchat {
     if (_isBleEnabledInSettings && _bleAvailable && _bleService != null &&
         peer != null && peer.isReachable && peer.bleDeviceId != null) {
       transport = MessageTransport.ble;
-    } else if (_isLibp2pEnabledInSettings && _libp2pAvailable && _libp2pService != null &&
-        peer?.libp2pHostId != null && peer!.libp2pHostId!.isNotEmpty) {
-      transport = MessageTransport.libp2p;
+    } else {
+      final peerHostId = peer?.libp2pHostId;
+      if (_isLibp2pEnabledInSettings && _libp2pAvailable && _libp2pService != null &&
+          peerHostId != null && peerHostId.isNotEmpty) {
+        transport = MessageTransport.libp2p;
+      }
     }
 
     // If no transport available, return null immediately (don't dispatch sending)
@@ -570,26 +578,34 @@ class Bitchat {
       payloadSize: payload.length,
     ));
 
-    // Create the message packet at coordinator level
+    // Create the message packet at coordinator level and sign it once
     final packet = _protocolHandler.createMessagePacket(
       payload: payload,
       recipientPubkey: recipientPubkey,
     );
 
+    // Sign once before any send attempt (fragments are signed individually)
+    if (!_fragmentHandler.needsFragmentation(payload)) {
+      await _protocolHandler.signPacket(packet);
+    }
+
+    // peer is guaranteed non-null here since transport selection checks it
+    final resolvedPeer = peer!;
+
     // Try BLE first if that's the selected transport
     if (transport == MessageTransport.ble) {
-      _log.d('Sending via BLE to ${peer!.displayName}');
+      final bleDeviceId = resolvedPeer.bleDeviceId!;
+      _log.d('Sending via BLE to ${resolvedPeer.displayName}');
 
       bool success;
       if (_fragmentHandler.needsFragmentation(payload)) {
         success = await _sendFragmentedViaBle(
           payload: payload,
           recipientPubkey: recipientPubkey,
-          bleDeviceId: peer.bleDeviceId!,
+          bleDeviceId: bleDeviceId,
         );
       } else {
-        await _protocolHandler.signPacket(packet);
-        success = await _bleService!.sendToPeer(peer.bleDeviceId!, packet.serialize());
+        success = await _bleService!.sendToPeer(bleDeviceId, packet.serialize());
       }
 
       if (success) {
@@ -606,12 +622,12 @@ class Bitchat {
       _log.w('BLE send failed, trying libp2p fallback...');
 
       // Try libp2p fallback if available
+      final hostId = resolvedPeer.libp2pHostId;
       if (_isLibp2pEnabledInSettings && _libp2pAvailable && _libp2pService != null &&
-          peer.libp2pHostId != null && peer.libp2pHostId!.isNotEmpty) {
-        await _ensureLibp2pAddresses(peer);
-        await _protocolHandler.signPacket(packet);
+          hostId != null && hostId.isNotEmpty) {
+        await _ensureLibp2pAddresses(resolvedPeer);
         final libp2pSuccess = await _libp2pService!.sendToPeer(
-          peer.libp2pHostId!,
+          hostId,
           packet.serialize(),
         );
         if (libp2pSuccess) {
@@ -633,12 +649,12 @@ class Bitchat {
 
     // Try libp2p if that's the selected transport
     if (transport == MessageTransport.libp2p) {
-      _log.d('Sending via libp2p to ${peer!.displayName}');
+      _log.d('Sending via libp2p to ${resolvedPeer.displayName}');
 
-      await _ensureLibp2pAddresses(peer);
-      await _protocolHandler.signPacket(packet);
+      await _ensureLibp2pAddresses(resolvedPeer);
+      final libp2pHostId = resolvedPeer.libp2pHostId!;
       final success = await _libp2pService!.sendToPeer(
-        peer.libp2pHostId!,
+        libp2pHostId,
         packet.serialize(),
       );
       if (success) {
@@ -678,16 +694,18 @@ class Bitchat {
 
     // Try BLE first
     if (_isBleEnabledInSettings && _bleAvailable && _bleService != null) {
-      if (peer != null && peer.bleDeviceId != null) {
-        if (await _bleService!.sendToPeer(peer.bleDeviceId!, bytes)) return true;
+      final bleDeviceId = peer?.bleDeviceId;
+      if (peer != null && bleDeviceId != null) {
+        if (await _bleService!.sendToPeer(bleDeviceId, bytes)) return true;
       }
     }
 
     // Fall back to libp2p
     if (_isLibp2pEnabledInSettings && _libp2pAvailable && _libp2pService != null) {
-      if (peer?.libp2pHostId != null && peer!.libp2pHostId!.isNotEmpty) {
+      final libp2pHostId = peer?.libp2pHostId;
+      if (peer != null && libp2pHostId != null && libp2pHostId.isNotEmpty) {
         await _ensureLibp2pAddresses(peer);
-        if (await _libp2pService!.sendToPeer(peer.libp2pHostId!, bytes)) return true;
+        if (await _libp2pService!.sendToPeer(libp2pHostId, bytes)) return true;
       }
     }
 
@@ -864,8 +882,16 @@ class Bitchat {
   /// Clean up resources
   Future<void> dispose() async {
     _storeSubscription?.cancel();
+    _storeSubscription = null;
     _announceTimer?.cancel();
     _scanTimer?.cancel();
+
+    // Wait for any in-flight transport update to finish before disposing
+    if (_transportUpdateLock != null) {
+      await _transportUpdateLock;
+      _transportUpdateLock = null;
+    }
+
     await stop();
 
     _messageRouter.dispose();

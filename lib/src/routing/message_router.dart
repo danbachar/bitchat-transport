@@ -131,20 +131,26 @@ class MessageRouter {
 
     int effectiveRssi = rssi;
 
-    // BLE-specific: lookup RSSI from discovered peers
-    if (transport == PeerTransport.bleDirect) {
-      DiscoveredPeerState? discoveredPeer;
-      if (bleDeviceId != null) {
-        discoveredPeer = _peersState.getDiscoveredBlePeer(bleDeviceId);
-      }
-      if (discoveredPeer == null) {
-        final theirServiceUuid = BitchatIdentity.deriveServiceUuid(pubkey);
-        discoveredPeer =
-            _peersState.findDiscoveredBlePeerByServiceUuid(theirServiceUuid);
-      }
+    // Resolve bleDeviceId from discovered BLE peers.
+    // Works for ALL transports: if the peer is nearby via BLE, we find their
+    // bleDeviceId by matching their service UUID (derived from pubkey).
+    // If the peer is NOT nearby, bleDeviceId stays null — correct behavior.
+    String? resolvedBleDeviceId = bleDeviceId;
+    DiscoveredPeerState? discoveredPeer;
+    if (bleDeviceId != null) {
+      discoveredPeer = _peersState.getDiscoveredBlePeer(bleDeviceId);
+    }
+    if (discoveredPeer == null) {
+      final theirServiceUuid = BitchatIdentity.deriveServiceUuid(pubkey);
+      discoveredPeer =
+          _peersState.findDiscoveredBlePeerByServiceUuid(theirServiceUuid);
       if (discoveredPeer != null) {
-        effectiveRssi = discoveredPeer.rssi;
+        // Found the peer in BLE scan results — use their BLE device ID
+        resolvedBleDeviceId = discoveredPeer.transportId;
       }
+    }
+    if (discoveredPeer != null) {
+      effectiveRssi = discoveredPeer.rssi;
     }
 
     final isNew = _peersState.getPeerByPubkey(pubkey) == null;
@@ -161,13 +167,13 @@ class MessageRouter {
       protocolVersion: data.protocolVersion,
       rssi: effectiveRssi,
       transport: transport,
-      bleDeviceId: bleDeviceId,
+      bleDeviceId: resolvedBleDeviceId,
       libp2pAddress: libp2pAddress,
     ));
 
-    if (bleDeviceId != null) {
+    if (resolvedBleDeviceId != null) {
       store.dispatch(
-          AssociateBleDeviceAction(publicKey: pubkey, deviceId: bleDeviceId));
+          AssociateBleDeviceAction(publicKey: pubkey, deviceId: resolvedBleDeviceId));
     }
 
     _log.i(
@@ -200,14 +206,31 @@ class MessageRouter {
 
   void _handleAck(BitchatPacket packet) {
     if (packet.payload.isEmpty) return;
-    final messageId = String.fromCharCodes(packet.payload);
-    onAckReceived?.call(messageId);
+    try {
+      final messageId = String.fromCharCodes(packet.payload);
+      // Validate: message IDs are short alphanumeric strings (UUID v4 prefix)
+      if (messageId.length > 36) {
+        _log.w('Ignoring ACK with invalid message ID length: ${messageId.length}');
+        return;
+      }
+      onAckReceived?.call(messageId);
+    } catch (e) {
+      _log.w('Failed to decode ACK payload: $e');
+    }
   }
 
   void _handleReadReceipt(BitchatPacket packet) {
     if (packet.payload.isEmpty) return;
-    final messageId = String.fromCharCodes(packet.payload);
-    onReadReceiptReceived?.call(messageId);
+    try {
+      final messageId = String.fromCharCodes(packet.payload);
+      if (messageId.length > 36) {
+        _log.w('Ignoring read receipt with invalid message ID length: ${messageId.length}');
+        return;
+      }
+      onReadReceiptReceived?.call(messageId);
+    } catch (e) {
+      _log.w('Failed to decode read receipt payload: $e');
+    }
   }
 
   // ===== Helpers =====

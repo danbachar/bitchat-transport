@@ -59,10 +59,6 @@ dev_dependencies:
   flutter_prunekit: ^2.4.0
   fake_async: ^1.3.0
 
-dependency_overrides:
-  dart_libp2p:
-    path: packages/dart_libp2p
-
 flutter:
   uses-material-design: true
   # No assets needed for transport layer

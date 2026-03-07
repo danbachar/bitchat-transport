@@ -236,6 +236,8 @@ class BlePeripheralService {
   // ===== Event handlers =====
 
   void _onConnectionStateChanged(String deviceId, bool connected) {
+    if (!_active) return;
+
     if (connected) {
       _connectedCentrals.add(deviceId);
       _log.i('Central connected: $deviceId');
@@ -253,6 +255,8 @@ class BlePeripheralService {
     bool isSubscribed,
     String? name,
   ) {
+    if (!_active) return;
+
     // On iOS/Mac/Windows, subscription change indicates device availability
     if (isSubscribed) {
       _connectedCentrals.add(deviceId);

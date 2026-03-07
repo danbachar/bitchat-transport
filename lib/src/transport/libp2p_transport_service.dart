@@ -148,13 +148,6 @@ class LibP2PTransportService extends TransportService {
       _host = await createHost();
       _log.i('Host: ${_host!.id} ${_host!.addrs}');
 
-      // DERP DERP
-      // TODO: Initialize dart_libp2p host here
-      // final keyPair = await crypto_ed25519.generateEd25519KeyPair();
-      // _host = await Libp2p.new_([...options...]);
-
-      // Sample Output : "2a05:dfc7:5::53"
-
       _setState(TransportState.ready);
       _log.i('LibP2P transport initialized successfully');
       return true;
@@ -175,7 +168,7 @@ class LibP2PTransportService extends TransportService {
     _log.i('Starting LibP2P transport');
 
     try {
-      // TODO: Start libp2p host - await _host?.start();
+      // Host is already started in createHost(), just update state
       _setState(TransportState.active);
       _log.i('LibP2P transport started');
     } catch (e) {
@@ -189,7 +182,7 @@ class LibP2PTransportService extends TransportService {
     _log.i('Stopping LibP2P transport');
 
     try {
-      // TODO: Stop libp2p host - await _host?.stop();
+      // TODO: Implement host stop (currently host has no stop method in dart_libp2p)
       if (_state == TransportState.active) {
         _setState(TransportState.ready);
       }
@@ -203,8 +196,7 @@ class LibP2PTransportService extends TransportService {
   Future<bool> connectToPeer(String peerId) async {
     _log.d('Connecting to peer: $peerId');
     try {
-      // TODO: Use dart_libp2p to connect
-      // await _host?.connect(AddrInfo(peerId, addresses));
+      // TODO: Implement connectToPeer using dart_libp2p (connectToHost is used instead)
       return true;
     } catch (e) {
       _log.e('Failed to connect to peer $peerId: $e');
@@ -263,7 +255,7 @@ class LibP2PTransportService extends TransportService {
   Future<void> disconnectFromPeer(String peerId) async {
     _log.d('Disconnecting from peer: $peerId');
     try {
-      // TODO: Use dart_libp2p to disconnect
+      // TODO: Implement disconnect using dart_libp2p
       _connectionController.add(TransportConnectionEvent(
         peerId: peerId,
         transport: TransportType.libp2p,
@@ -490,14 +482,13 @@ class LibP2PTransportService extends TransportService {
       // Read the message from the stream
       final data = await stream.read();
       if (data.isNotEmpty) {
-        debugPrint(
-            '📨 [GEVER] Received ${data.length} bytes from peer ${_truncatePeerId(remotePeer)}');
+        _log.d('Received ${data.length} bytes from peer ${_truncatePeerId(remotePeer)}');
 
         // Pass to onDataReceived which handles envelope parsing
         onDataReceived(remotePeer.toBase58(), Uint8List.fromList(data));
       }
     } catch (e) {
-      _log.e('❌ [GEVER] Error reading from stream: $e');
+      _log.e('Error reading from libp2p stream: $e');
     } finally {
       await stream.close();
     }

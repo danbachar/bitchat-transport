@@ -21,13 +21,10 @@ PeersState peersReducer(PeersState state, dynamic action) {
         lastSeen: now,
         serviceUuid: action.serviceUuid,
       );
-      print(state);
-      final newState = state.copyWith(
+      return state.copyWith(
         discoveredBlePeers: Map.from(state.discoveredBlePeers)
           ..[action.deviceId] = newPeer,
       );
-      print(newState);
-      return newState;
     } else {
       // TODO: this should be a different action, use update rssi
       // Update existing
@@ -200,18 +197,23 @@ PeersState peersReducer(PeersState state, dynamic action) {
         peers: Map.from(state.peers)..[pubkeyHex] = newPeer,
       );
     } else {
-      // Update existing peer
-      final updated = existing.copyWith(
+      // Update existing peer.
+      // Use direct constructor (not copyWith) because bleDeviceId may
+      // legitimately become null when the peer is no longer nearby via BLE.
+      final updated = PeerState(
+        publicKey: existing.publicKey,
         nickname: action.nickname,
         connectionState: PeerConnectionState.connected,
         transport: action.transport,
         rssi: action.rssi,
         protocolVersion: action.protocolVersion,
         lastSeen: now,
-        bleDeviceId: action.bleDeviceId, 
-        // bleDeviceId: action.bleDeviceId ?? existing.bleDeviceId, just removed!
+        bleDeviceId: action.bleDeviceId,
         lastBleSeen: isBle ? now : existing.lastBleSeen,
         libp2pAddress: action.libp2pAddress ?? existing.libp2pAddress,
+        isFriend: existing.isFriend,
+        libp2pHostId: existing.libp2pHostId,
+        libp2pHostAddrs: existing.libp2pHostAddrs,
       );
       return state.copyWith(
         peers: Map.from(state.peers)..[pubkeyHex] = updated,
@@ -317,6 +319,8 @@ PeersState peersReducer(PeersState state, dynamic action) {
     return state.copyWith(peers: newMap);
   }
   
+  // TODO: Add stale detection for libp2p-only peers (peers connected solely via
+  // libp2p that go silent should eventually be marked disconnected).
   if (action is StalePeersRemovedAction) {
     final now = DateTime.now();
     final newMap = Map<String, PeerState>.from(state.peers);
