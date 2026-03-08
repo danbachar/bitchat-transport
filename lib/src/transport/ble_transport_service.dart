@@ -5,6 +5,7 @@ import 'package:logger/logger.dart';
 import 'package:redux/redux.dart';
 
 import '../transport/transport_service.dart';
+import '../transport/fragmenter.dart';
 import '../ble/ble_central_service.dart';
 import '../ble/ble_peripheral_service.dart';
 import '../models/identity.dart';
@@ -58,6 +59,9 @@ class BleTransportService extends TransportService {
 
   /// Peripheral service (advertiser)
   late final BlePeripheralService _peripheral;
+
+  /// Transport-level fragmenter (512-byte BLE max)
+  final Fragmenter _fragmenter = Fragmenter(maxPayloadSize: 512);
 
   /// Current transport state
   TransportState _state = TransportState.uninitialized;
@@ -240,12 +244,16 @@ class BleTransportService extends TransportService {
 
   @override
   Future<bool> sendToPeer(String peerId, Uint8List data) async {
-    // Try central first (we initiated connection)
-    if (await _central.sendData(peerId, data)) {
-      return true;
+    final chunks = _fragmenter.split(data);
+    for (final chunk in chunks) {
+      bool sent = await _central.sendData(peerId, chunk);
+      if (!sent) sent = await _peripheral.sendData(peerId, chunk);
+      if (!sent) return false;
+      if (chunks.length > 1) {
+        await Future.delayed(Fragmenter.fragmentDelay);
+      }
     }
-    // Try peripheral (they initiated connection)
-    return await _peripheral.sendData(peerId, data);
+    return true;
   }
 
   @override
@@ -254,10 +262,15 @@ class BleTransportService extends TransportService {
     Uint8List? friendData,
     Set<String>? friendDeviceIds,
   }) async {
-    await _central.broadcastData(data,
-        friendData: friendData, friendDeviceIds: friendDeviceIds);
-    await _peripheral.broadcastData(data,
-        friendData: friendData, friendDeviceIds: friendDeviceIds);
+    final allDeviceIds = {
+      ..._central.connectedDeviceIds,
+      ..._peripheral.connectedDeviceIds,
+    };
+    for (final deviceId in allDeviceIds) {
+      final isFriend = friendDeviceIds?.contains(deviceId) ?? false;
+      final payload = isFriend ? (friendData ?? data) : data;
+      await sendToPeer(deviceId, payload);
+    }
   }
 
   @override
@@ -290,6 +303,7 @@ class BleTransportService extends TransportService {
     _log.i('Disposing BLE transport');
 
     await stop();
+    _fragmenter.dispose();
     await _central.dispose();
     await _peripheral.dispose();
 
@@ -337,8 +351,12 @@ class BleTransportService extends TransportService {
   // ===== BLE Callbacks =====
 
   void _onCentralDataReceived(String deviceId, Uint8List data, int rssi) {
+    if (data.isNotEmpty && data[0] == Fragmenter.fragmentMarker) {
+      final assembled = _fragmenter.receive(deviceId, data);
+      if (assembled == null) return;
+      data = assembled;
+    }
     onPacketReceived(data, fromDeviceId: deviceId, rssi: rssi);
-    
     _dataController.add(TransportDataEvent(
       peerId: deviceId,
       transport: TransportType.ble,
@@ -347,8 +365,12 @@ class BleTransportService extends TransportService {
   }
 
   void _onPeripheralDataReceived(String deviceId, Uint8List data, int rssi) {
+    if (data.isNotEmpty && data[0] == Fragmenter.fragmentMarker) {
+      final assembled = _fragmenter.receive(deviceId, data);
+      if (assembled == null) return;
+      data = assembled;
+    }
     onPacketReceived(data, fromDeviceId: deviceId, rssi: rssi);
-    
     _dataController.add(TransportDataEvent(
       peerId: deviceId,
       transport: TransportType.ble,

@@ -5,7 +5,6 @@ import '../mesh/bloom_filter.dart';
 import '../models/identity.dart';
 import '../models/packet.dart';
 import '../models/peer.dart';
-import '../protocol/fragment_handler.dart';
 import '../protocol/protocol_handler.dart';
 import '../store/app_state.dart';
 import '../store/peers_actions.dart';
@@ -18,7 +17,6 @@ import '../store/peers_state.dart';
 /// - Packet deduplication (via BloomFilter)
 /// - ANNOUNCE decoding and Redux dispatch
 /// - MESSAGE targeting (is-for-us check)
-/// - Fragment reassembly delegation
 /// - Callback dispatch to application layer
 ///
 /// All transports feed into [processPacket] — one entry point, one format.
@@ -28,7 +26,6 @@ class MessageRouter {
   final BitchatIdentity identity;
   final Store<AppState> store;
   final ProtocolHandler protocolHandler;
-  final FragmentHandler fragmentHandler;
   final BloomFilter _seenPackets = BloomFilter();
 
   /// Called when a message is received
@@ -56,7 +53,6 @@ class MessageRouter {
     required this.identity,
     required this.store,
     required this.protocolHandler,
-    required this.fragmentHandler,
   });
 
   // ===== Unified Packet Processing =====
@@ -102,10 +98,6 @@ class MessageRouter {
         return; // Already handled above
       case PacketType.message:
         _handleMessage(packet, transport: transport, libp2pPeerId: libp2pPeerId);
-      case PacketType.fragmentStart:
-      case PacketType.fragmentContinue:
-      case PacketType.fragmentEnd:
-        _handleFragment(packet);
       case PacketType.ack:
         _handleAck(packet);
       case PacketType.nack:
@@ -193,14 +185,6 @@ class MessageRouter {
     // Send ACK back for libp2p (delivery confirmation)
     if (transport == PeerTransport.libp2p && libp2pPeerId != null) {
       onAckRequested?.call(transport, libp2pPeerId, packet.packetId);
-    }
-  }
-
-  void _handleFragment(BitchatPacket packet) {
-    final reassembled = fragmentHandler.processFragment(packet);
-    if (reassembled != null) {
-      onMessageReceived?.call(
-          packet.packetId, packet.senderPubkey, reassembled);
     }
   }
 

@@ -58,6 +58,9 @@ class BlePeripheralService {
   /// Number of connected centrals
   int get connectedCount => _connectedCentrals.length;
 
+  /// All connected central device IDs
+  Set<String> get connectedDeviceIds => Set.from(_connectedCentrals);
+
   /// Whether a specific central device is connected
   bool isDeviceConnected(String deviceId) => _connectedCentrals.contains(deviceId);
 
@@ -222,21 +225,6 @@ class BlePeripheralService {
     } catch (e) {
       _log.e('Failed to send data to $deviceId: $e');
       return false;
-    }
-  }
-
-  /// Send data to all connected centrals.
-  /// If [friendData] and [friendDeviceIds] are provided, friends receive
-  /// [friendData] while all others receive [data].
-  Future<void> broadcastData(
-    Uint8List data, {
-    Uint8List? friendData,
-    Set<String>? friendDeviceIds,
-  }) async {
-    for (final deviceId in _connectedCentrals) {
-      final isFriend = friendDeviceIds?.contains(deviceId) ?? false;
-      await sendData(
-          deviceId, isFriend && friendData != null ? friendData : data);
     }
   }
 

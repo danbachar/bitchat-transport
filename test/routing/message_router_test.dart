@@ -4,7 +4,6 @@ import 'package:redux/redux.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:bitchat_transport/src/routing/message_router.dart';
 import 'package:bitchat_transport/src/protocol/protocol_handler.dart';
-import 'package:bitchat_transport/src/protocol/fragment_handler.dart';
 import 'package:bitchat_transport/src/models/identity.dart';
 import 'package:bitchat_transport/src/models/packet.dart';
 import 'package:bitchat_transport/src/models/peer.dart';
@@ -51,7 +50,6 @@ void main() {
     late BitchatIdentity otherIdentity;
     late ProtocolHandler protocolHandler;
     late ProtocolHandler otherProtocolHandler;
-    late FragmentHandler fragmentHandler;
     late Uint8List otherPubkey;
 
     setUp(() async {
@@ -75,13 +73,10 @@ void main() {
 
       protocolHandler = ProtocolHandler(identity: identity);
       otherProtocolHandler = ProtocolHandler(identity: otherIdentity);
-      fragmentHandler = FragmentHandler();
-
       router = MessageRouter(
         identity: identity,
         store: store,
         protocolHandler: protocolHandler,
-        fragmentHandler: fragmentHandler,
       );
 
       otherPubkey = otherIdentity.publicKey;
@@ -440,42 +435,6 @@ void main() {
 
         router.markSeen('seen-id');
         expect(router.isDuplicate('seen-id'), isTrue);
-      });
-    });
-
-    // =========================================================================
-    // BLE Packet Processing - Fragments
-    // =========================================================================
-
-    group('processPacket - fragments', () {
-      test('reassembles fragmented message and delivers', () async {
-        Uint8List? reassembledPayload;
-        router.onMessageReceived = (_, __, payload) {
-          reassembledPayload = payload;
-        };
-
-        final payload = Uint8List(1000);
-        for (var i = 0; i < payload.length; i++) {
-          payload[i] = i % 256;
-        }
-
-        final fragmented = fragmentHandler.fragment(
-          payload: payload,
-          senderPubkey: otherPubkey,
-        );
-
-        for (final fragment in fragmented.fragments) {
-          // Sign each fragment with the other peer's key
-          await otherProtocolHandler.signPacket(fragment);
-          await router.processPacket(
-            fragment,
-            transport: PeerTransport.bleDirect,
-            rssi: -60,
-          );
-        }
-
-        expect(reassembledPayload, isNotNull);
-        expect(reassembledPayload, equals(payload));
       });
     });
 

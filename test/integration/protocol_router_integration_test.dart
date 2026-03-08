@@ -6,7 +6,6 @@ import 'package:bitchat_transport/src/models/identity.dart';
 import 'package:bitchat_transport/src/models/packet.dart';
 import 'package:bitchat_transport/src/models/peer.dart';
 import 'package:bitchat_transport/src/protocol/protocol_handler.dart';
-import 'package:bitchat_transport/src/protocol/fragment_handler.dart';
 import 'package:bitchat_transport/src/routing/message_router.dart';
 import 'package:bitchat_transport/src/store/store.dart';
 
@@ -45,14 +44,12 @@ void main() {
       identity: aliceIdentity,
       store: aliceStore,
       protocolHandler: aliceProtocol,
-      fragmentHandler: FragmentHandler(),
     );
 
     bobRouter = MessageRouter(
       identity: bobIdentity,
       store: bobStore,
       protocolHandler: bobProtocol,
-      fragmentHandler: FragmentHandler(),
     );
   });
 

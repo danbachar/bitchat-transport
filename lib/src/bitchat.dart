@@ -10,7 +10,6 @@ import 'models/identity.dart';
 import 'models/peer.dart';
 import 'models/packet.dart';
 import 'protocol/protocol_handler.dart';
-import 'protocol/fragment_handler.dart';
 import 'routing/message_router.dart';
 import 'store/store.dart';
 
@@ -152,9 +151,6 @@ class Bitchat {
   /// Protocol handler for encoding/decoding packets
   late final ProtocolHandler _protocolHandler;
 
-  /// Fragment handler for large BLE messages
-  late final FragmentHandler _fragmentHandler;
-
   /// Message router for incoming packet processing
   late final MessageRouter _messageRouter;
 
@@ -190,12 +186,10 @@ class Bitchat {
     required this.store,
   }) {
     _protocolHandler = ProtocolHandler(identity: identity);
-    _fragmentHandler = FragmentHandler();
     _messageRouter = MessageRouter(
       identity: identity,
       store: store,
       protocolHandler: _protocolHandler,
-      fragmentHandler: _fragmentHandler,
     );
     _setupRouterCallbacks();
 
@@ -614,17 +608,8 @@ class Bitchat {
     if (transport == MessageTransport.ble) {
       _log.d('Sending via BLE to ${peer!.displayName}');
 
-      bool success;
-      if (_fragmentHandler.needsFragmentation(payload)) {
-        success = await _sendFragmentedViaBle(
-          payload: payload,
-          recipientPubkey: recipientPubkey,
-          bleDeviceId: peer.bleDeviceId!,
-        );
-      } else {
-        await _protocolHandler.signPacket(packet);
-        success = await _bleService!.sendToPeer(peer.bleDeviceId!, packet.serialize());
-      }
+      await _protocolHandler.signPacket(packet);
+      final success = await _bleService!.sendToPeer(peer.bleDeviceId!, packet.serialize());
 
       if (success) {
         store.dispatch(MessageSentAction(
@@ -736,20 +721,16 @@ class Bitchat {
     await _protocolHandler.signPacket(packet);
     final bytes = packet.serialize();
 
-    // Broadcast via BLE (handle fragmentation)
+    // Broadcast via BLE
     if (_isBleEnabledInSettings && _bleAvailable && _bleService != null) {
       try {
-        if (_fragmentHandler.needsFragmentation(payload)) {
-          await _broadcastFragmentedViaBle(payload: payload);
-        } else {
-          await _bleService!.broadcast(bytes);
-        }
+        await _bleService!.broadcast(bytes);
       } catch (e) {
         _log.e('BLE broadcast failed: $e');
       }
     }
 
-    // Broadcast via libp2p (no size limit)
+    // Broadcast via libp2p
     if (_isLibp2pEnabledInSettings && _libp2pAvailable && _libp2pService != null) {
       try {
         await _libp2pService!.broadcast(bytes);
@@ -1065,38 +1046,15 @@ class Bitchat {
       return;
     }
 
-    final friendPayload =
-        _protocolHandler.createAnnouncePayload(addresses: addresses);
+    _log.d('ANNOUNCE: ${addresses.length} addrs, ${friendPeers.length} friends');
 
-    _log.d('ANNOUNCE: ${addresses.length} addrs, '
-        '${friendPeers.length} friends, '
-        'payload ${friendPayload.length}B '
-        '(fragment=${_fragmentHandler.needsFragmentation(friendPayload)})');
-
-    if (_fragmentHandler.needsFragmentation(friendPayload)) {
-      // Friend ANNOUNCE too large for single BLE packet.
-      // Broadcast basic to all, then send fragmented to each friend.
-      _log.d('ANNOUNCE: fragmenting friend payload for ${friendPeers.length} friends');
-      await _bleService!.broadcast(basicBytes);
-      for (final peer in friendPeers) {
-        await _sendFragmentedViaBle(
-          payload: friendPayload,
-          recipientPubkey: peer.publicKey,
-          bleDeviceId: peer.bleDeviceId!,
-        );
-      }
-    } else {
-      // Fits in single packet — efficient single-pass broadcast
-      _log.d('ANNOUNCE: single-pass broadcast (basic + friend)');
-      final friendBytes =
-          await _buildSignedAnnounceBytes(addresses: addresses);
-      final friendDeviceIds = friendPeers.map((p) => p.bleDeviceId!).toSet();
-      await _bleService!.broadcast(
-        basicBytes,
-        friendData: friendBytes,
-        friendDeviceIds: friendDeviceIds,
-      );
-    }
+    final friendBytes = await _buildSignedAnnounceBytes(addresses: addresses);
+    final friendDeviceIds = friendPeers.map((p) => p.bleDeviceId!).toSet();
+    await _bleService!.broadcast(
+      basicBytes,
+      friendData: friendBytes,
+      friendDeviceIds: friendDeviceIds,
+    );
   }
 
   /// Broadcast ANNOUNCE via libp2p (uses BitchatPacket format, same as BLE)
@@ -1164,45 +1122,6 @@ class Bitchat {
     // _log.d('Dispatched stale peer cleanup actions');
   }
   
-  // ===== BLE Fragmentation Helpers =====
-
-  /// Send a large payload via BLE using fragmentation.
-  /// Each fragment is individually signed.
-  Future<bool> _sendFragmentedViaBle({
-    required Uint8List payload,
-    required Uint8List recipientPubkey,
-    required String bleDeviceId,
-  }) async {
-    final fragmented = _fragmentHandler.fragment(
-      payload: payload,
-      senderPubkey: identity.publicKey,
-      recipientPubkey: recipientPubkey,
-    );
-
-    for (final fragment in fragmented.fragments) {
-      await _protocolHandler.signPacket(fragment);
-      final sent = await _bleService!.sendToPeer(bleDeviceId, fragment.serialize());
-      if (!sent) return false;
-      await Future.delayed(FragmentHandler.fragmentDelay);
-    }
-    return true;
-  }
-
-  /// Broadcast a large payload via BLE using fragmentation.
-  /// Each fragment is individually signed.
-  Future<void> _broadcastFragmentedViaBle({required Uint8List payload}) async {
-    final fragmented = _fragmentHandler.fragment(
-      payload: payload,
-      senderPubkey: identity.publicKey,
-    );
-
-    for (final fragment in fragmented.fragments) {
-      await _protocolHandler.signPacket(fragment);
-      await _bleService!.broadcast(fragment.serialize());
-      await Future.delayed(FragmentHandler.fragmentDelay);
-    }
-  }
-
   // ===== LibP2P Helpers =====
 
   /// Ensure libp2p peer addresses are in the peerstore before dialing.

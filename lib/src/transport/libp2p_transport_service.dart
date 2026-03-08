@@ -5,6 +5,7 @@ import 'package:logger/logger.dart';
 import 'package:redux/redux.dart';
 
 import '../transport/transport_service.dart';
+import '../transport/fragmenter.dart';
 import '../models/identity.dart';
 import '../protocol/protocol_handler.dart';
 import '../store/store.dart';
@@ -292,6 +293,9 @@ class LibP2PTransportService extends TransportService {
   /// Current transport state
   TransportState _state = TransportState.uninitialized;
 
+  /// Transport-level fragmenter (64KB max for libp2p)
+  final Fragmenter _fragmenter = Fragmenter(maxPayloadSize: 65536);
+
   /// Stream controllers
   final _stateController = StreamController<TransportState>.broadcast();
   final _dataController = StreamController<TransportDataEvent>.broadcast();
@@ -475,21 +479,25 @@ class LibP2PTransportService extends TransportService {
 
   @override
   Future<bool> sendToPeer(String peerId, Uint8List data) async {
-    try {
-      const duration = Duration(seconds: 10);
-      final ctx = Context(timeout: duration);
-      P2PStream stream = await _host!
-          .newStream(PeerId.fromString(peerId), ['/gever/1.0.0'], ctx);
-      await stream.write(data);
-      await stream.close();
-
-      _log.d('Sent ${data.length} bytes to peer $peerId');
-      return true;
-    } catch (e) {
-      _log.e('Failed to send to peer $peerId: $e');
-      _log.e("Message was: $data");
-      return false;
+    final chunks = _fragmenter.split(data);
+    for (final chunk in chunks) {
+      try {
+        const duration = Duration(seconds: 10);
+        final ctx = Context(timeout: duration);
+        P2PStream stream = await _host!
+            .newStream(PeerId.fromString(peerId), ['/gever/1.0.0'], ctx);
+        await stream.write(chunk);
+        await stream.close();
+      } catch (e) {
+        _log.e('Failed to send to peer $peerId: $e');
+        return false;
+      }
+      if (chunks.length > 1) {
+        await Future.delayed(const Duration(milliseconds: 5));
+      }
     }
+    _log.d('Sent ${data.length} bytes to peer $peerId');
+    return true;
   }
 
   @override
@@ -535,6 +543,7 @@ class LibP2PTransportService extends TransportService {
   Future<void> dispose() async {
     _log.i('Disposing LibP2P transport');
     await stop();
+    _fragmenter.dispose();
     _host = null;
     await _stateController.close();
     await _dataController.close();
@@ -582,17 +591,23 @@ class LibP2PTransportService extends TransportService {
   void onDataReceived(String peerId, Uint8List data, {int rssi = 0}) {
     _log.d('Data received from peer $peerId: ${data.length} bytes');
 
-    // Emit raw data event
+    if (data.isEmpty) {
+      _log.w('Received empty data from peer');
+      return;
+    }
+
+    // Reassemble transport-level fragments
+    if (data[0] == Fragmenter.fragmentMarker) {
+      final assembled = _fragmenter.receive(peerId, data);
+      if (assembled == null) return;
+      data = assembled;
+    }
+
     _dataController.add(TransportDataEvent(
       peerId: peerId,
       transport: TransportType.libp2p,
       data: data,
     ));
-
-    if (data.isEmpty) {
-      _log.w('Received empty data from peer');
-      return;
-    }
 
     // Forward to coordinator for deserialization and routing
     onLibp2pDataReceived?.call(peerId, data);
