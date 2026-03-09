@@ -27,10 +27,11 @@ class Fragmenter {
   /// Timeout for incomplete reassembly.
   static const Duration reassemblyTimeout = Duration(seconds: 30);
 
-  /// Maximum bytes per transport write (e.g. 512 for BLE).
+  /// Default maximum bytes per transport write (e.g. 512 for BLE).
+  /// Can be overridden per-call in [split] via the [maxSize] parameter.
   final int maxPayloadSize;
 
-  /// Maximum chunk data per fragment.
+  /// Maximum chunk data per fragment (using default maxPayloadSize).
   int get maxChunkSize => maxPayloadSize - headerSize;
 
   /// Incrementing message ID counter (wraps at 65536).
@@ -55,15 +56,26 @@ class Fragmenter {
   /// Split data into transport-sized chunks.
   ///
   /// Returns `[data]` unchanged if it fits in a single write.
-  /// Otherwise returns a list of fragment chunks, each ≤ [maxPayloadSize].
-  List<Uint8List> split(Uint8List data) {
-    if (data.length <= maxPayloadSize) return [data];
+  /// Otherwise returns a list of fragment chunks, each ≤ [maxSize]
+  /// (or [maxPayloadSize] if [maxSize] is not provided).
+  ///
+  /// Use [maxSize] to override the default for a specific peer, e.g.
+  /// based on the negotiated BLE MTU (`mtu - 3`).
+  List<Uint8List> split(Uint8List data, {int? maxSize}) {
+    final effectiveMaxPayload = maxSize ?? maxPayloadSize;
+    final effectiveMaxChunk = effectiveMaxPayload - headerSize;
+
+    if (effectiveMaxChunk <= 0) {
+      throw ArgumentError('maxSize must be > $headerSize');
+    }
+
+    if (data.length <= effectiveMaxPayload) return [data];
 
     final messageId = _nextMessageId;
     _nextMessageId = (_nextMessageId + 1) & 0xFFFF;
 
     final chunks = <Uint8List>[];
-    final totalFragments = (data.length / maxChunkSize).ceil();
+    final totalFragments = (data.length / effectiveMaxChunk).ceil();
     if (totalFragments > 255) {
       throw ArgumentError(
         'Data too large: $totalFragments fragments needed (max 255)',
@@ -71,8 +83,8 @@ class Fragmenter {
     }
 
     for (var i = 0; i < totalFragments; i++) {
-      final start = i * maxChunkSize;
-      final end = (start + maxChunkSize).clamp(0, data.length);
+      final start = i * effectiveMaxChunk;
+      final end = (start + effectiveMaxChunk).clamp(0, data.length);
       final chunkData = data.sublist(start, end);
 
       final chunk = Uint8List(headerSize + chunkData.length);

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:typed_data';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:logger/logger.dart';
+import '../models/identity.dart';
 
 /// Discovered BLE device info
 class DiscoveredDevice {
@@ -27,6 +28,11 @@ class ConnectedPeer {
   final BluetoothDevice device;
   final BluetoothCharacteristic characteristic;
   final int rssi;
+
+  /// Negotiated ATT MTU for this connection.
+  /// The max application-level write size is `mtu - 3` (ATT overhead).
+  final int mtu;
+
   DateTime lastActivity;
 
   ConnectedPeer({
@@ -34,6 +40,7 @@ class ConnectedPeer {
     required this.device,
     required this.characteristic,
     required this.rssi,
+    this.mtu = 23,
   }) : lastActivity = DateTime.now();
 }
 
@@ -198,6 +205,19 @@ class BleCentralService {
       // Connect with timeout
       await device.connect(timeout: connectionTimeout);
 
+      // Negotiate MTU for better throughput.
+      // On Android, we must explicitly request a larger MTU (default is only 23).
+      // On iOS, MTU is auto-negotiated — requestMtu() throws, so we catch and
+      // fall back to mtuNow.
+      int negotiatedMtu;
+      try {
+        negotiatedMtu = await device.requestMtu(515);
+        _log.i('Negotiated MTU with $deviceId: $negotiatedMtu');
+      } catch (_) {
+        negotiatedMtu = device.mtuNow;
+        _log.d('Using platform-negotiated MTU for $deviceId: $negotiatedMtu');
+      }
+
       // Listen for disconnection
       _subscriptions.add(
         device.connectionState.listen((state) {
@@ -256,12 +276,13 @@ class BleCentralService {
         }),
       );
 
-      // Store connection with RSSI from discovery
+      // Store connection with RSSI and negotiated MTU
       _connected[deviceId] = ConnectedPeer(
         deviceId: deviceId,
         device: device,
         characteristic: targetChar,
         rssi: discovered.rssi,
+        mtu: negotiatedMtu,
       );
 
       // _log.i('Connected to: $deviceId');
@@ -306,8 +327,15 @@ class BleCentralService {
     }
   }
 
+  /// Get the negotiated MTU for a connected device.
+  /// Returns null if the device is not connected.
+  int? getMtuForDevice(String deviceId) => _connected[deviceId]?.mtu;
+
   /// Send data to a connected peripheral.
-  /// Uses write-without-response to avoid GATT busy errors from queued writes.
+  ///
+  /// Uses allowLongWrite as a safety net so that
+  /// writes larger than MTU-3 are handled via the Prepare Write / Execute Write
+  /// BLE procedure instead of being silently truncated or rejected.
   Future<bool> sendData(String deviceId, Uint8List data) async {
     final peer = _connected[deviceId];
     if (peer == null) {
@@ -316,10 +344,11 @@ class BleCentralService {
     }
 
     try {
-      // Use write-without-response to avoid ERROR_GATT_WRITE_REQUEST_BUSY.
-      // Android only allows one write-with-response at a time, and rapid
-      // consecutive writes cause timeouts and busy errors.
-      await peer.characteristic.write(data, withoutResponse: true);
+      await peer.characteristic.write(
+        data,
+        withoutResponse: false,
+        allowLongWrite: true,
+      );
       peer.lastActivity = DateTime.now();
       return true;
     } catch (e) {
@@ -332,42 +361,44 @@ class BleCentralService {
 
   void _onScanResults(List<ScanResult> results) {
     for (final result in results) {
-      // Check if this device advertises any service UUID
-      // Each Bitchat device advertises a unique UUID derived from its public key
-      // We discover all devices and filter after ANNOUNCE exchange
-      if (result.advertisementData.serviceUuids.isNotEmpty) {
-        final uuidStr = result.advertisementData.serviceUuids.first.toString().toLowerCase();
-        final deviceId = result.device.remoteId.str;
+      if (result.advertisementData.serviceUuids.isEmpty) continue;
 
-        final existing = _discovered[deviceId];
-        if (existing == null) {
-          // New device discovered
-          final discovered = DiscoveredDevice(
-            deviceId: deviceId,
-            name: result.advertisementData.advName,
-            serviceUuid: uuidStr,
-            rssi: result.rssi,
-            device: result.device,
-          );
+      final uuidStr = result.advertisementData.serviceUuids.first.toString().toLowerCase();
 
-          _discovered[deviceId] = discovered;
-          // _log.d('Discovered: $deviceId (${result.advertisementData.advName})');
-          onDeviceDiscovered?.call(discovered);
-        } else {
-          // Already discovered - update RSSI and notify
-          // Create updated device with new RSSI
-          final updated = DiscoveredDevice(
-            deviceId: deviceId,
-            name: result.advertisementData.advName,
-            serviceUuid: uuidStr,
-            rssi: result.rssi,
-            device: result.device,
-          );
-          _discovered[deviceId] = updated;
+      // Filter by Grassroots UUID prefix — skip non-Grassroots devices
+      // (headphones, smartwatches, etc.)
+      final uuidHex = uuidStr.replaceAll('-', '');
+      _log.d('Scan: ${result.device.remoteId.str} uuid=$uuidStr hex=$uuidHex prefix=${BitchatIdentity.grassrootsUuidPrefix} match=${uuidHex.startsWith(BitchatIdentity.grassrootsUuidPrefix)}');
+      if (!uuidHex.startsWith(BitchatIdentity.grassrootsUuidPrefix)) continue;
 
-          // Notify with updated RSSI (callback can decide to update UI)
-          onDeviceDiscovered?.call(updated);
-        }
+      final deviceId = result.device.remoteId.str;
+
+      final existing = _discovered[deviceId];
+      if (existing == null) {
+        // New device discovered
+        final discovered = DiscoveredDevice(
+          deviceId: deviceId,
+          name: result.advertisementData.advName,
+          serviceUuid: uuidStr,
+          rssi: result.rssi,
+          device: result.device,
+        );
+
+        _discovered[deviceId] = discovered;
+        onDeviceDiscovered?.call(discovered);
+      } else {
+        // Already discovered - update RSSI and notify
+        final updated = DiscoveredDevice(
+          deviceId: deviceId,
+          name: result.advertisementData.advName,
+          serviceUuid: uuidStr,
+          rssi: result.rssi,
+          device: result.device,
+        );
+        _discovered[deviceId] = updated;
+
+        // Notify with updated RSSI (callback can decide to update UI)
+        onDeviceDiscovered?.call(updated);
       }
     }
   }

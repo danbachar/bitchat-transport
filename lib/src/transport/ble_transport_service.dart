@@ -60,7 +60,8 @@ class BleTransportService extends TransportService {
   /// Peripheral service (advertiser)
   late final BlePeripheralService _peripheral;
 
-  /// Transport-level fragmenter (512-byte BLE max)
+  /// Transport-level fragmenter.
+  /// Default 512 bytes; overridden per-peer based on negotiated MTU.
   final Fragmenter _fragmenter = Fragmenter(maxPayloadSize: 512);
 
   /// Current transport state
@@ -244,7 +245,12 @@ class BleTransportService extends TransportService {
 
   @override
   Future<bool> sendToPeer(String peerId, Uint8List data) async {
-    final chunks = _fragmenter.split(data);
+    // Fragment based on peer's negotiated MTU (minus 3 bytes ATT overhead).
+    // Falls back to the default 512 if MTU is unknown (e.g. peripheral path).
+    final mtu = _central.getMtuForDevice(peerId);
+    final maxWriteSize = mtu != null ? mtu - 3 : null;
+
+    final chunks = _fragmenter.split(data, maxSize: maxWriteSize);
     for (final chunk in chunks) {
       bool sent = await _central.sendData(peerId, chunk);
       if (!sent) sent = await _peripheral.sendData(peerId, chunk);
@@ -386,11 +392,13 @@ class BleTransportService extends TransportService {
     _handleConnectionChange(deviceId, connected, isCentral: false);
   }
 
+  /// Maximum time a device can stay in isConnecting before we reset the flag.
+  static const Duration _connectingTimeout = Duration(seconds: 20);
+
   void _onDeviceDiscovered(DiscoveredDevice device) {
-    // Check if this is a new discovery
     final existing = _peersState.getDiscoveredBlePeer(device.deviceId);
     final isNew = existing == null;
-    
+
     // Dispatch action to update Redux store
     store.dispatch(BleDeviceDiscoveredAction(
       deviceId: device.deviceId,
@@ -398,53 +406,55 @@ class BleTransportService extends TransportService {
       rssi: device.rssi,
       serviceUuid: device.serviceUuid,
     ));
-    
+
     // Also update RSSI for connected Peers (those who have sent ANNOUNCE)
     final pubkey = getPubkeyForPeerId(device.deviceId);
     if (pubkey != null) {
       store.dispatch(PeerRssiUpdatedAction(publicKey: pubkey, rssi: device.rssi));
     }
-    
-    // Auto-connect if this is a new discovery
+
+    // Try to connect if not already connected.
+    // - New devices: always attempt connection
+    // - Known devices: retry if not connected and not currently connecting
+    //   (handles failed first attempts, silently dropped connections, etc.)
     if (isNew) {
       _autoConnectToPeer(device.deviceId);
+    } else if (!_isConnected(device.deviceId) && !existing.isConnecting) {
+      _autoConnectToPeer(device.deviceId);
+    } else if (existing.isConnecting) {
+      // Detect stuck isConnecting state — if it's been connecting for too long,
+      // reset and retry
+      final connectingDuration = DateTime.now().difference(existing.lastSeen);
+      if (connectingDuration > _connectingTimeout) {
+        _log.w('Connection to ${device.deviceId} stuck for ${connectingDuration.inSeconds}s, resetting');
+        store.dispatch(BleDeviceConnectionFailedAction(device.deviceId, error: 'Connecting timeout'));
+        _autoConnectToPeer(device.deviceId);
+      }
     }
   }
-  
+
   /// Automatically connect to a discovered peer and send ANNOUNCE
   Future<bool> _autoConnectToPeer(String deviceId) async {
-    // _log.i('Auto-connecting to peer: $deviceId');
-    
-    // Skip if already connected
+    // Skip if already connected at the transport level
     if (_isConnected(deviceId)) {
-      _log.d('Already connected to $deviceId, skipping auto-connect');
       return false;
     }
-    
-    // Skip if already connecting
-    final discovered = _peersState.getDiscoveredBlePeer(deviceId);
-    if (discovered?.isConnecting == true) {
-      // _log.d('Already connecting to $deviceId');
-      return false;
-    }
-    
+
     // Mark as connecting in store
     store.dispatch(BleDeviceConnectingAction(deviceId));
-    
+
     try {
       final success = await _central.connectToDevice(deviceId);
-      
+
       if (success) {
         _log.i('Successfully connected to $deviceId');
         store.dispatch(BleDeviceConnectedAction(deviceId));
         return true;
       } else {
-        // _log.w('Failed to connect to $deviceId');
         store.dispatch(BleDeviceConnectionFailedAction(deviceId, error: 'Connection failed'));
         return false;
       }
     } catch (e) {
-      // _log.e('Error auto-connecting to $deviceId: $e');
       store.dispatch(BleDeviceConnectionFailedAction(deviceId, error: e.toString()));
       return false;
     }
