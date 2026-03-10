@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:logger/logger.dart';
@@ -246,9 +247,10 @@ class BleTransportService extends TransportService {
   @override
   Future<bool> sendToPeer(String peerId, Uint8List data) async {
     // Fragment based on peer's negotiated MTU (minus 3 bytes ATT overhead).
-    // Falls back to the default 512 if MTU is unknown (e.g. peripheral path).
+    // Capped at 512: GATT attribute values cannot exceed 512 bytes regardless
+    // of negotiated MTU. Falls back to the default 512 if MTU is unknown.
     final mtu = _central.getMtuForDevice(peerId);
-    final maxWriteSize = mtu != null ? mtu - 3 : null;
+    final maxWriteSize = mtu != null ? min(mtu - 3, 512) : null;
 
     final chunks = _fragmenter.split(data, maxSize: maxWriteSize);
     for (final chunk in chunks) {

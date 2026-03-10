@@ -207,10 +207,19 @@ class BlePeripheralService {
     _connectedCentrals.clear();
   }
 
-  /// Send data to a connected central via notification
+  /// Send data to a connected central via notification.
+  ///
+  /// Pre-checks data length to prevent Android's fatal
+  /// IllegalArgumentException from notifyCharacteristicChanged.
   Future<bool> sendData(String deviceId, Uint8List data) async {
     if (!_connectedCentrals.contains(deviceId)) {
       _log.w('Cannot send to disconnected central: $deviceId');
+      return false;
+    }
+
+    if (data.length > maxCharacteristicSize) {
+      _log.e('Data too large for BLE notification: '
+          '${data.length} > $maxCharacteristicSize bytes');
       return false;
     }
 
