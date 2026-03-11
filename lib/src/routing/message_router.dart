@@ -17,6 +17,7 @@ import '../store/peers_state.dart';
 /// - Packet deduplication (via BloomFilter)
 /// - ANNOUNCE decoding and Redux dispatch
 /// - MESSAGE targeting (is-for-us check)
+/// - Fragment reassembly delegation
 /// - Callback dispatch to application layer
 ///
 /// All transports feed into [processPacket] — one entry point, one format.
@@ -66,6 +67,7 @@ class MessageRouter {
     BitchatPacket packet, {
     required PeerTransport transport,
     String? bleDeviceId,
+    BleRole? bleRole,
     String? libp2pPeerId,
     int rssi = -100,
   }) async {
@@ -82,6 +84,7 @@ class MessageRouter {
         packet,
         transport: transport,
         bleDeviceId: bleDeviceId,
+        bleRole: bleRole,
         libp2pPeerId: libp2pPeerId,
         rssi: rssi,
       );
@@ -113,6 +116,7 @@ class MessageRouter {
     BitchatPacket packet, {
     required PeerTransport transport,
     String? bleDeviceId,
+    BleRole? bleRole,
     String? libp2pPeerId,
     int rssi = -100,
   }) {
@@ -121,20 +125,33 @@ class MessageRouter {
 
     int effectiveRssi = rssi;
 
-    // BLE-specific: lookup RSSI from discovered peers
-    if (transport == PeerTransport.bleDirect) {
-      DiscoveredPeerState? discoveredPeer;
-      if (bleDeviceId != null) {
-        discoveredPeer = _peersState.getDiscoveredBlePeer(bleDeviceId);
+    // Resolve bleDeviceId from discovered BLE peers.
+    // Works for ALL transports: if the peer is nearby via BLE, we find their
+    // bleDeviceId by matching their service UUID (derived from pubkey).
+    // If the peer is NOT nearby, bleDeviceId stays null — correct behavior.
+    String? resolvedBleDeviceId = bleDeviceId;
+    BleRole? resolvedBleRole = bleRole;
+    DiscoveredPeerState? discoveredPeer;
+    if (bleDeviceId != null) {
+      discoveredPeer = _peersState.getDiscoveredBlePeer(bleDeviceId);
+    }
+    if (discoveredPeer == null) {
+      final theirServiceUuid = BitchatIdentity.deriveServiceUuid(pubkey);
+      discoveredPeer =
+          _peersState.findDiscoveredBlePeerByServiceUuid(theirServiceUuid);
+      if (discoveredPeer != null && bleDeviceId == null) {
+        // Only use scan-discovered device ID when no transport-provided ID exists.
+        // This handles non-BLE transports (e.g., libp2p) where the peer is also
+        // nearby via BLE. When bleDeviceId IS provided (BLE transport), we keep it
+        // because Android MAC randomization means the scan-discovered MAC may differ
+        // from the actual connected MAC.
+        resolvedBleDeviceId = discoveredPeer.transportId;
+        // If we found via scan, that means our central discovered them
+        resolvedBleRole ??= BleRole.central;
       }
-      if (discoveredPeer == null) {
-        final theirServiceUuid = _deriveServiceUuidFromPubkey(pubkey);
-        discoveredPeer =
-            _peersState.findDiscoveredBlePeerByServiceUuid(theirServiceUuid);
-      }
-      if (discoveredPeer != null) {
-        effectiveRssi = discoveredPeer.rssi;
-      }
+    }
+    if (discoveredPeer != null) {
+      effectiveRssi = discoveredPeer.rssi;
     }
 
     final existingPeer = _peersState.getPeerByPubkey(pubkey);
@@ -147,19 +164,34 @@ class MessageRouter {
       libp2pAddresses = [libp2pPeerId];
     }
 
+    // Set the correct BLE device ID field based on role
+    String? centralId;
+    String? peripheralId;
+    if (resolvedBleDeviceId != null && resolvedBleRole != null) {
+      if (resolvedBleRole == BleRole.central) {
+        centralId = resolvedBleDeviceId;
+      } else {
+        peripheralId = resolvedBleDeviceId;
+      }
+    }
+
     store.dispatch(PeerAnnounceReceivedAction(
       publicKey: pubkey,
       nickname: data.nickname,
       protocolVersion: data.protocolVersion,
       rssi: effectiveRssi,
       transport: transport,
-      bleDeviceId: bleDeviceId,
+      bleCentralDeviceId: centralId,
+      blePeripheralDeviceId: peripheralId,
       libp2pAddresses: libp2pAddresses,
     ));
 
-    if (bleDeviceId != null) {
-      store.dispatch(
-          AssociateBleDeviceAction(publicKey: pubkey, deviceId: bleDeviceId));
+    if (resolvedBleDeviceId != null && resolvedBleRole != null) {
+      store.dispatch(AssociateBleDeviceAction(
+        publicKey: pubkey,
+        deviceId: resolvedBleDeviceId,
+        role: resolvedBleRole,
+      ));
     }
 
     _log.i(
@@ -190,14 +222,31 @@ class MessageRouter {
 
   void _handleAck(BitchatPacket packet) {
     if (packet.payload.isEmpty) return;
-    final messageId = String.fromCharCodes(packet.payload);
-    onAckReceived?.call(messageId);
+    try {
+      final messageId = String.fromCharCodes(packet.payload);
+      // Validate: message IDs are short alphanumeric strings (UUID v4 prefix)
+      if (messageId.length > 36) {
+        _log.w('Ignoring ACK with invalid message ID length: ${messageId.length}');
+        return;
+      }
+      onAckReceived?.call(messageId);
+    } catch (e) {
+      _log.w('Failed to decode ACK payload: $e');
+    }
   }
 
   void _handleReadReceipt(BitchatPacket packet) {
     if (packet.payload.isEmpty) return;
-    final messageId = String.fromCharCodes(packet.payload);
-    onReadReceiptReceived?.call(messageId);
+    try {
+      final messageId = String.fromCharCodes(packet.payload);
+      if (messageId.length > 36) {
+        _log.w('Ignoring read receipt with invalid message ID length: ${messageId.length}');
+        return;
+      }
+      onReadReceiptReceived?.call(messageId);
+    } catch (e) {
+      _log.w('Failed to decode read receipt payload: $e');
+    }
   }
 
   // ===== Helpers =====
@@ -213,18 +262,6 @@ class MessageRouter {
       if (a[i] != b[i]) return false;
     }
     return true;
-  }
-
-  /// Derive BLE Service UUID from a public key (last 16 bytes as UUID).
-  static String _deriveServiceUuidFromPubkey(Uint8List pubkey) {
-    final uuidBytes = pubkey.sublist(16, 32);
-    final hex =
-        uuidBytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-    return '${hex.substring(0, 8)}-'
-        '${hex.substring(8, 12)}-'
-        '${hex.substring(12, 16)}-'
-        '${hex.substring(16, 20)}-'
-        '${hex.substring(20, 32)}';
   }
 
   // ===== Deduplication API =====

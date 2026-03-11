@@ -42,6 +42,8 @@ void main() {
       expect(peer.isConnecting, false);
       expect(peer.isConnected, false);
       expect(peer.connectionAttempts, 0);
+      expect(peer.consecutiveFailures, 0);
+      expect(peer.nextRetryAfter, isNull);
     });
 
     test('updates existing peer RSSI and lastSeen', () {
@@ -180,7 +182,7 @@ void main() {
   // =========================================================================
 
   group('BleDeviceConnectedAction', () {
-    test('sets isConnected=true, isConnecting=false, clears lastError', () {
+    test('sets isConnected=true, isConnecting=false, resets backoff', () {
       final now = DateTime.now();
       final initial = PeersState(
         discoveredBlePeers: {
@@ -191,6 +193,8 @@ void main() {
             lastSeen: now,
             isConnecting: true,
             lastError: 'previous error',
+            consecutiveFailures: 3,
+            nextRetryAfter: now.add(const Duration(seconds: 20)),
           ),
         },
       );
@@ -201,23 +205,18 @@ void main() {
       final peer = result.discoveredBlePeers['device-1']!;
       expect(peer.isConnected, true);
       expect(peer.isConnecting, false);
-      // Note: copyWith with null keeps old value for nullable fields,
-      // but the reducer passes lastError: null which preserves via copyWith.
-      // The DiscoveredPeerState.copyWith passes null through, so lastError
-      // retains its value. Let's verify the actual behavior:
-      // Looking at the reducer: existing.copyWith(lastError: null)
-      // copyWith: lastError: lastError ?? this.lastError
-      // So passing null keeps the old value. This is a known limitation.
-      // The test documents actual behavior.
+      expect(peer.lastError, isNull);
+      expect(peer.consecutiveFailures, 0);
+      expect(peer.nextRetryAfter, isNull);
     });
   });
 
   // =========================================================================
-  // BleDeviceConnectionFailedAction
+  // BleDeviceConnectionFailedAction — with backoff
   // =========================================================================
 
   group('BleDeviceConnectionFailedAction', () {
-    test('sets isConnecting=false, isConnected=false, and sets lastError', () {
+    test('sets isConnecting=false, isConnected=false, sets lastError and backoff', () {
       final now = DateTime.now();
       final initial = PeersState(
         discoveredBlePeers: {
@@ -239,6 +238,109 @@ void main() {
       expect(peer.isConnecting, false);
       expect(peer.isConnected, false);
       expect(peer.lastError, 'Timeout');
+      expect(peer.consecutiveFailures, 1);
+      expect(peer.nextRetryAfter, isNotNull);
+    });
+
+    test('exponential backoff: 1st failure = ~5s', () {
+      final now = DateTime.now();
+      final initial = PeersState(
+        discoveredBlePeers: {
+          'device-1': DiscoveredPeerState(
+            transportId: 'device-1',
+            rssi: -60,
+            discoveredAt: now,
+            lastSeen: now,
+            isConnecting: true,
+            consecutiveFailures: 0,
+          ),
+        },
+      );
+      final action = BleDeviceConnectionFailedAction('device-1', error: 'fail');
+
+      final result = peersReducer(initial, action);
+      final peer = result.discoveredBlePeers['device-1']!;
+
+      expect(peer.consecutiveFailures, 1);
+      // Should be ~5 seconds from now
+      final delay = peer.nextRetryAfter!.difference(now);
+      expect(delay.inSeconds, greaterThanOrEqualTo(4));
+      expect(delay.inSeconds, lessThanOrEqualTo(6));
+    });
+
+    test('exponential backoff: 2nd failure = ~10s', () {
+      final now = DateTime.now();
+      final initial = PeersState(
+        discoveredBlePeers: {
+          'device-1': DiscoveredPeerState(
+            transportId: 'device-1',
+            rssi: -60,
+            discoveredAt: now,
+            lastSeen: now,
+            isConnecting: true,
+            consecutiveFailures: 1,
+          ),
+        },
+      );
+      final action = BleDeviceConnectionFailedAction('device-1', error: 'fail');
+
+      final result = peersReducer(initial, action);
+      final peer = result.discoveredBlePeers['device-1']!;
+
+      expect(peer.consecutiveFailures, 2);
+      final delay = peer.nextRetryAfter!.difference(now);
+      expect(delay.inSeconds, greaterThanOrEqualTo(9));
+      expect(delay.inSeconds, lessThanOrEqualTo(11));
+    });
+
+    test('exponential backoff: 3rd failure = ~20s', () {
+      final now = DateTime.now();
+      final initial = PeersState(
+        discoveredBlePeers: {
+          'device-1': DiscoveredPeerState(
+            transportId: 'device-1',
+            rssi: -60,
+            discoveredAt: now,
+            lastSeen: now,
+            isConnecting: true,
+            consecutiveFailures: 2,
+          ),
+        },
+      );
+      final action = BleDeviceConnectionFailedAction('device-1', error: 'fail');
+
+      final result = peersReducer(initial, action);
+      final peer = result.discoveredBlePeers['device-1']!;
+
+      expect(peer.consecutiveFailures, 3);
+      final delay = peer.nextRetryAfter!.difference(now);
+      expect(delay.inSeconds, greaterThanOrEqualTo(19));
+      expect(delay.inSeconds, lessThanOrEqualTo(21));
+    });
+
+    test('exponential backoff caps at 120s', () {
+      final now = DateTime.now();
+      final initial = PeersState(
+        discoveredBlePeers: {
+          'device-1': DiscoveredPeerState(
+            transportId: 'device-1',
+            rssi: -60,
+            discoveredAt: now,
+            lastSeen: now,
+            isConnecting: true,
+            consecutiveFailures: 10, // Would be 5 * 2^10 = 5120s without cap
+          ),
+        },
+      );
+      final action = BleDeviceConnectionFailedAction('device-1', error: 'fail');
+
+      final result = peersReducer(initial, action);
+      final peer = result.discoveredBlePeers['device-1']!;
+
+      expect(peer.consecutiveFailures, 11);
+      final delay = peer.nextRetryAfter!.difference(now);
+      expect(delay.inSeconds, lessThanOrEqualTo(121));
+      expect(delay.inSeconds, greaterThanOrEqualTo(119));
     });
   });
 
@@ -268,6 +370,31 @@ void main() {
       final peer = result.discoveredBlePeers['device-1']!;
       expect(peer.isConnecting, false);
       expect(peer.isConnected, false);
+    });
+
+    test('preserves backoff state on disconnect', () {
+      final now = DateTime.now();
+      final retryAfter = now.add(const Duration(seconds: 30));
+      final initial = PeersState(
+        discoveredBlePeers: {
+          'device-1': DiscoveredPeerState(
+            transportId: 'device-1',
+            rssi: -60,
+            discoveredAt: now,
+            lastSeen: now,
+            isConnected: true,
+            consecutiveFailures: 2,
+            nextRetryAfter: retryAfter,
+          ),
+        },
+      );
+      final action = BleDeviceDisconnectedAction('device-1');
+
+      final result = peersReducer(initial, action);
+
+      final peer = result.discoveredBlePeers['device-1']!;
+      expect(peer.consecutiveFailures, 2);
+      expect(peer.nextRetryAfter, retryAfter);
     });
   });
 
@@ -371,11 +498,11 @@ void main() {
   });
 
   // =========================================================================
-  // PeerAnnounceReceivedAction
+  // PeerAnnounceReceivedAction — split BLE device IDs
   // =========================================================================
 
   group('PeerAnnounceReceivedAction', () {
-    test('creates new peer with correct fields', () {
+    test('creates new peer with central BLE device ID', () {
       final pubkey = _testPubkey(1);
       const state = PeersState.initial;
       final action = PeerAnnounceReceivedAction(
@@ -384,7 +511,7 @@ void main() {
         protocolVersion: 2,
         rssi: -55,
         transport: PeerTransport.bleDirect,
-        bleDeviceId: 'ble-device-1',
+        bleCentralDeviceId: 'ble-central-1',
       );
 
       final result = peersReducer(state, action);
@@ -397,9 +524,35 @@ void main() {
       expect(peer.protocolVersion, 2);
       expect(peer.rssi, -55);
       expect(peer.transport, PeerTransport.bleDirect);
-      expect(peer.bleDeviceId, 'ble-device-1');
+      expect(peer.bleCentralDeviceId, 'ble-central-1');
+      expect(peer.blePeripheralDeviceId, isNull);
+      expect(peer.bleDeviceId, 'ble-central-1'); // convenience getter
       expect(peer.connectionState, PeerConnectionState.connected);
       expect(peer.lastSeen, isNotNull);
+      expect(peer.lastBleSeen, isNotNull);
+    });
+
+    test('creates new peer with peripheral BLE device ID', () {
+      final pubkey = _testPubkey(1);
+      const state = PeersState.initial;
+      final action = PeerAnnounceReceivedAction(
+        publicKey: pubkey,
+        nickname: 'Alice',
+        protocolVersion: 1,
+        rssi: -60,
+        transport: PeerTransport.bleDirect,
+        blePeripheralDeviceId: 'ble-peripheral-1',
+      );
+
+      final result = peersReducer(state, action);
+
+      final hex = _pubkeyHex(pubkey);
+      final peer = result.peers[hex]!;
+      expect(peer.bleCentralDeviceId, isNull);
+      expect(peer.blePeripheralDeviceId, 'ble-peripheral-1');
+      expect(peer.bleDeviceId, 'ble-peripheral-1'); // convenience getter
+      expect(peer.connectionState, PeerConnectionState.connected);
+      expect(peer.lastBleSeen, isNotNull);
     });
 
     test('updates existing peer', () {
@@ -503,7 +656,7 @@ void main() {
             publicKey: pubkey,
             nickname: 'Alice',
             connectionState: PeerConnectionState.connected,
-            bleDeviceId: 'ble-1',
+            bleCentralDeviceId: 'ble-1',
           ),
         },
       );
@@ -513,7 +666,8 @@ void main() {
 
       final peer = result.peers[hex]!;
       expect(peer.connectionState, PeerConnectionState.disconnected);
-      expect(peer.bleDeviceId, isNull);
+      expect(peer.bleCentralDeviceId, isNull);
+      expect(peer.blePeripheralDeviceId, isNull);
     });
 
     test('keeps connected if has libp2p address', () {
@@ -525,7 +679,7 @@ void main() {
             publicKey: pubkey,
             nickname: 'Alice',
             connectionState: PeerConnectionState.connected,
-            bleDeviceId: 'ble-1',
+            bleCentralDeviceId: 'ble-1',
             libp2pAddress: '/ip4/1.2.3.4/tcp/4001/p2p/QmTest',
           ),
         },
@@ -536,11 +690,12 @@ void main() {
 
       final peer = result.peers[hex]!;
       expect(peer.connectionState, PeerConnectionState.connected);
-      expect(peer.bleDeviceId, isNull);
+      expect(peer.bleCentralDeviceId, isNull);
+      expect(peer.blePeripheralDeviceId, isNull);
       expect(peer.libp2pAddress, '/ip4/1.2.3.4/tcp/4001/p2p/QmTest');
     });
 
-    test('clears bleDeviceId', () {
+    test('clears both central and peripheral BLE device IDs', () {
       final pubkey = _testPubkey(1);
       final hex = _pubkeyHex(pubkey);
       final initial = PeersState(
@@ -549,7 +704,8 @@ void main() {
             publicKey: pubkey,
             nickname: 'Alice',
             connectionState: PeerConnectionState.connected,
-            bleDeviceId: 'ble-1',
+            bleCentralDeviceId: 'ble-central-1',
+            blePeripheralDeviceId: 'ble-peripheral-1',
           ),
         },
       );
@@ -557,7 +713,9 @@ void main() {
 
       final result = peersReducer(initial, action);
 
-      expect(result.peers[hex]!.bleDeviceId, isNull);
+      final peer = result.peers[hex]!;
+      expect(peer.bleCentralDeviceId, isNull);
+      expect(peer.blePeripheralDeviceId, isNull);
     });
   });
 
@@ -597,7 +755,7 @@ void main() {
             publicKey: pubkey,
             nickname: 'Alice',
             connectionState: PeerConnectionState.connected,
-            bleDeviceId: 'ble-1',
+            bleCentralDeviceId: 'ble-1',
             libp2pAddress: '/ip4/1.2.3.4/tcp/4001/p2p/QmTest',
           ),
         },
@@ -608,7 +766,7 @@ void main() {
 
       final peer = result.peers[hex]!;
       expect(peer.connectionState, PeerConnectionState.connected);
-      expect(peer.bleDeviceId, 'ble-1');
+      expect(peer.bleCentralDeviceId, 'ble-1');
       expect(peer.libp2pAddress, isNull);
     });
 
@@ -666,7 +824,7 @@ void main() {
   // =========================================================================
 
   group('AssociateBleDeviceAction', () {
-    test('sets bleDeviceId on existing peer', () {
+    test('sets bleCentralDeviceId on existing peer', () {
       final pubkey = _testPubkey(1);
       final hex = _pubkeyHex(pubkey);
       final initial = PeersState(
@@ -680,11 +838,34 @@ void main() {
       final action = AssociateBleDeviceAction(
         publicKey: pubkey,
         deviceId: 'ble-device-99',
+        role: 'central',
       );
 
       final result = peersReducer(initial, action);
 
-      expect(result.peers[hex]!.bleDeviceId, 'ble-device-99');
+      expect(result.peers[hex]!.bleCentralDeviceId, 'ble-device-99');
+    });
+
+    test('sets blePeripheralDeviceId when role is peripheral', () {
+      final pubkey = _testPubkey(1);
+      final hex = _pubkeyHex(pubkey);
+      final initial = PeersState(
+        peers: {
+          hex: PeerState(
+            publicKey: pubkey,
+            nickname: 'Alice',
+          ),
+        },
+      );
+      final action = AssociateBleDeviceAction(
+        publicKey: pubkey,
+        deviceId: 'ble-device-99',
+        role: 'peripheral',
+      );
+
+      final result = peersReducer(initial, action);
+
+      expect(result.peers[hex]!.blePeripheralDeviceId, 'ble-device-99');
     });
 
     test('is a no-op for unknown peer', () {
@@ -868,7 +1049,7 @@ void main() {
             nickname: 'Alice',
             connectionState: PeerConnectionState.connected,
             isFriend: true,
-            bleDeviceId: 'ble-1',
+            bleCentralDeviceId: 'ble-1',
             libp2pAddress: '/ip4/1.2.3.4/tcp/4001/p2p/QmTest',
             libp2pHostId: 'QmTest',
             libp2pHostAddrs: const ['/ip4/1.2.3.4/tcp/4001'],
@@ -885,7 +1066,7 @@ void main() {
       expect(peer.libp2pAddress, isNull);
       expect(peer.libp2pHostId, isNull);
       expect(peer.libp2pHostAddrs, isNull);
-      expect(peer.bleDeviceId, 'ble-1');
+      expect(peer.bleCentralDeviceId, 'ble-1');
       expect(peer.connectionState, PeerConnectionState.connected);
       expect(peer.transport, PeerTransport.bleDirect);
     });
@@ -939,7 +1120,7 @@ void main() {
             connectionState: PeerConnectionState.connected,
             lastSeen: now.subtract(const Duration(minutes: 10)),
             isFriend: true,
-            bleDeviceId: 'ble-1',
+            bleCentralDeviceId: 'ble-1',
             libp2pAddress: '/ip4/1.2.3.4/tcp/4001/p2p/QmTest',
             libp2pHostId: 'QmTest',
             libp2pHostAddrs: const ['/ip4/1.2.3.4/tcp/4001'],
@@ -955,7 +1136,8 @@ void main() {
       expect(peer.connectionState, PeerConnectionState.disconnected);
       expect(peer.isFriend, true);
       expect(peer.rssi, -100);
-      expect(peer.bleDeviceId, isNull);
+      expect(peer.bleCentralDeviceId, isNull);
+      expect(peer.blePeripheralDeviceId, isNull);
       expect(peer.libp2pAddress, isNull);
       expect(peer.libp2pHostId, 'QmTest');
       expect(peer.libp2pHostAddrs, ['/ip4/1.2.3.4/tcp/4001']);

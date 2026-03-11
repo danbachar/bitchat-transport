@@ -501,7 +501,7 @@ class Bitchat {
       // Disconnect all peers that were connected via BLE
       // This clears their bleDeviceId and updates connection state
       for (final peer in _peersState.peersList) {
-        if (peer.bleDeviceId != null) {
+        if (peer.hasBleConnection) {
           store.dispatch(PeerBleDisconnectedAction(peer.publicKey));
         }
       }
@@ -577,7 +577,7 @@ class Bitchat {
     // Determine which transport will be used
     MessageTransport? transport;
     if (_isBleEnabledInSettings && _bleAvailable && _bleService != null &&
-        peer != null && peer.isReachable && peer.bleDeviceId != null) {
+        peer != null && peer.isReachable && peer.hasBleConnection) {
       transport = MessageTransport.ble;
     } else if (_isLibp2pEnabledInSettings && _libp2pAvailable && _libp2pService != null &&
         peer?.libp2pHostId != null && peer!.libp2pHostId!.isNotEmpty) {
@@ -697,8 +697,9 @@ class Bitchat {
 
     // Try BLE first
     if (_isBleEnabledInSettings && _bleAvailable && _bleService != null) {
-      if (peer != null && peer.bleDeviceId != null) {
-        if (await _bleService!.sendToPeer(peer.bleDeviceId!, bytes)) return true;
+      if (peer != null && peer.hasBleConnection) {
+        final bleId = peer.bleDeviceId;
+        if (bleId != null && await _bleService!.sendToPeer(bleId, bytes)) return true;
       }
     }
 
@@ -887,11 +888,12 @@ class Bitchat {
     if (_bleService == null) return;
 
     // Forward BLE packets to the MessageRouter for processing
-    _bleService!.onBlePacketReceived = (packet, {String? bleDeviceId, int rssi = -100}) {
+    _bleService!.onBlePacketReceived = (packet, {String? bleDeviceId, int rssi = -100, BleRole? bleRole}) {
       _messageRouter.processPacket(
         packet,
         transport: PeerTransport.bleDirect,
         bleDeviceId: bleDeviceId,
+        bleRole: bleRole,
         rssi: rssi,
       );
     };
@@ -1038,7 +1040,7 @@ class Bitchat {
 
     final addresses = _libp2pService!.getRoutableAddresses(includeLocal: true);
     final friendPeers = store.state.peers.peersList
-        .where((p) => p.isFriend && p.bleDeviceId != null)
+        .where((p) => p.isFriend && p.hasBleConnection)
         .toList();
 
     if (addresses.isEmpty || friendPeers.isEmpty) {
@@ -1049,7 +1051,7 @@ class Bitchat {
     _log.d('ANNOUNCE: ${addresses.length} addrs, ${friendPeers.length} friends');
 
     final friendBytes = await _buildSignedAnnounceBytes(addresses: addresses);
-    final friendDeviceIds = friendPeers.map((p) => p.bleDeviceId!).toSet();
+    final friendDeviceIds = friendPeers.map((p) => p.bleDeviceId).whereType<String>().toSet();
     await _bleService!.broadcast(
       basicBytes,
       friendData: friendBytes,
