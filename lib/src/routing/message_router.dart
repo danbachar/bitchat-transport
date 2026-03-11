@@ -17,7 +17,6 @@ import '../store/peers_state.dart';
 /// - Packet deduplication (via BloomFilter)
 /// - ANNOUNCE decoding and Redux dispatch
 /// - MESSAGE targeting (is-for-us check)
-/// - Fragment reassembly delegation
 /// - Callback dispatch to application layer
 ///
 /// All transports feed into [processPacket] — one entry point, one format.
@@ -185,14 +184,6 @@ class MessageRouter {
       blePeripheralDeviceId: peripheralId,
       libp2pAddresses: libp2pAddresses,
     ));
-
-    if (resolvedBleDeviceId != null && resolvedBleRole != null) {
-      store.dispatch(AssociateBleDeviceAction(
-        publicKey: pubkey,
-        deviceId: resolvedBleDeviceId,
-        role: resolvedBleRole,
-      ));
-    }
 
     _log.i(
         'Peer ${isNew ? "connected" : "updated"}: ${data.nickname} via ${transport.name}'

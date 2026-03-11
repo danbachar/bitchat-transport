@@ -838,7 +838,7 @@ void main() {
       final action = AssociateBleDeviceAction(
         publicKey: pubkey,
         deviceId: 'ble-device-99',
-        role: 'central',
+        role: BleRole.central,
       );
 
       final result = peersReducer(initial, action);
@@ -860,7 +860,7 @@ void main() {
       final action = AssociateBleDeviceAction(
         publicKey: pubkey,
         deviceId: 'ble-device-99',
-        role: 'peripheral',
+        role: BleRole.peripheral,
       );
 
       final result = peersReducer(initial, action);
@@ -873,6 +873,7 @@ void main() {
       final action = AssociateBleDeviceAction(
         publicKey: _testPubkey(99),
         deviceId: 'ble-device-99',
+        role: BleRole.central,
       );
 
       final result = peersReducer(state, action);

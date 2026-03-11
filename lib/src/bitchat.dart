@@ -608,8 +608,14 @@ class Bitchat {
     if (transport == MessageTransport.ble) {
       _log.d('Sending via BLE to ${peer!.displayName}');
 
+      final bleId = peer.bleDeviceId;
+      if (bleId == null) {
+        _log.w('BLE transport selected but no BLE device ID available');
+        return null;
+      }
+
       await _protocolHandler.signPacket(packet);
-      final success = await _bleService!.sendToPeer(peer.bleDeviceId!, packet.serialize());
+      final success = await _bleService!.sendToPeer(bleId, packet.serialize());
 
       if (success) {
         store.dispatch(MessageSentAction(

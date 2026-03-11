@@ -133,21 +133,6 @@ class BleTransportService extends TransportService {
   /// Whether currently scanning for devices
   bool get isScanning => _central.isScanning;
 
-  /// Get all known peers from Redux store
-  List<PeerState> get knownPeers => _peersState.peersList;
-
-  /// Get connected peers from Redux store
-  List<PeerState> get connectedKnownPeers => _peersState.connectedPeers;
-
-  /// Check if a peer is reachable
-  bool isPeerReachable(Uint8List pubkey) => _peersState.isPeerReachable(pubkey);
-
-  /// Get peer by public key
-  PeerState? getPeer(Uint8List pubkey) => _peersState.getPeerByPubkey(pubkey);
-
-  /// Get all discovered BLE peers (before ANNOUNCE)
-  List<DiscoveredPeerState> get discoveredPeers => _peersState.discoveredBlePeersList;
-
   // ===== Lifecycle =====
 
   @override
@@ -340,10 +325,6 @@ class BleTransportService extends TransportService {
   }
 
   // ===== Peer Management =====
-
-  void onPeerBleConnected(String bleDeviceId, {int? rssi}) {
-    _log.d('BLE peer connected: $bleDeviceId');
-  }
 
   void onPeerBleDisconnected(Uint8List pubkey, {BleRole? role}) {
     final peer = _peersState.getPeerByPubkey(pubkey);
