@@ -910,11 +910,16 @@ class Bitchat {
       onPeerDisconnected?.call(peer);
     };
 
-    // Listen to connection events for ANNOUNCE broadcasts
+    // Listen to connection events for ANNOUNCE broadcasts.
+    // Delay briefly so the remote device can finish its BLE setup
+    // (MTU negotiation, service discovery, characteristic subscription)
+    // before we try to send the ANNOUNCE packet.
     _bleService!.connectionStream.listen((event) {
       if (event.connected) {
         _log.i('BLE device connected: ${event.peerId}');
-        _broadcastAnnounce();
+        Future.delayed(const Duration(seconds: 2), () {
+          _broadcastAnnounce();
+        });
       } else {
         _log.i('BLE device disconnected: ${event.peerId}');
       }
