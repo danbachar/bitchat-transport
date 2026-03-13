@@ -3,6 +3,7 @@ import 'peers_state.dart';
 import 'messages_state.dart';
 import 'friendships_state.dart';
 import 'settings_state.dart';
+import 'signaling_state.dart';
 import 'transports_state.dart';
 
 /// Main application state for redux
@@ -23,12 +24,16 @@ class AppState {
   /// Settings state (transport settings)
   final SettingsState settings;
 
+  /// Signaling state (address registration, hole-punch attempts)
+  final SignalingState signaling;
+
   const AppState({
     this.transports = const TransportsState(),
     this.peers = const PeersState(),
     this.messages = const MessagesState(),
     this.friendships = const FriendshipsState(),
     this.settings = const SettingsState(),
+    this.signaling = const SignalingState(),
   });
 
   /// Initial state
@@ -42,7 +47,7 @@ class AppState {
   /// Number of connected peers (after ANNOUNCE)
   int get connectedPeerCount => peers.connectedCount;
 
-  /// Number of online friends (friends connected via libp2p only)
+  /// Number of online friends (friends connected via UDP only)
   int get onlineFriendsCount => peers.onlineFriends.length;
 
   // ===== Convenience getters derived from transports state =====
@@ -60,6 +65,7 @@ class AppState {
     MessagesState? messages,
     FriendshipsState? friendships,
     SettingsState? settings,
+    SignalingState? signaling,
   }) {
     return AppState(
       transports: transports ?? this.transports,
@@ -67,6 +73,7 @@ class AppState {
       messages: messages ?? this.messages,
       friendships: friendships ?? this.friendships,
       settings: settings ?? this.settings,
+      signaling: signaling ?? this.signaling,
     );
   }
 
@@ -79,7 +86,8 @@ class AppState {
           peers == other.peers &&
           messages == other.messages &&
           friendships == other.friendships &&
-          settings == other.settings;
+          settings == other.settings &&
+          signaling == other.signaling;
 
   @override
   int get hashCode => Object.hash(
@@ -88,5 +96,6 @@ class AppState {
         messages,
         friendships,
         settings,
+        signaling,
       );
 }

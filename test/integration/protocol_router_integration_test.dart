@@ -107,8 +107,8 @@ void main() {
       expect(peerState.rssi, equals(-50));
     });
 
-    test('ANNOUNCE with libp2p address roundtrips correctly', () async {
-      const address = '/ip4/192.168.1.1/tcp/4001/p2p/QmHash123';
+    test('ANNOUNCE with UDP address roundtrips correctly', () async {
+      const address = '[2001:db8::1]:4001';
       final announcePayload = aliceProtocol.createAnnouncePayload(address: address);
 
       final packet = BitchatPacket(
@@ -133,11 +133,11 @@ void main() {
       );
 
       expect(receivedAnnounce, isNotNull);
-      expect(receivedAnnounce!.libp2pAddress, equals(address));
+      expect(receivedAnnounce!.udpAddress, equals(address));
 
-      // Verify libp2p address stored in Redux
+      // Verify UDP address stored in Redux
       final peerState = bobStore.state.peers.getPeerByPubkey(aliceIdentity.publicKey);
-      expect(peerState!.libp2pAddress, equals(address));
+      expect(peerState!.udpAddress, equals(address));
     });
   });
 
@@ -252,8 +252,8 @@ void main() {
     });
   });
 
-  group('LibP2P ANNOUNCE roundtrip', () {
-    test('Alice creates libp2p ANNOUNCE, Bob receives and decodes it', () async {
+  group('UDP ANNOUNCE roundtrip', () {
+    test('Alice creates UDP ANNOUNCE, Bob receives and decodes it', () async {
       final announcePayload = aliceProtocol.createAnnouncePayload();
 
       final packet = BitchatPacket(
@@ -275,24 +275,24 @@ void main() {
 
       await bobRouter.processPacket(
         packet,
-        transport: PeerTransport.libp2p,
-        libp2pPeerId: 'peer-alice-id',
+        transport: PeerTransport.udp,
+        udpPeerId: 'peer-alice-id',
       );
 
       expect(receivedAnnounce, isNotNull);
       expect(receivedAnnounce!.publicKey, equals(aliceIdentity.publicKey));
       expect(receivedAnnounce!.nickname, equals('Alice'));
       expect(receivedAnnounce!.protocolVersion, equals(1));
-      expect(receivedTransport, equals(PeerTransport.libp2p));
+      expect(receivedTransport, equals(PeerTransport.udp));
 
       // Verify Bob's Redux store was updated
       final peerState = bobStore.state.peers.getPeerByPubkey(aliceIdentity.publicKey);
       expect(peerState, isNotNull);
       expect(peerState!.nickname, equals('Alice'));
-      expect(peerState.transport, equals(PeerTransport.libp2p));
+      expect(peerState.transport, equals(PeerTransport.udp));
     });
 
-    test('libp2p ANNOUNCE with address roundtrips correctly', () async {
+    test('UDP ANNOUNCE with address roundtrips correctly', () async {
       const address = '/ip6/::1/udp/4001/udx';
       final announcePayload = aliceProtocol.createAnnouncePayload(address: address);
 
@@ -312,16 +312,16 @@ void main() {
 
       await bobRouter.processPacket(
         packet,
-        transport: PeerTransport.libp2p,
-        libp2pPeerId: 'peer-alice-id',
+        transport: PeerTransport.udp,
+        udpPeerId: 'peer-alice-id',
       );
 
-      expect(receivedAnnounce!.libp2pAddress, equals(address));
+      expect(receivedAnnounce!.udpAddress, equals(address));
     });
   });
 
-  group('LibP2P MESSAGE roundtrip', () {
-    test('Alice sends libp2p message, Bob receives it', () async {
+  group('UDP MESSAGE roundtrip', () {
+    test('Alice sends UDP message, Bob receives it', () async {
       final messagePayload = Uint8List.fromList([99, 88, 77]);
 
       final packet = aliceProtocol.createMessagePacket(
@@ -342,8 +342,8 @@ void main() {
 
       await bobRouter.processPacket(
         packet,
-        transport: PeerTransport.libp2p,
-        libp2pPeerId: 'peer-alice-id',
+        transport: PeerTransport.udp,
+        udpPeerId: 'peer-alice-id',
       );
 
       expect(receivedId, isNotNull);
@@ -352,7 +352,7 @@ void main() {
     });
   });
 
-  group('LibP2P ACK roundtrip', () {
+  group('UDP ACK roundtrip', () {
     test('Alice sends ACK, Bob receives message ID', () async {
       const messageId = 'ack12345';
 
@@ -370,16 +370,16 @@ void main() {
 
       await bobRouter.processPacket(
         packet,
-        transport: PeerTransport.libp2p,
-        libp2pPeerId: 'peer-alice-id',
+        transport: PeerTransport.udp,
+        udpPeerId: 'peer-alice-id',
       );
 
       expect(receivedMessageId, equals(messageId));
     });
   });
 
-  group('LibP2P READ_RECEIPT roundtrip', () {
-    test('Alice sends read receipt via libp2p, Bob receives it', () async {
+  group('UDP READ_RECEIPT roundtrip', () {
+    test('Alice sends read receipt via UDP, Bob receives it', () async {
       const messageId = 'rcpt1234';
 
       final packet = aliceProtocol.createReadReceiptPacket(
@@ -396,8 +396,8 @@ void main() {
 
       await bobRouter.processPacket(
         packet,
-        transport: PeerTransport.libp2p,
-        libp2pPeerId: 'peer-alice-id',
+        transport: PeerTransport.udp,
+        udpPeerId: 'peer-alice-id',
       );
 
       expect(receivedMessageId, equals(messageId));
@@ -465,7 +465,7 @@ void main() {
   });
 
   group('cross-transport peer discovery', () {
-    test('peer announced via BLE then libp2p updates transport info', () async {
+    test('peer announced via BLE then UDP updates transport info', () async {
       // First: Alice announces via BLE
       final bleAnnouncePayload = aliceProtocol.createAnnouncePayload();
       final blePacket = BitchatPacket(
@@ -480,6 +480,7 @@ void main() {
         blePacket,
         transport: PeerTransport.bleDirect,
         bleDeviceId: 'device-alice',
+        bleRole: BleRole.central,
         rssi: -40,
       );
 
@@ -488,27 +489,27 @@ void main() {
       expect(peer!.transport, equals(PeerTransport.bleDirect));
       expect(peer.bleDeviceId, equals('device-alice'));
 
-      // Then: Alice announces via libp2p with address
-      const libp2pAddr = '/ip4/10.0.0.1/tcp/4001/p2p/QmAlice';
-      final libp2pAnnouncePayload = aliceProtocol.createAnnouncePayload(address: libp2pAddr);
-      final libp2pPacket = BitchatPacket(
+      // Then: Alice announces via UDP with address
+      const udpAddr = '[2001:db8::a]:4001';
+      final udpAnnouncePayload = aliceProtocol.createAnnouncePayload(address: udpAddr);
+      final udpPacket = BitchatPacket(
         type: PacketType.announce,
         senderPubkey: aliceIdentity.publicKey,
-        payload: libp2pAnnouncePayload,
+        payload: udpAnnouncePayload,
         signature: Uint8List(64),
       );
-      await aliceProtocol.signPacket(libp2pPacket);
+      await aliceProtocol.signPacket(udpPacket);
 
       await bobRouter.processPacket(
-        libp2pPacket,
-        transport: PeerTransport.libp2p,
-        libp2pPeerId: 'peer-alice-libp2p',
+        udpPacket,
+        transport: PeerTransport.udp,
+        udpPeerId: 'peer-alice-udp',
       );
 
-      // Peer should now have libp2p address too
+      // Peer should now have UDP address too
       peer = bobStore.state.peers.getPeerByPubkey(aliceIdentity.publicKey);
       expect(peer, isNotNull);
-      expect(peer!.libp2pAddress, equals(libp2pAddr));
+      expect(peer!.udpAddress, equals(udpAddr));
     });
   });
 

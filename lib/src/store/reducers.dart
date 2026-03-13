@@ -7,6 +7,8 @@ import 'friendships_actions.dart';
 import 'friendships_reducer.dart';
 import 'settings_actions.dart';
 import 'settings_reducer.dart';
+import 'signaling_actions.dart';
+import 'signaling_reducer.dart';
 import 'transports_actions.dart';
 import 'transports_reducer.dart';
 
@@ -44,6 +46,13 @@ AppState appReducer(AppState state, dynamic action) {
   if (action is TransportAction) {
     return state.copyWith(
       transports: transportsReducer(state.transports, action),
+    );
+  }
+
+  // Handle signaling actions via signalingReducer
+  if (action is SignalingAction) {
+    return state.copyWith(
+      signaling: signalingReducer(state.signaling, action),
     );
   }
 

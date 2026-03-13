@@ -21,8 +21,8 @@ class ProtocolHandler {
   ///
   /// Format: [pubkey(32) + version(2) + nickLen(1) + nick + addrLen(2) + addr?]
   ///
-  /// The address field is only populated when sending to friends.
-  /// For non-friends or broadcast, addrLen is 0.
+  /// The address field is included when the sender has a UDP address.
+  /// Omitted (addrLen 0) only for BLE announcements to non-friends (privacy).
   Uint8List createAnnouncePayload({String? address}) {
     final nicknameBytes = Uint8List.fromList(identity.nickname.codeUnits);
     final addressBytes = address != null ? Uint8List.fromList(address.codeUnits) : Uint8List(0);
@@ -119,7 +119,7 @@ class ProtocolHandler {
       publicKey: Uint8List.fromList(pubkey),
       nickname: nickname,
       protocolVersion: version,
-      libp2pAddress: address,
+      udpAddress: address,
     );
   }
 
@@ -182,15 +182,15 @@ class AnnounceData {
   final Uint8List publicKey;
   final String nickname;
   final int protocolVersion;
-  final String? libp2pAddress;
+  final String? udpAddress;
 
   const AnnounceData({
     required this.publicKey,
     required this.nickname,
     required this.protocolVersion,
-    this.libp2pAddress,
+    this.udpAddress,
   });
 
   @override
-  String toString() => 'AnnounceData($nickname, v$protocolVersion${libp2pAddress != null ? ", addr: $libp2pAddress" : ""})';
+  String toString() => 'AnnounceData($nickname, v$protocolVersion${udpAddress != null ? ", addr: $udpAddress" : ""})';
 }

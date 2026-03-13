@@ -10,8 +10,8 @@ enum TransportType {
   /// WebRTC-based P2P transport (STUN/TURN/TURNS)
   webrtc,
 
-  /// LibP2P-based transport
-  libp2p,
+  /// UDP-based transport (dart_udx)
+  udp,
 }
 
 /// Display metadata for a transport service.
@@ -180,9 +180,9 @@ abstract class TransportService {
 
   /// Broadcast data to all connected peers.
   ///
-  /// [excludePeerId] can be used to exclude a specific peer
-  /// (useful for avoiding echo when relaying).
-  Future<void> broadcast(Uint8List data, {String? excludePeerId});
+  /// [excludePeerIds] can be used to exclude specific peers
+  /// (e.g., to skip friends who get a separate addressed ANNOUNCE).
+  Future<void> broadcast(Uint8List data, {Set<String>? excludePeerIds});
 
   /// Associate a peer with a public key.
   ///

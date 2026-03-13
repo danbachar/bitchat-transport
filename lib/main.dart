@@ -76,7 +76,7 @@ Future<BitchatIdentity> _initIdentity() async {
 Map<String, dynamic> _serializeAppState(AppState state) {
   return {
     'bleTransportState': state.transports.bleState.name,
-    'libp2pTransportState': state.transports.libp2pState.name,
+    'udpTransportState': state.transports.udpState.name,
     'peers': {
       'discoveredBlePeers': {
         for (final e in state.peers.discoveredBlePeers.entries)
@@ -100,7 +100,7 @@ Map<String, dynamic> _serializeAppState(AppState state) {
             'activeTransport': e.value.activeTransport.name,
             'rssi': e.value.rssi,
             'bleDeviceId': e.value.bleDeviceId,
-            'libp2pAddress': e.value.libp2pAddress,
+            'udpAddress': e.value.udpAddress,
             'isFriend': e.value.isFriend,
             'lastSeen': e.value.lastSeen?.toIso8601String(),
           },
@@ -117,7 +117,7 @@ Map<String, dynamic> _serializeAppState(AppState state) {
         e.key: {
           'nickname': e.value.nickname,
           'status': e.value.status.name,
-          'libp2pAddress': e.value.libp2pAddress,
+          'udpAddress': e.value.udpAddress,
         },
     },
     'settings': state.settings.toJson(),
@@ -207,7 +207,6 @@ class _BitchatHomeState extends State<BitchatHome>
   BitchatIdentity? _identity;
   Bitchat? _bitchat;
   Timer? _refreshTimer;
-  Timer? _friendAnnounceTimer;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
   int _currentIndex = 1; // Start on "Around" tab (center)
 
@@ -216,25 +215,10 @@ class _BitchatHomeState extends State<BitchatHome>
   
   // Transport availability derived from Redux store
   bool get _bleAvailable => appStore.state.transports.bleState.isUsable;
-  bool get _libp2pAvailable => appStore.state.transports.libp2pState.isUsable;
+  bool get _udpAvailable => appStore.state.transports.udpState.isUsable;
 
-  /// Check if libp2p host is available for friend requests
-  bool get _hasLibp2pHost => _bitchat?.libp2pHostId != null;
-
-  /// Get host ID for friend requests (null if not available)
-  String? get _myLibp2pHostId => _bitchat?.libp2pHostId;
-
-  /// Get host addresses for friend requests (empty if not available)
-  List<String> get _myLibp2pHostAddrs => _bitchat?.libp2pHostAddrs ?? [];
-
-  /// Computed full multiaddress string combining first address with host ID
-  String? get _myLibp2pAddress {
-    final hostId = _myLibp2pHostId;
-    final addrs = _myLibp2pHostAddrs;
-    if (hostId == null) return null;
-    if (addrs.isNotEmpty) return '${addrs.first}/p2p/$hostId';
-    return '/p2p/$hostId';
-  }
+  /// Get our UDP address for friend communication
+  String? get _myUdpAddress => _bitchat?.udpAddress;
   
   /// Get nearby peers from Redux store (BLE-connected peers in physical proximity).
   /// For the "Nearby" section - only peers reachable via Bluetooth.
@@ -289,7 +273,6 @@ class _BitchatHomeState extends State<BitchatHome>
   void dispose() {
     _connectivitySubscription?.cancel();
     _refreshTimer?.cancel();
-    _friendAnnounceTimer?.cancel();
     _bitchat?.dispose();
     // Flush persistence on exit
     persistenceService.flush(appStore.state);
@@ -310,7 +293,8 @@ class _BitchatHomeState extends State<BitchatHome>
         _handleIncomingMessage(messageId, senderPubkey, payload);
       };
 
-      bitchat.onLibp2pInitialized = _onLibp2pBecameAvailable;
+      // Friend presence is handled at the transport layer; no app-layer
+      // callback needed for UDP initialization.
 
       // bitchat.onPeerConnected = (peer) {
       //   print('Peer connected: ${peer.displayName}');
@@ -344,16 +328,12 @@ class _BitchatHomeState extends State<BitchatHome>
 
       // Hydrate Redux store with existing friends from FriendshipStore
       await _hydrateFriendsFromStore();
-
-      // Start periodic friend announce timer
-      _startFriendAnnounceTimer();
     } catch (e) {
       _log.e('Initialization error: $e');
     }
   }
 
   /// Hydrate Redux store with friends from persistent FriendshipStore
-  /// and attempt to reconnect to each friend via libp2p if available.
   Future<void> _hydrateFriendsFromStore() async {
     for (final friendship in appStore.state.friendships.friends) {
       final pubkey = ChatMessage.hexToPubkey(friendship.peerPubkeyHex);
@@ -364,68 +344,18 @@ class _BitchatHomeState extends State<BitchatHome>
         nickname: friendship.nickname,
       ));
 
-      // If friend has libp2p info, associate it and attempt connection
-      if (friendship.libp2pAddress != null && friendship.libp2pAddress!.isNotEmpty) {
-        appStore.dispatch(AssociateLibp2pAddressAction(
+      // If friend has UDP info, associate it
+      if (friendship.udpAddress != null && friendship.udpAddress!.isNotEmpty) {
+        appStore.dispatch(AssociateUdpAddressAction(
           publicKey: pubkey,
-          address: friendship.libp2pAddress!,
+          address: friendship.udpAddress!,
         ));
-
-        // Attempt to reconnect if libp2p is available
-        if (friendship.libp2pHostId != null && friendship.libp2pHostAddrs != null) {
-          await _bitchat?.connectToLibp2pHost(
-            hostId: friendship.libp2pHostId!,
-            hostAddrs: friendship.libp2pHostAddrs!,
-          );
-        }
       }
     }
   }
 
-  /// Called when libp2p becomes available (initialized or toggled on)
-  Future<void> _onLibp2pBecameAvailable() async {
-    _log.i('libp2p initialized - broadcasting address to friends');
-
-    // Send immediate FriendAnnounce with our new libp2p address
-    // (instead of waiting for the next 10-second cycle)
-    // The _myLibp2pAddress getter will automatically get the new address from _bitchat
-    await _announceToFriends();
-
-    // Friends will receive FriendAnnounce with libp2pAddress and connect
-  }
-
-  /// Start periodic announcements to friends
-  void _startFriendAnnounceTimer() {
-    _friendAnnounceTimer?.cancel();
-    // Announce to friends every 10 seconds
-    _friendAnnounceTimer = Timer.periodic(const Duration(seconds: 10), (_) {
-      _announceToFriends();
-    });
-    // Also send an initial announce
-    _announceToFriends();
-  }
-
-  /// Send FriendAnnounce block to all friends
-  /// Always sends announce, with or without libp2p address
-  Future<void> _announceToFriends() async {
-    if (_bitchat == null || _identity == null) return;
-
-    final friends = appStore.state.friendships.friends;
-    if (friends.isEmpty) return;
-
-    // Create announce block - libp2pAddress is null if libp2p unavailable
-    final block = FriendAnnounceBlock(
-      libp2pAddress: _myLibp2pAddress,  // Can be null
-      nickname: _identity!.nickname,
-    );
-    final data = block.serialize();
-
-    for (final friend in friends) {
-      final pubkey = ChatMessage.hexToPubkey(friend.peerPubkeyHex);
-      // Try to send via BLE first, then libp2p
-      await _bitchat!.send(pubkey, data);
-    }
-  }
+  // Friend presence is handled at the transport layer via unified ANNOUNCE
+  // messages. BLE and UDP broadcasts include address for friends automatically.
 
   Future<void> _handleIncomingMessage(
       String messageId, Uint8List senderPubkey, Uint8List payload) async {
@@ -481,11 +411,6 @@ class _BitchatHomeState extends State<BitchatHome>
       case BlockType.friendshipRevoke:
         _log.i('Handling FriendshipRevokeBlock from $senderName ($senderHex)');
         await _handleFriendshipRevoke(senderHex);
-
-      case BlockType.friendAnnounce:
-        _log.i('Handling FriendAnnounceBlock from $senderName ($senderHex)');
-        final announceBlock = block as FriendAnnounceBlock;
-        await _handleFriendAnnounce(senderHex, announceBlock);
     }
   }
 
@@ -550,7 +475,7 @@ class _BitchatHomeState extends State<BitchatHome>
       await _showFriendRequestNotification(senderHex, senderName);
     }
 
-    // libp2p connection will be established when FriendAnnounce is received
+    // UDP connection will be established when ANNOUNCE is received
   }
 
   Future<void> _handleFriendshipAccept(
@@ -585,54 +510,7 @@ class _BitchatHomeState extends State<BitchatHome>
     ));
     debugPrint('🤝 Chat message saved');
 
-    // libp2p connection will be established when FriendAnnounce is received
-  }
-
-  Future<void> _handleFriendAnnounce(
-      String senderHex, FriendAnnounceBlock block) async {
-    final pubkey = ChatMessage.hexToPubkey(senderHex);
-
-    // Update Redux state - ALWAYS, not just when there's an address
-    final peerState = appStore.state.peers.getPeerByPubkey(pubkey);
-    if (peerState != null && peerState.isFriend) {
-      if (block.libp2pAddress != null) {
-        // Friend has libp2p address - update Redux and establish connection
-        appStore.dispatch(AssociateLibp2pAddressAction(
-          publicKey: pubkey,
-          address: block.libp2pAddress!,
-        ));
-
-        // Parse address and attempt connection
-        final libp2pParts = _parseLibp2pAddress(block.libp2pAddress!);
-        if (libp2pParts != null && _bitchat != null) {
-          final (hostId, baseAddr) = libp2pParts;
-          await _bitchat!.connectToLibp2pHost(
-            hostId: hostId,
-            hostAddrs: [baseAddr],
-          );
-        }
-      } else {
-        // Friend no longer has libp2p address (disabled libp2p)
-        // Clear the address and disconnect if connected via libp2p
-        appStore.dispatch(AssociateLibp2pAddressAction(
-          publicKey: pubkey,
-          address: '',  // Empty string clears
-        ));
-
-        // TODO: Disconnect libp2p connection if one exists
-        // _bitchat?.disconnectFromLibp2pHost(hostId);
-      }
-    }
-  }
-
-  /// Parse libp2p multiaddress into (hostId, baseAddr)
-  /// Example: /ip6/::1/udp/12345/p2p/QmHostId → (QmHostId, /ip6/::1/udp/12345)
-  (String, String)? _parseLibp2pAddress(String libp2pAddress) {
-    final parts = libp2pAddress.split('/p2p/');
-    if (parts.length == 2) {
-      return (parts[1], parts[0]);
-    }
-    return null;
+    // UDP connection will be established when ANNOUNCE is received
   }
 
   /// Handle being unfriended by someone
@@ -740,7 +618,7 @@ class _BitchatHomeState extends State<BitchatHome>
           onSendFriendRequest: () => _sendFriendRequest(peer),
           onAcceptFriendRequest: () => _acceptFriendRequest(peer),
           onUnfriend: () => _unfriend(peerHex),
-          myLibp2pAddress: _myLibp2pAddress,
+          myUdpAddress: _myUdpAddress,
         ),
       ),
     );
@@ -768,7 +646,7 @@ class _BitchatHomeState extends State<BitchatHome>
       nickname: peer.displayName,
     ));
 
-    // Create the friendship offer block (no libp2p info)
+    // Create the friendship offer block
     final block = FriendshipOfferBlock(
       message: 'Hey, let\'s be friends!',
     );
@@ -820,7 +698,7 @@ class _BitchatHomeState extends State<BitchatHome>
       nickname: peer.displayName,
     ));
 
-    // Create the friendship accept block (no libp2p info)
+    // Create the friendship accept block
     final block = FriendshipAcceptBlock();
 
     // Send via Bitchat (works over BLE)
@@ -838,7 +716,7 @@ class _BitchatHomeState extends State<BitchatHome>
       messageType: ChatMessageType.friendRequestAcceptedByUs.index,
     ));
 
-    // libp2p connection will be established when FriendAnnounce is received
+    // UDP connection will be established when ANNOUNCE is received
   }
 
   Future<void> _declineFriendRequest(String peerHex) async {
@@ -1910,13 +1788,13 @@ class _BitchatHomeState extends State<BitchatHome>
             ),
             const SizedBox(height: 8),
 
-            // libp2p status
+            // UDP status
             _buildTransportStatusRow(
               icon: Icons.public,
               iconColor: Colors.green,
-              name: 'Internet (libp2p)',
-              enabled: appStore.state.settings.libp2pEnabled,
-              available: _libp2pAvailable,
+              name: 'Internet (UDP)',
+              enabled: appStore.state.settings.udpEnabled,
+              available: _udpAvailable,
             ),
             
             const Divider(height: 24),

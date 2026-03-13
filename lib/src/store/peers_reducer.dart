@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 import '../models/peer.dart';
+import '../transport/address_utils.dart';
 import 'peers_state.dart';
 import 'peers_actions.dart';
 
@@ -173,37 +174,6 @@ PeersState peersReducer(PeersState state, dynamic action) {
     return state.copyWith(discoveredBlePeers: {});
   }
 
-  // ===== Libp2p Discovery Actions =====
-
-  if (action is Libp2pPeerDiscoveredAction) {
-    final existing = state.discoveredLibp2pPeers[action.peerId];
-    final now = DateTime.now();
-
-    if (existing == null) {
-      final newPeer = DiscoveredPeerState(
-        transportId: action.peerId,
-        displayName: action.displayName,
-        rssi: 0, // libp2p doesn't have RSSI
-        discoveredAt: now,
-        lastSeen: now,
-      );
-      return state.copyWith(
-        discoveredLibp2pPeers: Map.from(state.discoveredLibp2pPeers)
-          ..[action.peerId] = newPeer,
-      );
-    } else {
-      final updated = existing.copyWith(lastSeen: now);
-      return state.copyWith(
-        discoveredLibp2pPeers: Map.from(state.discoveredLibp2pPeers)
-          ..[action.peerId] = updated,
-      );
-    }
-  }
-
-  if (action is ClearDiscoveredLibp2pPeersAction) {
-    return state.copyWith(discoveredLibp2pPeers: {});
-  }
-
   // ===== Peer Identity Actions =====
 
   if (action is PeerAnnounceReceivedAction) {
@@ -212,6 +182,12 @@ PeersState peersReducer(PeersState state, dynamic action) {
     final now = DateTime.now();
 
     final isBle = action.transport == PeerTransport.bleDirect;
+
+    // Derive well-connected status from the UDP address in this ANNOUNCE.
+    // A peer is well-connected if they advertise a globally routable IPv6 address.
+    // The address in the ANNOUNCE is authoritative — if absent, the peer has no address.
+    final wellConnected = action.udpAddress != null &&
+        isGloballyRoutableAddress(action.udpAddress!);
 
     if (existing == null) {
       // New peer — set only the field matching the role
@@ -226,7 +202,8 @@ PeersState peersReducer(PeersState state, dynamic action) {
         bleCentralDeviceId: action.bleCentralDeviceId,
         blePeripheralDeviceId: action.blePeripheralDeviceId,
         lastBleSeen: isBle ? now : null,
-        libp2pAddress: action.libp2pAddress,
+        udpAddress: action.udpAddress,
+        isWellConnected: wellConnected,
       );
       return state.copyWith(
         peers: Map.from(state.peers)..[pubkeyHex] = newPeer,
@@ -246,10 +223,9 @@ PeersState peersReducer(PeersState state, dynamic action) {
         bleCentralDeviceId: action.bleCentralDeviceId ?? existing.bleCentralDeviceId,
         blePeripheralDeviceId: action.blePeripheralDeviceId ?? existing.blePeripheralDeviceId,
         lastBleSeen: isBle ? now : existing.lastBleSeen,
-        libp2pAddress: action.libp2pAddress ?? existing.libp2pAddress,
+        udpAddress: action.udpAddress,
         isFriend: existing.isFriend,
-        libp2pHostId: existing.libp2pHostId,
-        libp2pHostAddrs: existing.libp2pHostAddrs,
+        isWellConnected: wellConnected,
       );
       return state.copyWith(
         peers: Map.from(state.peers)..[pubkeyHex] = updated,
@@ -285,7 +261,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
       final hasAnyBle = newCentralId != null || newPeripheralId != null;
 
       // If no other transport, mark as disconnected
-      final newConnectionState = (hasAnyBle || existing.libp2pAddress != null)
+      final newConnectionState = (hasAnyBle || existing.udpAddress != null)
           ? existing.connectionState
           : PeerConnectionState.disconnected;
 
@@ -301,10 +277,9 @@ PeersState peersReducer(PeersState state, dynamic action) {
         bleCentralDeviceId: newCentralId,
         blePeripheralDeviceId: newPeripheralId,
         lastBleSeen: hasAnyBle ? existing.lastBleSeen : null,
-        libp2pAddress: existing.libp2pAddress,
+        udpAddress: existing.udpAddress,
         isFriend: existing.isFriend,
-        libp2pHostId: existing.libp2pHostId,
-        libp2pHostAddrs: existing.libp2pHostAddrs,
+        isWellConnected: existing.isWellConnected,
       );
       return state.copyWith(
         peers: Map.from(state.peers)..[pubkeyHex] = updated,
@@ -313,7 +288,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
     return state;
   }
 
-  if (action is PeerLibp2pDisconnectedAction) {
+  if (action is PeerUdpDisconnectedAction) {
     final pubkeyHex = _pubkeyToHex(action.publicKey);
     final existing = state.peers[pubkeyHex];
     if (existing != null) {
@@ -321,7 +296,8 @@ PeersState peersReducer(PeersState state, dynamic action) {
       final newConnectionState = existing.hasBleConnection
           ? existing.connectionState
           : PeerConnectionState.disconnected;
-      // Construct directly to clear libp2pAddress (copyWith with null keeps old value)
+      // Preserve UDP address — it's the last known location and needed
+      // for reconnection. Never clear peer addresses.
       final updated = PeerState(
         publicKey: existing.publicKey,
         nickname: existing.nickname,
@@ -333,10 +309,9 @@ PeersState peersReducer(PeersState state, dynamic action) {
         bleCentralDeviceId: existing.bleCentralDeviceId,
         blePeripheralDeviceId: existing.blePeripheralDeviceId,
         lastBleSeen: existing.lastBleSeen,
-        libp2pAddress: null,  // Clear libp2p address
+        udpAddress: existing.udpAddress,  // Preserve for reconnection
         isFriend: existing.isFriend,
-        libp2pHostId: existing.libp2pHostId,
-        libp2pHostAddrs: existing.libp2pHostAddrs,
+        isWellConnected: existing.isWellConnected,
       );
       return state.copyWith(
         peers: Map.from(state.peers)..[pubkeyHex] = updated,
@@ -366,8 +341,6 @@ PeersState peersReducer(PeersState state, dynamic action) {
     return state.copyWith(peers: newMap);
   }
 
-  // TODO: Add stale detection for libp2p-only peers (peers connected solely via
-  // libp2p that go silent should eventually be marked disconnected).
   if (action is StalePeersRemovedAction) {
     final now = DateTime.now();
     final newMap = Map<String, PeerState>.from(state.peers);
@@ -388,10 +361,9 @@ PeersState peersReducer(PeersState state, dynamic action) {
             bleCentralDeviceId: null,
             blePeripheralDeviceId: null,
             lastBleSeen: null,
-            libp2pAddress: peer.libp2pAddress,
+            udpAddress: peer.udpAddress,
             isFriend: peer.isFriend,
-            libp2pHostId: peer.libp2pHostId,
-            libp2pHostAddrs: peer.libp2pHostAddrs,
+            isWellConnected: peer.isWellConnected,
           );
           return;
         }
@@ -403,8 +375,10 @@ PeersState peersReducer(PeersState state, dynamic action) {
       if (timeSinceLastSeen > action.staleThreshold) {
         if (peer.isFriend) {
           // Friends are marked as disconnected when stale (no ANNOUNCE received).
-          // Keep libp2pHostId/libp2pHostAddrs for reconnection when they come back.
-          // Clear BLE IDs (out of BLE range) and libp2pAddress (active connection).
+          // Clear BLE IDs (out of BLE range) but preserve UDP address — it's
+          // the last known location and needed for reconnection attempts.
+          // Clearing it would make the peer unreachable, preventing signaling
+          // and removing it from wellConnectedFriends.
           newMap[key] = PeerState(
             publicKey: peer.publicKey,
             nickname: peer.nickname,
@@ -416,10 +390,9 @@ PeersState peersReducer(PeersState state, dynamic action) {
             bleCentralDeviceId: null,
             blePeripheralDeviceId: null,
             lastBleSeen: null,
-            libp2pAddress: null,  // Clear active connection address
+            udpAddress: peer.udpAddress,  // Preserve for reconnection
             isFriend: true,
-            libp2pHostId: peer.libp2pHostId,  // Keep for reconnection
-            libp2pHostAddrs: peer.libp2pHostAddrs,  // Keep for reconnection
+            isWellConnected: peer.isWellConnected,
           );
         } else {
           staleKeys.add(key);
@@ -452,26 +425,12 @@ PeersState peersReducer(PeersState state, dynamic action) {
     return state;
   }
 
-  if (action is AssociateLibp2pAddressAction) {
+  if (action is AssociateUdpAddressAction) {
     final pubkeyHex = _pubkeyToHex(action.publicKey);
     final existing = state.peers[pubkeyHex];
     if (existing != null) {
-      // Parse address to extract hostId and baseAddr
-      String? libp2pHostId;
-      List<String>? libp2pHostAddrs;
-
-      if (action.address.isNotEmpty) {
-        final parts = action.address.split('/p2p/');
-        if (parts.length == 2) {
-          libp2pHostId = parts[1];
-          libp2pHostAddrs = [parts[0]];
-        }
-      }
-
       final updated = existing.copyWith(
-        libp2pAddress: action.address.isEmpty ? null : action.address,
-        libp2pHostId: libp2pHostId,
-        libp2pHostAddrs: libp2pHostAddrs,
+        udpAddress: action.address.isEmpty ? null : action.address,
       );
       return state.copyWith(
         peers: Map.from(state.peers)..[pubkeyHex] = updated,
@@ -514,7 +473,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
     final existing = state.peers[pubkeyHex];
     if (existing != null) {
       // If peer has no BLE connection, remove them entirely
-      // (they were only reachable via libp2p friendship)
+      // (they were only reachable via UDP friendship)
       if (!existing.hasBleConnection) {
         final newMap = Map<String, PeerState>.from(state.peers);
         newMap.remove(pubkeyHex);
@@ -533,11 +492,10 @@ PeersState peersReducer(PeersState state, dynamic action) {
         bleCentralDeviceId: existing.bleCentralDeviceId,
         blePeripheralDeviceId: existing.blePeripheralDeviceId,
         lastBleSeen: existing.lastBleSeen,
-        // Clear all libp2p/friend fields
+        // Clear all UDP/friend fields
         isFriend: false,
-        libp2pAddress: null,
-        libp2pHostId: null,
-        libp2pHostAddrs: null,
+        udpAddress: null,
+        isWellConnected: false,
       );
       return state.copyWith(
         peers: Map.from(state.peers)..[pubkeyHex] = updated,

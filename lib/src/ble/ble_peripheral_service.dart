@@ -226,9 +226,9 @@ class BlePeripheralService {
   }
 
   /// Send data to all connected centrals
-  Future<void> broadcastData(Uint8List data, {String? excludeDevice}) async {
+  Future<void> broadcastData(Uint8List data, {Set<String>? excludeDevices}) async {
     for (final deviceId in _connectedCentrals) {
-      if (deviceId == excludeDevice) continue;
+      if (excludeDevices != null && excludeDevices.contains(deviceId)) continue;
       await sendData(deviceId, data);
     }
   }

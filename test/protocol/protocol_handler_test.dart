@@ -55,8 +55,8 @@ void main() {
         expect(addrLen, equals(0));
       });
 
-      test('includes libp2p address when provided', () {
-        final testAddress = '/ip4/127.0.0.1/tcp/4001/p2p/QmTest';
+      test('includes UDP address when provided', () {
+        final testAddress = '[::1]:4001';
         final payload = handler.createAnnouncePayload(address: testAddress);
 
         // Find address in payload
@@ -94,18 +94,18 @@ void main() {
         expect(decoded.publicKey, equals(testIdentity.publicKey));
         expect(decoded.nickname, equals('TestUser'));
         expect(decoded.protocolVersion, equals(1));
-        expect(decoded.libp2pAddress, isNull);
+        expect(decoded.udpAddress, isNull);
       });
 
-      test('decodes announce with libp2p address', () {
-        final testAddress = '/ip4/192.168.1.100/tcp/5000/p2p/QmExample';
+      test('decodes announce with UDP address', () {
+        final testAddress = '[2001:db8::64]:5000';
         final payload = handler.createAnnouncePayload(address: testAddress);
         final decoded = handler.decodeAnnounce(payload);
 
         expect(decoded.publicKey, equals(testIdentity.publicKey));
         expect(decoded.nickname, equals('TestUser'));
         expect(decoded.protocolVersion, equals(1));
-        expect(decoded.libp2pAddress, equals(testAddress));
+        expect(decoded.udpAddress, equals(testAddress));
       });
 
       test('handles announce without address field (legacy)', () {
@@ -130,7 +130,7 @@ void main() {
         final decoded = handler.decodeAnnounce(payload);
 
         expect(decoded.nickname, equals('OldPeer'));
-        expect(decoded.libp2pAddress, isNull); // No address field
+        expect(decoded.udpAddress, isNull); // No address field
       });
 
       test('handles empty nickname in payload', () {
@@ -155,7 +155,7 @@ void main() {
         final decoded = handler.decodeAnnounce(payload);
 
         expect(decoded.nickname, equals(''));
-        expect(decoded.libp2pAddress, isNull);
+        expect(decoded.udpAddress, isNull);
       });
     });
 
@@ -392,7 +392,7 @@ void main() {
     group('round-trip encoding/decoding', () {
       test('announce payload round-trip', () {
         final originalPayload = handler.createAnnouncePayload(
-          address: '/ip4/10.0.0.1/tcp/8000/p2p/QmRoundTrip',
+          address: '[2001:db8::a]:8000',
         );
         final decoded = handler.decodeAnnounce(originalPayload);
 
@@ -404,7 +404,7 @@ void main() {
         });
         final reEncodedHandler = ProtocolHandler(identity: reEncodedIdentity);
         final reEncodedPayload = reEncodedHandler.createAnnouncePayload(
-          address: decoded.libp2pAddress,
+          address: decoded.udpAddress,
         );
 
         expect(reEncodedPayload, equals(originalPayload));

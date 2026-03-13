@@ -41,13 +41,20 @@ class MessageRouter {
   /// Called when a read receipt is received
   void Function(String messageId)? onReadReceiptReceived;
 
-  /// Called when a peer ANNOUNCE is processed (new or updated peer)
-  void Function(AnnounceData data, PeerTransport transport, {bool isNew})?
-      onPeerAnnounced;
+  /// Called when a peer ANNOUNCE is processed (new or updated peer).
+  /// [udpPeerId] is the transport-level peer identifier (tempKey for incoming
+  /// UDP connections) so the coordinator can map it to the peer's pubkey.
+  void Function(AnnounceData data, PeerTransport transport,
+      {bool isNew, String? udpPeerId})? onPeerAnnounced;
 
   /// Called when a message needs an ACK sent back to the sender
   void Function(PeerTransport transport, String peerId, String messageId)?
       onAckRequested;
+
+  /// Called when a signaling packet is received.
+  /// The coordinator routes this to [SignalingService.processSignaling].
+  void Function(Uint8List senderPubkey, Uint8List payload)?
+      onSignalingReceived;
 
   /// Convenience accessor for peers state
   PeersState get _peersState => store.state.peers;
@@ -71,7 +78,7 @@ class MessageRouter {
     required PeerTransport transport,
     String? bleDeviceId,
     BleRole? bleRole,
-    String? libp2pPeerId,
+    String? udpPeerId,
     int rssi = -100,
   }) async {
     // Verify signature — drop invalid packets
@@ -88,7 +95,7 @@ class MessageRouter {
         transport: transport,
         bleDeviceId: bleDeviceId,
         bleRole: bleRole,
-        libp2pPeerId: libp2pPeerId,
+        udpPeerId: udpPeerId,
         rssi: rssi,
       );
       return;
@@ -104,7 +111,7 @@ class MessageRouter {
         return; // Already handled above
       case PacketType.message:
       // TODO: why do messages have different types than packets?
-        _handleMessage(packet, transport: transport, libp2pPeerId: libp2pPeerId);
+        _handleMessage(packet, transport: transport, udpPeerId: udpPeerId);
       case PacketType.fragmentStart:
       case PacketType.fragmentContinue:
       case PacketType.fragmentEnd:
@@ -116,6 +123,8 @@ class MessageRouter {
         break;
       case PacketType.readReceipt:
         _handleReadReceipt(packet);
+      case PacketType.signaling:
+        _handleSignaling(packet);
     }
   }
 
@@ -126,7 +135,7 @@ class MessageRouter {
     required PeerTransport transport,
     String? bleDeviceId,
     BleRole? bleRole,
-    String? libp2pPeerId,
+    String? udpPeerId,
     int rssi = -100,
   }) {
     final data = protocolHandler.decodeAnnounce(packet.payload);
@@ -150,7 +159,7 @@ class MessageRouter {
           _peersState.findDiscoveredBlePeerByServiceUuid(theirServiceUuid);
       if (discoveredPeer != null && bleDeviceId == null) {
         // Only use scan-discovered device ID when no transport-provided ID exists.
-        // This handles non-BLE transports (e.g., libp2p) where the peer is also
+        // This handles non-BLE transports (e.g., UDP) where the peer is also
         // nearby via BLE. When bleDeviceId IS provided (BLE transport), we keep it
         // because Android MAC randomization means the scan-discovered MAC may differ
         // from the actual connected MAC.
@@ -165,11 +174,11 @@ class MessageRouter {
 
     final isNew = _peersState.getPeerByPubkey(pubkey) == null;
 
-    // LibP2P-specific: use peerId as fallback address
-    String? libp2pAddress = data.libp2pAddress;
-    if (transport == PeerTransport.libp2p && libp2pAddress == null) {
-      libp2pAddress = libp2pPeerId;
-    }
+    // Use the address from the ANNOUNCE payload only.
+    // udpPeerId is the sender's hex pubkey, NOT an ip:port address —
+    // using it as a fallback would corrupt the peer's stored udpAddress
+    // and clear their well-connected status.
+    final udpAddress = data.udpAddress;
 
     // Set the correct BLE device ID field based on role
     String? centralId;
@@ -190,7 +199,7 @@ class MessageRouter {
       transport: transport,
       bleCentralDeviceId: centralId,
       blePeripheralDeviceId: peripheralId,
-      libp2pAddress: libp2pAddress,
+      udpAddress: udpAddress,
     ));
 
     if (resolvedBleDeviceId != null && resolvedBleRole != null) {
@@ -204,20 +213,20 @@ class MessageRouter {
     _log.i(
         'Peer ${isNew ? "connected" : "updated"}: ${data.nickname} via ${transport.name}');
 
-    onPeerAnnounced?.call(data, transport, isNew: isNew);
+    onPeerAnnounced?.call(data, transport, isNew: isNew, udpPeerId: udpPeerId);
   }
 
   void _handleMessage(
     BitchatPacket packet, {
     required PeerTransport transport,
-    String? libp2pPeerId,
+    String? udpPeerId,
   }) {
     if (!_isForUs(packet)) return;
     onMessageReceived?.call(
         packet.packetId, packet.senderPubkey, packet.payload);
-    // Send ACK back for libp2p (delivery confirmation)
-    if (transport == PeerTransport.libp2p && libp2pPeerId != null) {
-      onAckRequested?.call(transport, libp2pPeerId, packet.packetId);
+    // Send ACK back for UDP (delivery confirmation)
+    if (transport == PeerTransport.udp && udpPeerId != null) {
+      onAckRequested?.call(transport, udpPeerId, packet.packetId);
     }
   }
 
@@ -242,6 +251,10 @@ class MessageRouter {
     } catch (e) {
       _log.w('Failed to decode ACK payload: $e');
     }
+  }
+
+  void _handleSignaling(BitchatPacket packet) {
+    onSignalingReceived?.call(packet.senderPubkey, packet.payload);
   }
 
   void _handleReadReceipt(BitchatPacket packet) {

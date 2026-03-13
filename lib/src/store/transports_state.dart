@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import '../transport/transport_service.dart';
+import '../transport/address_utils.dart';
 
 /// Per-transport lifecycle state for Redux store.
 ///
@@ -10,24 +11,28 @@ class TransportsState {
   /// BLE transport lifecycle state
   final TransportState bleState;
 
-  /// LibP2P transport lifecycle state
-  final TransportState libp2pState;
+  /// UDP transport lifecycle state
+  final TransportState udpState;
 
   /// Error message for BLE transport (if in error state)
   final String? bleError;
 
-  /// Error message for libp2p transport (if in error state)
-  final String? libp2pError;
+  /// Error message for UDP transport (if in error state)
+  final String? udpError;
 
   /// Whether BLE is currently scanning
   final bool bleScanning;
 
+  /// Our discovered public UDP address (ip:port), null if not yet discovered
+  final String? publicAddress;
+
   const TransportsState({
     this.bleState = TransportState.uninitialized,
-    this.libp2pState = TransportState.uninitialized,
+    this.udpState = TransportState.uninitialized,
     this.bleError,
-    this.libp2pError,
+    this.udpError,
     this.bleScanning = false,
+    this.publicAddress,
   });
 
   static const TransportsState initial = TransportsState();
@@ -35,10 +40,16 @@ class TransportsState {
   /// Whether any transport is active
   bool get isAnyActive =>
       bleState == TransportState.active ||
-      libp2pState == TransportState.active;
+      udpState == TransportState.active;
 
   /// Whether the system is in a healthy state (any transport active)
   bool get isHealthy => isAnyActive;
+
+  /// Whether this device is well-connected (has a globally routable public address).
+  ///
+  /// Well-connected devices can act as relay facilitators for friends behind NAT.
+  bool get isWellConnected =>
+      publicAddress != null && isGloballyRoutableAddress(publicAddress!);
 
   /// Overall status display string derived from per-transport states
   String get statusDisplayString {
@@ -47,33 +58,47 @@ class TransportsState {
       return 'Online';
     }
     if (bleState == TransportState.initializing ||
-        libp2pState == TransportState.initializing) {
+        udpState == TransportState.initializing) {
       return 'Starting...';
     }
     if (bleState == TransportState.ready ||
-        libp2pState == TransportState.ready) {
+        udpState == TransportState.ready) {
       return 'Ready';
     }
     if (bleState == TransportState.error ||
-        libp2pState == TransportState.error) {
-      return bleError ?? libp2pError ?? 'Error';
+        udpState == TransportState.error) {
+      return bleError ?? udpError ?? 'Error';
     }
     return 'Initializing...';
   }
 
   TransportsState copyWith({
     TransportState? bleState,
-    TransportState? libp2pState,
+    TransportState? udpState,
     String? bleError,
-    String? libp2pError,
+    String? udpError,
     bool? bleScanning,
+    String? publicAddress,
   }) {
     return TransportsState(
       bleState: bleState ?? this.bleState,
-      libp2pState: libp2pState ?? this.libp2pState,
+      udpState: udpState ?? this.udpState,
       bleError: bleError ?? this.bleError,
-      libp2pError: libp2pError ?? this.libp2pError,
+      udpError: udpError ?? this.udpError,
       bleScanning: bleScanning ?? this.bleScanning,
+      publicAddress: publicAddress ?? this.publicAddress,
+    );
+  }
+
+  /// Create a copy with publicAddress explicitly cleared (set to null).
+  TransportsState clearPublicAddress() {
+    return TransportsState(
+      bleState: bleState,
+      udpState: udpState,
+      bleError: bleError,
+      udpError: udpError,
+      bleScanning: bleScanning,
+      publicAddress: null,
     );
   }
 
@@ -83,21 +108,23 @@ class TransportsState {
       other is TransportsState &&
           runtimeType == other.runtimeType &&
           bleState == other.bleState &&
-          libp2pState == other.libp2pState &&
+          udpState == other.udpState &&
           bleError == other.bleError &&
-          libp2pError == other.libp2pError &&
-          bleScanning == other.bleScanning;
+          udpError == other.udpError &&
+          bleScanning == other.bleScanning &&
+          publicAddress == other.publicAddress;
 
   @override
   int get hashCode => Object.hash(
         bleState,
-        libp2pState,
+        udpState,
         bleError,
-        libp2pError,
+        udpError,
         bleScanning,
+        publicAddress,
       );
 
   @override
   String toString() =>
-      'TransportsState(ble: $bleState, libp2p: $libp2pState, scanning: $bleScanning)';
+      'TransportsState(ble: $bleState, udp: $udpState, scanning: $bleScanning, publicAddr: $publicAddress)';
 }

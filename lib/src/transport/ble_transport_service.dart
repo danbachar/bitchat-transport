@@ -232,9 +232,9 @@ class BleTransportService extends TransportService {
   }
 
   @override
-  Future<void> broadcast(Uint8List data, {String? excludePeerId}) async {
-    await _central.broadcastData(data, excludeDevice: excludePeerId);
-    await _peripheral.broadcastData(data, excludeDevice: excludePeerId);
+  Future<void> broadcast(Uint8List data, {Set<String>? excludePeerIds}) async {
+    await _central.broadcastData(data, excludeDevices: excludePeerIds);
+    await _peripheral.broadcastData(data, excludeDevices: excludePeerIds);
   }
 
   @override
@@ -447,7 +447,7 @@ class BleTransportService extends TransportService {
       connectionState: state.connectionState,
       transport: state.transport,
       bleDeviceId: state.bleDeviceId,
-      libp2pAddress: state.libp2pAddress,
+      udpAddress: state.udpAddress,
       rssi: state.rssi,
       protocolVersion: state.protocolVersion,
     );

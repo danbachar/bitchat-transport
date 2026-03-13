@@ -305,13 +305,13 @@ class BleCentralService {
   }
 
   /// Send data to all connected peripherals (sorted by signal strength)
-  Future<void> broadcastData(Uint8List data, {String? excludeDevice}) async {
+  Future<void> broadcastData(Uint8List data, {Set<String>? excludeDevices}) async {
     // Sort by RSSI descending (strongest signal first)
     final peers = _connected.values.toList();
     peers.sort((a, b) => b.rssi.compareTo(a.rssi));
 
     for (final peer in peers) {
-      if (peer.deviceId == excludeDevice) continue;
+      if (excludeDevices != null && excludeDevices.contains(peer.deviceId)) continue;
       await sendData(peer.deviceId, data);
     }
   }

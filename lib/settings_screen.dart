@@ -23,13 +23,13 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   late bool _bluetoothEnabled;
-  late bool _libp2pEnabled;
+  late bool _udpEnabled;
 
   @override
   void initState() {
     super.initState();
     _bluetoothEnabled = widget.store.state.settings.bluetoothEnabled;
-    _libp2pEnabled = widget.store.state.settings.libp2pEnabled;
+    _udpEnabled = widget.store.state.settings.udpEnabled;
   }
 
   @override
@@ -85,22 +85,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
             priority: 1,
           ),
 
-          // libp2p Toggle
+          // UDP Toggle
           _buildTransportTile(
             icon: Icons.public,
             iconColor: Colors.green,
-            title: 'Internet (libp2p)',
+            title: 'Internet',
             subtitle: 'Connect to peers over the Internet',
-            value: _libp2pEnabled,
-            available: widget.store.state.transports.libp2pState != TransportState.error,
-            onChanged: _onLibp2pChanged,
+            value: _udpEnabled,
+            available: widget.store.state.transports.udpState != TransportState.error,
+            onChanged: _onUdpChanged,
             priority: 2,
           ),
+
+          // Internet connection status
+          if (_udpEnabled && widget.store.state.transports.udpState.isUsable)
+            _buildConnectionStatusBadge(),
 
           const Divider(height: 32),
 
           // Warning if no transport enabled
-          if (!_bluetoothEnabled && !_libp2pEnabled)
+          if (!_bluetoothEnabled && !_udpEnabled)
             Container(
               margin: const EdgeInsets.symmetric(horizontal: 16),
               padding: const EdgeInsets.all(16),
@@ -240,6 +244,56 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  Widget _buildConnectionStatusBadge() {
+    final transports = widget.store.state.transports;
+    final isWellConnected = transports.isWellConnected;
+
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      color: isWellConnected
+          ? Colors.green.withOpacity(0.1)
+          : Colors.grey.withOpacity(0.1),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          children: [
+            Icon(
+              isWellConnected ? Icons.language : Icons.shield_outlined,
+              color: isWellConnected ? Colors.green : Colors.grey,
+              size: 20,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    isWellConnected ? 'Well-connected' : 'Standard connection',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 13,
+                      color: isWellConnected ? Colors.green : Colors.grey[400],
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    isWellConnected
+                        ? 'Your device has a globally routable address and can help friends connect'
+                        : 'Your device is behind NAT — connections to friends may require hole-punching',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Colors.grey[500],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildInfoCard() {
     return Container(
       padding: const EdgeInsets.all(16),
@@ -274,7 +328,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _buildInfoRow(
             icon: Icons.public,
             iconColor: Colors.green,
-            text: 'Internet (libp2p) connects you to peers anywhere in the world',
+            text: 'Internet connects you to peers anywhere in the world',
           ),
           const SizedBox(height: 8),
           _buildInfoRow(
@@ -309,7 +363,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   void _onBluetoothChanged(bool value) {
     // Prevent disabling both transports
-    if (!value && !_libp2pEnabled) {
+    if (!value && !_udpEnabled) {
       _showCannotDisableDialog();
       return;
     }
@@ -322,7 +376,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     widget.onSettingsChanged?.call();
   }
 
-  void _onLibp2pChanged(bool value) {
+  void _onUdpChanged(bool value) {
     // Prevent disabling both transports
     if (!value && !_bluetoothEnabled) {
       _showCannotDisableDialog();
@@ -330,10 +384,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
 
     setState(() {
-      _libp2pEnabled = value;
+      _udpEnabled = value;
     });
 
-    widget.store.dispatch(SetLibp2pEnabledAction(value));
+    widget.store.dispatch(SetUdpEnabledAction(value));
     widget.onSettingsChanged?.call();
   }
 

@@ -142,18 +142,18 @@ void main() {
         );
 
         expect(result.transports.bleState, TransportState.ready);
-        expect(result.transports.libp2pState, TransportState.uninitialized);
+        expect(result.transports.udpState, TransportState.uninitialized);
       });
 
-      test('LibP2PTransportStateChangedAction updates libp2p state', () {
+      test('UdpTransportStateChangedAction updates UDP state', () {
         const initial = AppState.initial;
 
         final result = appReducer(
           initial,
-          LibP2PTransportStateChangedAction(TransportState.active),
+          UdpTransportStateChangedAction(TransportState.active),
         );
 
-        expect(result.transports.libp2pState, TransportState.active);
+        expect(result.transports.udpState, TransportState.active);
         expect(result.transports.bleState, TransportState.uninitialized);
       });
 
@@ -200,11 +200,11 @@ void main() {
         );
         expect(bleActive.isHealthy, isTrue);
 
-        final libp2pActive = AppState.initial.copyWith(
+        final udpActive = AppState.initial.copyWith(
           transports: const TransportsState(
-              libp2pState: TransportState.active),
+              udpState: TransportState.active),
         );
-        expect(libp2pActive.isHealthy, isTrue);
+        expect(udpActive.isHealthy, isTrue);
 
         const noneActive = AppState.initial;
         expect(noneActive.isHealthy, isFalse);

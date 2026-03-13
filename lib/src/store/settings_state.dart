@@ -3,7 +3,7 @@ import 'package:flutter/foundation.dart';
 /// Available transport protocols
 enum TransportProtocol {
   bluetooth,
-  libp2p,
+  udp,
 }
 
 /// Extension for display info
@@ -12,8 +12,8 @@ extension TransportProtocolDisplay on TransportProtocol {
     switch (this) {
       case TransportProtocol.bluetooth:
         return 'Bluetooth';
-      case TransportProtocol.libp2p:
-        return 'Internet (libp2p)';
+      case TransportProtocol.udp:
+        return 'Internet (UDP)';
     }
   }
 
@@ -21,8 +21,8 @@ extension TransportProtocolDisplay on TransportProtocol {
     switch (this) {
       case TransportProtocol.bluetooth:
         return 'Connect to nearby peers via Bluetooth Low Energy';
-      case TransportProtocol.libp2p:
-        return 'Connect to peers over the Internet';
+      case TransportProtocol.udp:
+        return 'Connect to peers over the Internet via UDP';
     }
   }
 }
@@ -33,26 +33,26 @@ class SettingsState {
   /// Whether Bluetooth transport is enabled
   final bool bluetoothEnabled;
 
-  /// Whether libp2p Internet transport is enabled
-  final bool libp2pEnabled;
+  /// Whether UDP Internet transport is enabled
+  final bool udpEnabled;
 
   /// Priority order for transports (lower index = higher priority)
-  /// Default: Bluetooth first, then libp2p
+  /// Default: Bluetooth first, then UDP
   final List<TransportProtocol> transportPriority;
 
   const SettingsState({
     this.bluetoothEnabled = true,
-    this.libp2pEnabled = true,
+    this.udpEnabled = true,
     this.transportPriority = const [
       TransportProtocol.bluetooth,
-      TransportProtocol.libp2p,
+      TransportProtocol.udp,
     ],
   });
 
   static const SettingsState initial = SettingsState();
 
   /// Whether at least one transport is enabled
-  bool get hasActiveTransport => bluetoothEnabled || libp2pEnabled;
+  bool get hasActiveTransport => bluetoothEnabled || udpEnabled;
 
   /// Get the preferred transport for sending messages
   TransportProtocol? get preferredTransport {
@@ -60,8 +60,8 @@ class SettingsState {
       if (transport == TransportProtocol.bluetooth && bluetoothEnabled) {
         return TransportProtocol.bluetooth;
       }
-      if (transport == TransportProtocol.libp2p && libp2pEnabled) {
-        return TransportProtocol.libp2p;
+      if (transport == TransportProtocol.udp && udpEnabled) {
+        return TransportProtocol.udp;
       }
     }
     return null;
@@ -69,33 +69,33 @@ class SettingsState {
 
   SettingsState copyWith({
     bool? bluetoothEnabled,
-    bool? libp2pEnabled,
+    bool? udpEnabled,
     List<TransportProtocol>? transportPriority,
   }) {
     return SettingsState(
       bluetoothEnabled: bluetoothEnabled ?? this.bluetoothEnabled,
-      libp2pEnabled: libp2pEnabled ?? this.libp2pEnabled,
+      udpEnabled: udpEnabled ?? this.udpEnabled,
       transportPriority: transportPriority ?? this.transportPriority,
     );
   }
 
   Map<String, dynamic> toJson() => {
         'bluetoothEnabled': bluetoothEnabled,
-        'libp2pEnabled': libp2pEnabled,
+        'udpEnabled': udpEnabled,
         'transportPriority': transportPriority.map((t) => t.name).toList(),
       };
 
   factory SettingsState.fromJson(Map<String, dynamic> json) {
     return SettingsState(
       bluetoothEnabled: json['bluetoothEnabled'] as bool? ?? true,
-      libp2pEnabled: json['libp2pEnabled'] as bool? ?? true,
+      udpEnabled: json['udpEnabled'] as bool? ?? true,
       transportPriority: (json['transportPriority'] as List<dynamic>?)
               ?.map((e) => TransportProtocol.values.firstWhere(
                     (t) => t.name == e,
                     orElse: () => TransportProtocol.bluetooth,
                   ))
               .toList() ??
-          const [TransportProtocol.bluetooth, TransportProtocol.libp2p],
+          const [TransportProtocol.bluetooth, TransportProtocol.udp],
     );
   }
 
@@ -105,17 +105,17 @@ class SettingsState {
       other is SettingsState &&
           runtimeType == other.runtimeType &&
           bluetoothEnabled == other.bluetoothEnabled &&
-          libp2pEnabled == other.libp2pEnabled &&
+          udpEnabled == other.udpEnabled &&
           listEquals(transportPriority, other.transportPriority);
 
   @override
   int get hashCode => Object.hash(
         bluetoothEnabled,
-        libp2pEnabled,
+        udpEnabled,
         Object.hashAll(transportPriority),
       );
 
   @override
   String toString() =>
-      'SettingsState(bt: $bluetoothEnabled, libp2p: $libp2pEnabled)';
+      'SettingsState(bt: $bluetoothEnabled, udp: $udpEnabled)';
 }

@@ -11,12 +11,12 @@ class BleTransportStateChangedAction extends TransportAction {
   BleTransportStateChangedAction(this.state, {this.error});
 }
 
-/// Update libp2p transport lifecycle state
-class LibP2PTransportStateChangedAction extends TransportAction {
+/// Update UDP transport lifecycle state
+class UdpTransportStateChangedAction extends TransportAction {
   final TransportState state;
   final String? error;
 
-  LibP2PTransportStateChangedAction(this.state, {this.error});
+  UdpTransportStateChangedAction(this.state, {this.error});
 }
 
 /// BLE scanning state changed
@@ -24,4 +24,11 @@ class BleScanningChangedAction extends TransportAction {
   final bool scanning;
 
   BleScanningChangedAction(this.scanning);
+}
+
+/// Public address discovered or updated (null to clear)
+class PublicAddressUpdatedAction extends TransportAction {
+  final String? publicAddress;
+
+  PublicAddressUpdatedAction(this.publicAddress);
 }

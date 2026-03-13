@@ -1,11 +1,18 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:logger/logger.dart';
 import 'package:redux/redux.dart';
 import 'package:uuid/uuid.dart';
 import 'ble/permission_handler.dart';
+import 'signaling/signaling_service.dart';
+import 'transport/address_utils.dart';
 import 'transport/ble_transport_service.dart';
-import 'transport/libp2p_transport_service.dart';
+import 'transport/hole_punch_service.dart';
+import 'transport/public_address_discovery.dart';
+import 'transport/udp_transport_service.dart';
+import 'models/block.dart';
 import 'models/identity.dart';
 import 'models/peer.dart';
 import 'models/packet.dart';
@@ -38,8 +45,8 @@ class BitchatConfig {
   /// Whether to enable BLE transport (can be overridden by TransportSettingsStore)
   final bool enableBle;
   
-  /// Whether to enable libp2p transport (can be overridden by TransportSettingsStore)
-  final bool enableLibp2p;
+  /// Whether to enable UDP transport (can be overridden by TransportSettingsStore)
+  final bool enableUdp;
   
   const BitchatConfig({
     this.autoConnect = true,
@@ -49,7 +56,7 @@ class BitchatConfig {
     this.announceInterval = const Duration(seconds: 10),
     this.scanInterval = const Duration(seconds: 10),
     this.enableBle = true,
-    this.enableLibp2p = true,
+    this.enableUdp = true,
   });
 }
 
@@ -105,8 +112,20 @@ class Bitchat {
   /// BLE transport service (null if BLE is disabled or unavailable)
   BleTransportService? _bleService;
   
-  /// LibP2P transport service (null if libp2p is disabled)
-  LibP2PTransportService? _libp2pService;
+  /// UDP transport service (null if UDP is disabled)
+  UdpTransportService? _udpService;
+
+  /// Hole-punch service for NAT traversal
+  HolePunchService? _holePunchService;
+
+  /// Signaling service for address registration, queries, and hole-punch coordination
+  late final SignalingService _signalingService;
+
+  /// Public address discovery for finding our public ip:port
+  final PublicAddressDiscovery _publicAddressDiscovery = PublicAddressDiscovery();
+
+  /// Our discovered public address (ip:port), shared with friends
+  String? _publicAddress;
 
   /// Timer for periodic ANNOUNCE broadcasts
   Timer? _announceTimer;
@@ -122,6 +141,12 @@ class Bitchat {
 
   /// Lock to serialize transport settings changes (prevents overlapping init/dispose)
   Future<void>? _transportUpdateLock;
+
+  /// Subscription for network connectivity changes
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
+
+  /// Last known connectivity results (to detect actual changes)
+  List<ConnectivityResult>? _lastConnectivityResults;
 
   /// Protocol handler for encoding/decoding packets
   late final ProtocolHandler _protocolHandler;
@@ -148,8 +173,8 @@ class Bitchat {
   /// Called when a peer disconnects
   void Function(Peer peer)? onPeerDisconnected;
   
-  /// Called when libp2p transport becomes available
-  void Function()? onLibp2pInitialized;
+  /// Called when UDP transport becomes available
+  void Function()? onUdpInitialized;
 
   // ===== Convenience accessors for Redux state =====
   
@@ -168,7 +193,14 @@ class Bitchat {
       protocolHandler: _protocolHandler,
       fragmentHandler: _fragmentHandler,
     );
+    _signalingService = SignalingService(store: store);
     _setupRouterCallbacks();
+    _setupSignalingCallbacks();
+
+    // Listen to network connectivity changes (WiFi ↔ cellular, etc.)
+    _connectivitySubscription = Connectivity().onConnectivityChanged.listen(
+      _onConnectivityChanged,
+    );
 
     // Listen to Redux store changes for settings updates
     _lastSettingsState = store.state.settings;
@@ -184,9 +216,9 @@ class Bitchat {
   bool get _bleAvailable =>
       _bleService != null && store.state.transports.bleState.isUsable;
 
-  /// Whether libp2p transport is available (initialized and usable)
-  bool get _libp2pAvailable =>
-      _libp2pService != null && store.state.transports.libp2pState.isUsable;
+  /// Whether UDP transport is available (initialized and usable)
+  bool get _udpAvailable =>
+      _udpService != null && store.state.transports.udpState.isUsable;
 
   /// All known peers - from Redux store
   List<PeerState> get peers => _peersState.peersList;
@@ -209,49 +241,38 @@ class Bitchat {
   /// Whether BLE is currently enabled and available
   bool get isBleEnabled => _bleAvailable && _isBleEnabledInSettings;
   
-  /// Whether libp2p is currently enabled and available  
-  bool get isLibp2pEnabled => _libp2pAvailable && _isLibp2pEnabledInSettings;
+  /// Whether UDP is currently enabled and available
+  bool get isUdpEnabled => _udpAvailable && _isUdpEnabledInSettings;
   
+  /// Our UDP address to share with friends.
+  ///
+  /// Returns the public address if discovered (for peers behind NAT),
+  /// or the local address as fallback (for well-connected peers).
+  String? get udpAddress => _publicAddress ?? _udpService?.localAddress;
+
   /// Whether currently scanning for BLE devices
   bool get isScanning => _bleService?.isScanning ?? false;
-
-  /// Get the libp2p host ID (PeerId) - null if not initialized
-  String? get libp2pHostId => _libp2pService?.hostId;
-
-  /// Get the libp2p host addresses - empty if not initialized
-  List<String> get libp2pHostAddrs => _libp2pService?.hostAddrs ?? [];
-
-  /// Connect to a libp2p peer using their host info
-  /// Used when accepting a friend request or receiving acceptance
-  /// Returns the successful address on success, null on failure
-  Future<String?> connectToLibp2pHost({required String hostId, required List<String> hostAddrs}) async {
-    if (_libp2pService == null) {
-      _log.w('Cannot connect: libp2p service not initialized');
-      return null;
-    }
-    return await _libp2pService!.connectToHost(hostId: hostId, hostAddrs: hostAddrs);
-  }
 
   bool get _isBleEnabledInSettings =>
       store.state.settings.bluetoothEnabled;
 
-  bool get _isLibp2pEnabledInSettings =>
-      store.state.settings.libp2pEnabled;
+  bool get _isUdpEnabledInSettings =>
+      store.state.settings.udpEnabled;
   
   // ===== Lifecycle =====
   
   /// Initialize the transport layer.
-  /// 
+  ///
   /// This will:
   /// 1. Request required permissions
-  /// 2. Initialize enabled transports (BLE and/or libp2p)
+  /// 2. Initialize enabled transports (BLE and/or UDP)
   /// 3. Set up routing
-  /// 
+  ///
   /// Call [start] after this to begin scanning/advertising.
   Future<bool> initialize() async {
     if (_initialized) {
       _log.w('Already initialized');
-      return _bleAvailable || _libp2pAvailable;
+      return _bleAvailable || _udpAvailable;
     }
 
     _initialized = true;
@@ -265,9 +286,9 @@ class Bitchat {
         anyTransportInitialized = await _initializeBle() || anyTransportInitialized;
       }
 
-      // Initialize libp2p if enabled
-      if (_isLibp2pEnabledInSettings) {
-        anyTransportInitialized = await _initializeLibp2p() || anyTransportInitialized;
+      // Initialize UDP if enabled
+      if (_isUdpEnabledInSettings) {
+        anyTransportInitialized = await _initializeUdp() || anyTransportInitialized;
       }
 
       if (!anyTransportInitialized) {
@@ -275,7 +296,7 @@ class Bitchat {
         return false;
       }
 
-      _log.i('Bitchat transport initialized (BLE: $_bleAvailable, libp2p: $_libp2pAvailable)');
+      _log.i('Bitchat transport initialized (BLE: $_bleAvailable, UDP: $_udpAvailable)');
 
       // Auto-start if configured
       if (config.autoStart) {
@@ -333,40 +354,53 @@ class Bitchat {
     }
   }
   
-  /// Initialize libp2p transport
-  Future<bool> _initializeLibp2p() async {
+  /// Initialize UDP transport
+  Future<bool> _initializeUdp() async {
     try {
-      _log.i('Initializing libp2p transport');
+      _log.i('Initializing UDP transport');
 
       // Reset Redux state so the service sees uninitialized
-      store.dispatch(LibP2PTransportStateChangedAction(TransportState.uninitialized));
+      store.dispatch(UdpTransportStateChangedAction(TransportState.uninitialized));
 
-      // Create libp2p transport service
-      _libp2pService = LibP2PTransportService(
+      // Create UDP transport service
+      _udpService = UdpTransportService(
         identity: identity,
         store: store,
         protocolHandler: _protocolHandler,
-        config: const LibP2PConfig(),
       );
 
       // Initialize the service (dispatches state to Redux)
-      final success = await _libp2pService!.initialize();
+      final success = await _udpService!.initialize();
       if (!success) {
-        _log.w('libp2p service initialization returned false');
-        _libp2pService = null;
+        _log.w('UDP service initialization returned false');
+        _udpService = null;
         return false;
       }
 
       // Wire up callbacks
-      _setupLibp2pServiceCallbacks();
+      _setupUdpServiceCallbacks();
 
-      _log.i('libp2p transport initialized successfully');
-      onLibp2pInitialized?.call();
+      // Create hole-punch service using the raw socket
+      if (_udpService!.rawSocket != null) {
+        _holePunchService = HolePunchService(
+          socket: _udpService!.rawSocket!,
+          senderPubkey: identity.publicKey,
+        );
+      }
+
+      // Start multiplexer immediately (punch packets can still be sent via raw socket)
+      _udpService!.startMultiplexer();
+
+      // Discover public address in the background
+      _discoverPublicAddress();
+
+      _log.i('UDP transport initialized successfully');
+      onUdpInitialized?.call();
       return true;
     } catch (e, stack) {
-      _log.e('Failed to initialize libp2p transport: $e');
+      _log.e('Failed to initialize UDP transport: $e');
       _log.d('Stack trace: $stack');
-      _libp2pService = null;
+      _udpService = null;
       return false;
     }
   }
@@ -377,7 +411,7 @@ class Bitchat {
       _log.w('Already started');
       return;
     }
-    if (!_bleAvailable && !_libp2pAvailable) {
+    if (!_bleAvailable && !_udpAvailable) {
       _log.w('Cannot start: no transports available');
       return;
     }
@@ -394,13 +428,13 @@ class Bitchat {
       }
     }
 
-    // Start libp2p if available
-    if (_libp2pAvailable) {
+    // Start UDP if available
+    if (_udpAvailable) {
       try {
-        await _libp2pService!.start();
-        _log.i('libp2p transport started');
+        await _udpService!.start();
+        _log.i('UDP transport started');
       } catch (e) {
-        _log.e('Failed to start libp2p: $e');
+        _log.e('Failed to start UDP: $e');
       }
     }
 
@@ -428,11 +462,11 @@ class Bitchat {
       }
     }
 
-    if (_libp2pService != null) {
+    if (_udpService != null) {
       try {
-        await _libp2pService!.stop();
+        await _udpService!.stop();
       } catch (e) {
-        _log.e('Error stopping libp2p: $e');
+        _log.e('Error stopping UDP: $e');
       }
     }
   }
@@ -443,6 +477,132 @@ class Bitchat {
     _log.i('Transport settings changed');
     final previous = _transportUpdateLock ?? Future.value();
     _transportUpdateLock = previous.then((_) => _updateTransportsFromSettings());
+  }
+
+  /// Handle network connectivity changes (WiFi ↔ cellular, etc.).
+  ///
+  /// When the network changes, our UDP socket is bound to the old interface
+  /// and all UDX connections are dead. We need to:
+  /// 1. Tear down the old UDP service (dead socket, dead connections)
+  /// 2. Re-initialize with a new socket on the new interface
+  /// 3. Re-discover public address (new IP from new network)
+  /// 4. Re-register with well-connected friends
+  /// 5. Re-connect to known peers
+  ///
+  /// Well-connected friends are reachable directly (public IP, no NAT),
+  /// so we can always reconnect to them without a third party.
+  void _onConnectivityChanged(List<ConnectivityResult> results) {
+    // Ignore the first notification (initial state, not a change)
+    if (_lastConnectivityResults == null) {
+      _lastConnectivityResults = results;
+      return;
+    }
+
+    // Ignore if nothing meaningful changed
+    if (_connectivityResultsEqual(_lastConnectivityResults!, results)) return;
+    _lastConnectivityResults = results;
+
+    // If we lost all connectivity, nothing to do — connections will fail naturally.
+    if (results.contains(ConnectivityResult.none)) {
+      _log.i('Network lost — UDP connections will fail');
+      return;
+    }
+
+    _log.i('Network changed: $results — restarting UDP transport');
+
+    // Serialize with other transport updates to prevent overlapping init/dispose
+    final previous = _transportUpdateLock ?? Future.value();
+    _transportUpdateLock = previous.then((_) => _restartUdpAfterNetworkChange());
+  }
+
+  /// Restart UDP transport after a network change.
+  Future<void> _restartUdpAfterNetworkChange() async {
+    if (!_isUdpEnabledInSettings) return;
+    if (!_started) return;
+
+    // Remember which peers we were connected to via UDP so we can reconnect.
+    final udpPeers = _peersState.peersList
+        .where((p) => p.udpAddress != null && p.udpAddress!.isNotEmpty)
+        .map((p) => (pubkeyHex: p.pubkeyHex, address: p.udpAddress!))
+        .toList();
+
+    // Tear down old UDP service completely
+    _holePunchService?.dispose();
+    _holePunchService = null;
+
+    if (_udpService != null) {
+      await _udpService!.dispose();
+      _udpService = null;
+    }
+
+    _publicAddress = null;
+    store.dispatch(PublicAddressUpdatedAction(null));
+    store.dispatch(UdpTransportStateChangedAction(TransportState.uninitialized));
+
+    // Mark UDP peers as disconnected (connections are dead)
+    for (final peer in _peersState.peersList) {
+      if (peer.udpAddress != null) {
+        store.dispatch(PeerUdpDisconnectedAction(peer.publicKey));
+      }
+    }
+
+    // Re-initialize UDP on the new network interface
+    final success = await _initializeUdp();
+    if (!success) {
+      _log.w('Failed to re-initialize UDP after network change');
+      return;
+    }
+
+    if (_udpAvailable) {
+      await _udpService!.start();
+    }
+
+    _log.i('UDP restarted after network change, re-connecting to ${udpPeers.length} peers');
+
+    // Reconnect to well-connected friends first (they have public IPs,
+    // so we can reach them directly without hole-punching).
+    // _sendViaUdp handles the full connect → ANNOUNCE → send flow.
+    for (final peer in udpPeers) {
+      final peerState = _peersState.getPeerByPubkeyHex(peer.pubkeyHex);
+      if (peerState != null && peerState.isFriend && peerState.isWellConnected) {
+        await sendAnnounceToFriend(
+          friendPubkey: peerState.publicKey,
+          myAddress: udpAddress ?? '',
+        );
+      }
+    }
+
+    // Re-register our new address with the well-connected friends we just reconnected to
+    await _registerAddressWithFriends();
+
+    // Now reconnect to remaining peers (may need hole-punching via friends)
+    for (final peer in udpPeers) {
+      final peerState = _peersState.getPeerByPubkeyHex(peer.pubkeyHex);
+      if (peerState == null) continue;
+      if (peerState.isFriend && peerState.isWellConnected) continue; // Already reconnected above
+
+      // For NAT'd peers whose stored address might still work (same NAT mapping),
+      // try direct reconnection. If it fails, signaling + hole-punch will handle it
+      // on the next periodic cycle.
+      await sendAnnounceToFriend(
+        friendPubkey: peerState.publicKey,
+        myAddress: udpAddress ?? '',
+      );
+    }
+  }
+
+  /// Check if two connectivity result lists are equivalent.
+  static bool _connectivityResultsEqual(
+    List<ConnectivityResult> a,
+    List<ConnectivityResult> b,
+  ) {
+    if (a.length != b.length) return false;
+    final sortedA = List<ConnectivityResult>.from(a)..sort((x, y) => x.index - y.index);
+    final sortedB = List<ConnectivityResult>.from(b)..sort((x, y) => x.index - y.index);
+    for (var i = 0; i < sortedA.length; i++) {
+      if (sortedA[i] != sortedB[i]) return false;
+    }
+    return true;
   }
   
   /// Update transports based on current settings
@@ -487,36 +647,39 @@ class Bitchat {
       _log.i('BLE cleanup complete');
     }
 
-    // Handle libp2p enable/disable
-    if (_isLibp2pEnabledInSettings && !_libp2pAvailable) {
-      // libp2p was enabled, try to initialize
-      await _initializeLibp2p();
-      if (wasStarted && _libp2pAvailable) {
-        await _libp2pService!.start();
+    // Handle UDP enable/disable
+    if (_isUdpEnabledInSettings && !_udpAvailable) {
+      // UDP was enabled, try to initialize
+      await _initializeUdp();
+      if (wasStarted && _udpAvailable) {
+        await _udpService!.start();
       }
-    } else if (!_isLibp2pEnabledInSettings && _libp2pAvailable) {
-      // libp2p was disabled, dispose service and clean up
-      _log.i('libp2p disabled from settings, cleaning up...');
+    } else if (!_isUdpEnabledInSettings && _udpAvailable) {
+      // UDP was disabled, dispose service and clean up
+      _log.i('UDP disabled from settings, cleaning up...');
 
-      if (_libp2pService != null) {
-        await _libp2pService!.dispose();
-        _libp2pService = null;
+      _holePunchService?.dispose();
+      _holePunchService = null;
+
+      if (_udpService != null) {
+        await _udpService!.dispose();
+        _udpService = null;
       }
 
-      // Reset Redux state so _libp2pAvailable returns false
-      store.dispatch(LibP2PTransportStateChangedAction(TransportState.uninitialized));
+      _publicAddress = null;
+      store.dispatch(PublicAddressUpdatedAction(null));
 
-      // Clear all discovered libp2p peers from Redux
-      store.dispatch(ClearDiscoveredLibp2pPeersAction());
+      // Reset Redux state so _udpAvailable returns false
+      store.dispatch(UdpTransportStateChangedAction(TransportState.uninitialized));
 
-      // Disconnect all peers that were connected via libp2p
+      // Disconnect all peers that were connected via UDP
       for (final peer in _peersState.peersList) {
-        if (peer.libp2pAddress != null) {
-          store.dispatch(PeerLibp2pDisconnectedAction(peer.publicKey));
+        if (peer.udpAddress != null) {
+          store.dispatch(PeerUdpDisconnectedAction(peer.publicKey));
         }
       }
 
-      _log.i('libp2p cleanup complete');
+      _log.i('UDP cleanup complete');
     }
   }
   
@@ -541,7 +704,7 @@ class Bitchat {
   ///
   /// Routes through the best available transport:
   /// 1. Bluetooth (if peer is nearby and BLE is enabled)
-  /// 2. libp2p (if peer has libp2p address and libp2p is enabled)
+  /// 2. UDP (if peer has UDP address and UDP is enabled)
   ///
   /// Returns the message ID if sent successfully, null if failed.
   /// The message status can be tracked via store.state.messages.
@@ -557,10 +720,10 @@ class Bitchat {
         peer != null && peer.isReachable && peer.hasBleConnection) {
       transport = MessageTransport.ble;
     } else {
-      final peerHostId = peer?.libp2pHostId;
-      if (_isLibp2pEnabledInSettings && _libp2pAvailable && _libp2pService != null &&
-          peerHostId != null && peerHostId.isNotEmpty) {
-        transport = MessageTransport.libp2p;
+      final peerUdpAddress = peer?.udpAddress;
+      if (_isUdpEnabledInSettings && _udpAvailable && _udpService != null &&
+          peerUdpAddress != null && peerUdpAddress.isNotEmpty) {
+        transport = MessageTransport.udp;
       }
     }
 
@@ -623,21 +786,21 @@ class Bitchat {
         store.dispatch(MessageDeliveredAction(messageId: messageId));
         return messageId;
       }
-      _log.w('BLE send failed, trying libp2p fallback...');
+      _log.w('BLE send failed, trying UDP fallback...');
 
-      // Try libp2p fallback if available
-      final hostId = resolvedPeer.libp2pHostId;
-      if (_isLibp2pEnabledInSettings && _libp2pAvailable && _libp2pService != null &&
-          hostId != null && hostId.isNotEmpty) {
-        await _ensureLibp2pAddresses(resolvedPeer);
-        final libp2pSuccess = await _libp2pService!.sendToPeer(
-          hostId,
+      // Try UDP fallback if available
+      final udpAddress = resolvedPeer.udpAddress;
+      if (_isUdpEnabledInSettings && _udpAvailable && _udpService != null &&
+          udpAddress != null && udpAddress.isNotEmpty) {
+        final udpSuccess = await _sendViaUdp(
+          resolvedPeer.pubkeyHex,
+          udpAddress,
           packet.serialize(),
         );
-        if (libp2pSuccess) {
+        if (udpSuccess) {
           store.dispatch(MessageSentAction(
             messageId: messageId,
-            transport: MessageTransport.libp2p,
+            transport: MessageTransport.udp,
             recipientPubkey: recipientPubkey,
             payloadSize: payload.length,
           ));
@@ -651,20 +814,19 @@ class Bitchat {
       return messageId;
     }
 
-    // Try libp2p if that's the selected transport
-    if (transport == MessageTransport.libp2p) {
-      _log.d('Sending via libp2p to ${resolvedPeer.displayName}');
+    // Try UDP if that's the selected transport
+    if (transport == MessageTransport.udp) {
+      _log.d('Sending via UDP to ${resolvedPeer.displayName}');
 
-      await _ensureLibp2pAddresses(resolvedPeer);
-      final libp2pHostId = resolvedPeer.libp2pHostId!;
-      final success = await _libp2pService!.sendToPeer(
-        libp2pHostId,
+      final success = await _sendViaUdp(
+        resolvedPeer.pubkeyHex,
+        resolvedPeer.udpAddress!,
         packet.serialize(),
       );
       if (success) {
         store.dispatch(MessageSentAction(
           messageId: messageId,
-          transport: MessageTransport.libp2p,
+          transport: MessageTransport.udp,
           recipientPubkey: recipientPubkey,
           payloadSize: payload.length,
         ));
@@ -672,7 +834,7 @@ class Bitchat {
       }
 
       store.dispatch(MessageFailedAction(messageId: messageId));
-      _log.w('libp2p send failed');
+      _log.w('UDP send failed');
       return messageId;
     }
 
@@ -704,12 +866,11 @@ class Bitchat {
       }
     }
 
-    // Fall back to libp2p
-    if (_isLibp2pEnabledInSettings && _libp2pAvailable && _libp2pService != null) {
-      final libp2pHostId = peer?.libp2pHostId;
-      if (peer != null && libp2pHostId != null && libp2pHostId.isNotEmpty) {
-        await _ensureLibp2pAddresses(peer);
-        if (await _libp2pService!.sendToPeer(libp2pHostId, bytes)) return true;
+    // Fall back to UDP
+    if (_isUdpEnabledInSettings && _udpAvailable && _udpService != null) {
+      final udpAddress = peer?.udpAddress;
+      if (peer != null && udpAddress != null && udpAddress.isNotEmpty) {
+        if (await _sendViaUdp(peer.pubkeyHex, udpAddress, bytes)) return true;
       }
     }
 
@@ -737,16 +898,90 @@ class Bitchat {
       }
     }
 
-    // Broadcast via libp2p (no size limit)
-    if (_isLibp2pEnabledInSettings && _libp2pAvailable && _libp2pService != null) {
+    // Broadcast via UDP (no size limit)
+    if (_isUdpEnabledInSettings && _udpAvailable && _udpService != null) {
       try {
-        await _libp2pService!.broadcast(bytes);
+        await _udpService!.broadcast(bytes);
       } catch (e) {
-        _log.e('libp2p broadcast failed: $e');
+        _log.e('UDP broadcast failed: $e');
       }
     }
   }
   
+  // ===== Public Address Discovery =====
+
+  /// Discover our public IP and combine with local port.
+  ///
+  /// This runs asynchronously after UDP init. If discovery fails
+  /// (no internet), we fall back to the local address.
+  Future<void> _discoverPublicAddress() async {
+    final localPort = _udpService?.localPort;
+    if (localPort == null) return;
+
+    final publicAddr = await _publicAddressDiscovery.getPublicAddress(localPort);
+    if (publicAddr != null) {
+      _publicAddress = publicAddr;
+      store.dispatch(PublicAddressUpdatedAction(publicAddr));
+      _log.i('Public UDP address: $_publicAddress');
+
+      // Register our address with well-connected friends
+      final parsed = parseAddressString(publicAddr);
+      if (parsed != null) {
+        _signalingService.registerAddressWithFriends(
+          parsed.ip.address,
+          parsed.port,
+        );
+      }
+    } else {
+      _log.w('Could not discover public IP, using local address');
+    }
+  }
+
+  // ===== UDP Connect-on-Demand =====
+
+  /// Send data to a peer via UDP, connecting first if needed.
+  ///
+  /// UdpTransportService requires an active UDX connection before sending.
+  /// This method handles the connect → ANNOUNCE → send flow transparently.
+  Future<bool> _sendViaUdp(String pubkeyHex, String udpAddress, Uint8List data) async {
+    if (_udpService == null) return false;
+
+    // Already connected? Send directly.
+    if (await _udpService!.sendToPeer(pubkeyHex, data)) return true;
+
+    // Not connected — parse address, hole-punch, then connect
+    final addr = parseAddressString(udpAddress);
+    if (addr == null) {
+      _log.w('Invalid UDP address for peer $pubkeyHex: $udpAddress');
+      return false;
+    }
+
+    // Hole-punch to open NAT mappings before UDX connection attempt
+    if (_holePunchService != null) {
+      _log.i('Hole-punching to $udpAddress before connecting');
+      await _holePunchService!.punch(addr.ip, addr.port);
+    }
+
+    if (!await _udpService!.connectToPeer(pubkeyHex, addr.ip, addr.port)) {
+      return false;
+    }
+
+    // First message on a new UDX stream MUST be ANNOUNCE
+    final announcePayload = _protocolHandler.createAnnouncePayload();
+    final announcePacket = BitchatPacket(
+      type: PacketType.announce,
+      ttl: 0,
+      senderPubkey: identity.publicKey,
+      payload: announcePayload,
+      signature: Uint8List(64),
+    );
+    await _protocolHandler.signPacket(announcePacket);
+    await _udpService!.sendToPeer(pubkeyHex, announcePacket.serialize());
+
+    // Now send the actual data
+    return _udpService!.sendToPeer(pubkeyHex, data);
+  }
+
   // ===== Internal setup =====
   
   /// Set up MessageRouter callbacks to dispatch to Redux and application layer
@@ -756,8 +991,8 @@ class Bitchat {
       // Determine transport from peer state
       final peer = store.state.peers.getPeerByPubkey(senderPubkey);
       // TODO: why determine transport from peer state instead of passing it from the message?
-      final transport = peer?.activeTransport == PeerTransport.libp2p
-          ? MessageTransport.libp2p
+      final transport = peer?.activeTransport == PeerTransport.udp
+          ? MessageTransport.udp
           : MessageTransport.ble;
 
       store.dispatch(MessageReceivedAction(
@@ -769,7 +1004,7 @@ class Bitchat {
       onMessageReceived?.call(messageId, senderPubkey, payload);
     };
 
-    // ACK received (libp2p delivery confirmation)
+    // ACK received (UDP delivery confirmation)
     _messageRouter.onAckReceived = (messageId) {
       _log.d('ACK received for message $messageId');
       store.dispatch(MessageDeliveredAction(messageId: messageId));
@@ -782,7 +1017,18 @@ class Bitchat {
     };
 
     // Peer ANNOUNCE processed
-    _messageRouter.onPeerAnnounced = (data, transport, {bool isNew = false}) {
+    _messageRouter.onPeerAnnounced =
+        (data, transport, {bool isNew = false, String? udpPeerId}) {
+      // Map incoming UDP connection to the peer's pubkey.
+      // This enables ACK sending and correct peer identification for
+      // subsequent messages on this connection.
+      if (transport == PeerTransport.udp && udpPeerId != null) {
+        final pubkeyHex = data.publicKey
+            .map((b) => b.toRadixString(16).padLeft(2, '0'))
+            .join();
+        _udpService?.mapIncomingConnectionToPubkey(udpPeerId, pubkeyHex);
+      }
+
       if (isNew) {
         final peerState = store.state.peers.getPeerByPubkey(data.publicKey);
         if (peerState != null) {
@@ -801,11 +1047,143 @@ class Bitchat {
       final ackPacket = _protocolHandler.createAckPacket(messageId: messageId);
       await _protocolHandler.signPacket(ackPacket);
       final bytes = ackPacket.serialize();
-      if (transport == PeerTransport.libp2p) {
-        await _libp2pService?.sendToPeer(peerId, bytes);
+      if (transport == PeerTransport.udp) {
+        await _udpService?.sendToPeer(peerId, bytes);
       } else if (transport == PeerTransport.bleDirect) {
         await _bleService?.sendToPeer(peerId, bytes);
       }
+    };
+
+    // Signaling packet received — delegate to SignalingService.
+    // Pass the observed UDP source address so the friend can reflect it back.
+    _messageRouter.onSignalingReceived = (senderPubkey, payload) {
+      String? observedIp;
+      int? observedPort;
+
+      // Look up the sender's real address from the UDX connection metadata.
+      if (_udpService != null) {
+        final senderHex = senderPubkey
+            .map((b) => b.toRadixString(16).padLeft(2, '0'))
+            .join();
+        final remote = _udpService!.getRemoteAddress(senderHex);
+        if (remote != null) {
+          observedIp = remote.ip.address;
+          observedPort = remote.port;
+        }
+      }
+
+      _signalingService.processSignaling(
+        senderPubkey,
+        payload,
+        observedIp: observedIp,
+        observedPort: observedPort,
+      );
+    };
+  }
+
+  /// Set up SignalingService callbacks
+  void _setupSignalingCallbacks() {
+    // SignalingService sends signaling payloads through us (wrapped in BitchatPacket)
+    _signalingService.sendSignaling = (recipientPubkey, signalingPayload) async {
+      final packet = BitchatPacket(
+        type: PacketType.signaling,
+        senderPubkey: identity.publicKey,
+        recipientPubkey: recipientPubkey,
+        payload: signalingPayload,
+        signature: Uint8List(64),
+      );
+      await _protocolHandler.signPacket(packet);
+      final bytes = packet.serialize();
+
+      final pubkeyHex = recipientPubkey
+          .map((b) => b.toRadixString(16).padLeft(2, '0'))
+          .join();
+
+      // Try BLE first
+      if (_bleService != null && _bleAvailable) {
+        final peerId = _bleService!.getPeerIdForPubkey(recipientPubkey);
+        if (peerId != null) {
+          if (await _bleService!.sendToPeer(peerId, bytes)) return true;
+        }
+      }
+
+      // Fall back to UDP
+      if (_udpService != null && _udpAvailable) {
+        if (await _udpService!.sendToPeer(pubkeyHex, bytes)) return true;
+
+        // Not connected via UDP yet — try connect-on-demand
+        final peer = store.state.peers.getPeerByPubkeyHex(pubkeyHex);
+        final udpAddr = peer?.udpAddress;
+        if (udpAddr != null && udpAddr.isNotEmpty) {
+          return _sendViaUdp(pubkeyHex, udpAddr, bytes);
+        }
+      }
+
+      return false;
+    };
+
+    // Hole-punch initiation: a well-connected friend told us to start punching
+    _signalingService.onPunchInitiate = (peerPubkey, ip, port) async {
+      final peerHex = peerPubkey
+          .map((b) => b.toRadixString(16).padLeft(2, '0'))
+          .join();
+
+      _log.i('Signaling: starting hole-punch to $ip:$port for ${peerHex.substring(0, 8)}...');
+
+      store.dispatch(HolePunchPunchingAction(peerHex));
+
+      final targetIp = InternetAddress.tryParse(ip);
+      if (targetIp == null) {
+        _log.w('Invalid IP in punch initiate: $ip');
+        store.dispatch(HolePunchFailedAction(peerHex, 'Invalid IP'));
+        return;
+      }
+
+      // Use the hole-punch service to send punch packets
+      if (_holePunchService != null) {
+        await _holePunchService!.punch(targetIp, port);
+      }
+
+      // After punching, try to establish UDX connection
+      if (_udpService != null) {
+        final connected = await _udpService!.connectToPeer(peerHex, targetIp, port);
+        if (connected) {
+          // Send ANNOUNCE as first message
+          final announcePayload = _protocolHandler.createAnnouncePayload();
+          final announcePacket = BitchatPacket(
+            type: PacketType.announce,
+            ttl: 0,
+            senderPubkey: identity.publicKey,
+            payload: announcePayload,
+            signature: Uint8List(64),
+          );
+          await _protocolHandler.signPacket(announcePacket);
+          await _udpService!.sendToPeer(peerHex, announcePacket.serialize());
+
+          store.dispatch(HolePunchSucceededAction(peerHex, ip, port));
+          _log.i('Hole-punch succeeded: connected to ${peerHex.substring(0, 8)}... at $ip:$port');
+        } else {
+          store.dispatch(HolePunchFailedAction(peerHex, 'UDX connection failed after punch'));
+          _log.w('Hole-punch failed: could not establish UDX connection');
+        }
+      }
+    };
+
+    // Address reflection: a well-connected friend told us our real public address.
+    // This replaces the HTTP-discovered IP + guessed port with the actual
+    // NAT-translated address the friend observed — correct external port included.
+    _signalingService.onAddrReflected = (ip, port) {
+      final reflected = AddressInfo(InternetAddress(ip), port).toAddressString();
+      if (reflected == _publicAddress) return; // No change
+
+      _log.i('Public address updated via reflection: $_publicAddress → $reflected');
+      _publicAddress = reflected;
+      store.dispatch(PublicAddressUpdatedAction(reflected));
+
+      // Re-register with all friends using the corrected address.
+      // The first friend already has it (they reflected it), but other
+      // friends may have our old (guessed) address.
+      _signalingService.registerAddressWithFriends(ip, port);
     };
   }
 
@@ -817,7 +1195,7 @@ class Bitchat {
       connectionState: state.connectionState,
       transport: state.transport,
       bleDeviceId: state.bleDeviceId,
-      libp2pAddress: state.libp2pAddress,
+      udpAddress: state.udpAddress,
       rssi: state.rssi,
       protocolVersion: state.protocolVersion,
     );
@@ -855,37 +1233,39 @@ class Bitchat {
     });
   }
   
-  /// Set up callbacks for libp2p transport service
-  void _setupLibp2pServiceCallbacks() {
-    if (_libp2pService == null) return;
+  /// Set up callbacks for UDP transport service
+  void _setupUdpServiceCallbacks() {
+    if (_udpService == null) return;
 
-    // Forward libp2p data to the MessageRouter for processing
-    _libp2pService!.onLibp2pDataReceived = (peerId, data) {
+    // Forward UDP data to the MessageRouter for processing
+    _udpService!.onUdpDataReceived = (peerId, data) {
       try {
         final packet = BitchatPacket.deserialize(data);
         _messageRouter.processPacket(
           packet,
-          transport: PeerTransport.libp2p,
-          libp2pPeerId: peerId,
+          transport: PeerTransport.udp,
+          udpPeerId: peerId,
         );
       } catch (e) {
-        _log.e('Failed to deserialize libp2p packet from $peerId: $e');
+        _log.e('Failed to deserialize UDP packet from $peerId: $e');
       }
     };
 
     // Listen to connection events for ANNOUNCE broadcasts
-    _libp2pService!.connectionStream.listen((event) {
+    _udpService!.connectionStream.listen((event) {
       if (event.connected) {
-        _log.i('libp2p peer connected: ${event.peerId}');
-        _broadcastAnnounceViaLibp2p();
+        _log.i('UDP peer connected: ${event.peerId}');
+        _broadcastAnnounceViaUdp();
       } else {
-        _log.i('libp2p peer disconnected: ${event.peerId}');
+        _log.i('UDP peer disconnected: ${event.peerId}');
       }
     });
   }
   
   /// Clean up resources
   Future<void> dispose() async {
+    _connectivitySubscription?.cancel();
+    _connectivitySubscription = null;
     _storeSubscription?.cancel();
     _storeSubscription = null;
     _announceTimer?.cancel();
@@ -900,13 +1280,17 @@ class Bitchat {
     await stop();
 
     _messageRouter.dispose();
+    _signalingService.dispose();
 
     if (_bleService != null) {
       await _bleService!.dispose();
     }
 
-    if (_libp2pService != null) {
-      await _libp2pService!.dispose();
+    _holePunchService?.dispose();
+    _holePunchService = null;
+
+    if (_udpService != null) {
+      await _udpService!.dispose();
     }
   }
   
@@ -914,9 +1298,9 @@ class Bitchat {
   void _startAnnounceTimer() {
     _announceTimer?.cancel();
     _announceTimer = Timer.periodic(config.announceInterval, (_) {
-      // _log.d('Timer is up! time to ANNOUNCE again 📢');
       _broadcastAnnounce();
-      _broadcastAnnounceViaLibp2p();
+      _broadcastAnnounceViaUdp();
+      _registerAddressWithFriends();
       _removeStalePeers();
     });
   }
@@ -943,30 +1327,46 @@ class Bitchat {
     }
   }
   
-  /// Broadcast ANNOUNCE to all connected BLE devices
+  /// Send ANNOUNCE to all connected BLE devices.
+  ///
+  /// Each peer receives exactly one ANNOUNCE per tick:
+  /// - Friends get ANNOUNCE with our UDP address.
+  /// - Non-friends get ANNOUNCE without address (privacy).
+  ///
+  /// Uses _bleService.broadcast with an exclude list for non-friends,
+  /// then sends individually to friends with address.
   Future<void> _broadcastAnnounce() async {
     if (_bleService == null || !_bleAvailable) return;
 
-    final payload = _protocolHandler.createAnnouncePayload();
-    final packet = BitchatPacket(
-      type: PacketType.announce,
-      ttl: 0,
-      senderPubkey: identity.publicKey,
-      payload: payload,
-      signature: Uint8List(64),
-    );
-    await _protocolHandler.signPacket(packet);
-    await _bleService!.broadcast(packet.serialize());
+    final myAddress = udpAddress;
+    final withAddr = await _createSignedAnnounce(address: myAddress);
+    final withoutAddr = await _createSignedAnnounce();
+
+    // Collect friend BLE device IDs so we can skip them in the broadcast.
+    final friendBleIds = <String>{};
+    for (final peer in _peersState.peersList) {
+      if (!peer.isFriend) continue;
+      final bleId = peer.bleDeviceId;
+      if (bleId != null) friendBleIds.add(bleId);
+    }
+
+    // Non-friends: broadcast without address (skipping friends)
+    await _bleService!.broadcast(withoutAddr, excludePeerIds: friendBleIds);
+
+    // Friends: send with address individually
+    for (final bleId in friendBleIds) {
+      await _bleService!.sendToPeer(bleId, withAddr);
+    }
   }
 
-  /// Broadcast ANNOUNCE via libp2p (uses BitchatPacket format, same as BLE)
-  Future<void> _broadcastAnnounceViaLibp2p() async {
-    if (_libp2pService == null || !_libp2pAvailable) return;
+  /// Broadcast ANNOUNCE via UDP to all connected peers.
+  ///
+  /// Always includes our address — all UDP peers are known (no strangers).
+  Future<void> _broadcastAnnounceViaUdp() async {
+    if (_udpService == null || !_udpAvailable) return;
 
-    // Include our libp2p address so peers can connect to us
-    final addrs = libp2pHostAddrs;
-    final addr = addrs.isNotEmpty ? addrs.first : null;
-    final payload = _protocolHandler.createAnnouncePayload(address: addr);
+    final myAddress = udpAddress;
+    final payload = _protocolHandler.createAnnouncePayload(address: myAddress);
     final packet = BitchatPacket(
       type: PacketType.announce,
       ttl: 0,
@@ -975,15 +1375,32 @@ class Bitchat {
       signature: Uint8List(64),
     );
     await _protocolHandler.signPacket(packet);
-    await _libp2pService!.broadcast(packet.serialize());
+    await _udpService!.broadcast(packet.serialize());
+  }
+
+  /// Send a minimal ANNOUNCE (no address) to a single BLE device for
+  /// initial identity exchange. Called once when a new BLE connection
+  /// is established, before the peer is identified.
+  /// Create a signed ANNOUNCE packet, optionally with address.
+  Future<Uint8List> _createSignedAnnounce({String? address}) async {
+    final payload = _protocolHandler.createAnnouncePayload(address: address);
+    final packet = BitchatPacket(
+      type: PacketType.announce,
+      ttl: 0,
+      senderPubkey: identity.publicKey,
+      payload: payload,
+      signature: Uint8List(64),
+    );
+    await _protocolHandler.signPacket(packet);
+    return packet.serialize();
   }
 
   /// Send ANNOUNCE with address to a specific friend.
   ///
-  /// This is the unified presence mechanism - friends receive our libp2p address
+  /// This is the unified presence mechanism — friends receive our UDP address
   /// in the ANNOUNCE so they can connect to us over the internet.
   ///
-  /// Works over both BLE and libp2p transports.
+  /// Works over both BLE and UDP transports.
   Future<bool> sendAnnounceToFriend({
     required Uint8List friendPubkey,
     required String myAddress,
@@ -1011,16 +1428,35 @@ class Bitchat {
       }
     }
 
-    // Also try libp2p if available
-    if (_libp2pService != null && _libp2pAvailable) {
-      final peerId = _libp2pService!.getPeerIdForPubkey(friendPubkey);
+    // Also try UDP if available
+    if (_udpService != null && _udpAvailable) {
+      final peerId = _udpService!.getPeerIdForPubkey(friendPubkey);
       if (peerId != null) {
-        final libp2pSent = await _libp2pService!.sendToPeer(peerId, bytes);
-        sent = sent || libp2pSent;
+        final udpSent = await _udpService!.sendToPeer(peerId, bytes);
+        sent = sent || udpSent;
       }
     }
 
     return sent;
+  }
+
+  /// Register our address with well-connected friends via signaling.
+  ///
+  /// Called periodically so friends always have our current address.
+  /// Also called when public address is first discovered.
+  Future<void> _registerAddressWithFriends() async {
+    if (_udpService == null || !_udpAvailable) return;
+
+    final myAddress = udpAddress;
+    if (myAddress == null || myAddress.isEmpty) return;
+
+    final parsed = parseAddressString(myAddress);
+    if (parsed == null) return;
+
+    await _signalingService.registerAddressWithFriends(
+      parsed.ip.address,
+      parsed.port,
+    );
   }
 
   /// Remove peers that haven't sent an ANNOUNCE within the interval
@@ -1073,15 +1509,4 @@ class Bitchat {
     }
   }
 
-  // ===== LibP2P Helpers =====
-
-  /// Ensure libp2p peer addresses are in the peerstore before dialing.
-  Future<void> _ensureLibp2pAddresses(PeerState peer) async {
-    if (_libp2pService == null) return;
-    final hostId = peer.libp2pHostId;
-    final hostAddrs = peer.libp2pHostAddrs;
-    if (hostId != null && hostAddrs != null && hostAddrs.isNotEmpty) {
-      await _libp2pService!.ensureAddressesInPeerstore(hostId, hostAddrs);
-    }
-  }
 }

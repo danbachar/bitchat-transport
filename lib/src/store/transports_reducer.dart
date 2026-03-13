@@ -9,15 +9,22 @@ TransportsState transportsReducer(TransportsState state, TransportAction action)
     );
   }
 
-  if (action is LibP2PTransportStateChangedAction) {
+  if (action is UdpTransportStateChangedAction) {
     return state.copyWith(
-      libp2pState: action.state,
-      libp2pError: action.error,
+      udpState: action.state,
+      udpError: action.error,
     );
   }
 
   if (action is BleScanningChangedAction) {
     return state.copyWith(bleScanning: action.scanning);
+  }
+
+  if (action is PublicAddressUpdatedAction) {
+    if (action.publicAddress == null) {
+      return state.clearPublicAddress();
+    }
+    return state.copyWith(publicAddress: action.publicAddress);
   }
 
   return state;
