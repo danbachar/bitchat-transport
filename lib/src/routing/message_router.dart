@@ -48,13 +48,19 @@ class MessageRouter {
       {bool isNew, String? udpPeerId})? onPeerAnnounced;
 
   /// Called when a message needs an ACK sent back to the sender
-  void Function(PeerTransport transport, String peerId, String messageId)?
+  void Function(PeerTransport transport, String? peerId, String messageId)?
       onAckRequested;
 
   /// Called when a signaling packet is received.
   /// The coordinator routes this to [SignalingService.processSignaling].
   void Function(Uint8List senderPubkey, Uint8List payload)?
       onSignalingReceived;
+
+  /// Called when a verified packet arrives over UDP, providing the sender's
+  /// pubkey so the coordinator can map the connection (replacing tempKey-based
+  /// identification that previously required ANNOUNCE as the first message).
+  void Function(Uint8List senderPubkey, String udpPeerId)?
+      onUdpPeerIdentified;
 
   /// Convenience accessor for peers state
   PeersState get _peersState => store.state.peers;
@@ -88,6 +94,13 @@ class MessageRouter {
       return;
     }
 
+    // Map incoming UDP connections from any verified packet's senderPubkey.
+    // Previously required ANNOUNCE as the first message on a stream; now any
+    // verified packet identifies the sender.
+    if (transport == PeerTransport.udp && udpPeerId != null) {
+      onUdpPeerIdentified?.call(packet.senderPubkey, udpPeerId);
+    }
+
     // ANNOUNCE always processed (peer may have updated info)
     if (packet.type == PacketType.announce) {
       _handleAnnounce(
@@ -111,7 +124,7 @@ class MessageRouter {
         return; // Already handled above
       case PacketType.message:
       // TODO: why do messages have different types than packets?
-        _handleMessage(packet, transport: transport, udpPeerId: udpPeerId);
+        _handleMessage(packet, transport: transport, peerId: udpPeerId ?? bleDeviceId);
       case PacketType.fragmentStart:
       case PacketType.fragmentContinue:
       case PacketType.fragmentEnd:
@@ -211,7 +224,8 @@ class MessageRouter {
     }
 
     _log.i(
-        'Peer ${isNew ? "connected" : "updated"}: ${data.nickname} via ${transport.name}');
+        'Peer ${isNew ? "connected" : "updated"}: ${data.nickname} via ${transport.name}'
+        '${data.udpAddress != null ? " addr=${data.udpAddress}" : ""}');
 
     onPeerAnnounced?.call(data, transport, isNew: isNew, udpPeerId: udpPeerId);
   }
@@ -219,15 +233,15 @@ class MessageRouter {
   void _handleMessage(
     BitchatPacket packet, {
     required PeerTransport transport,
-    String? udpPeerId,
+    String? peerId,
   }) {
     if (!_isForUs(packet)) return;
     onMessageReceived?.call(
         packet.packetId, packet.senderPubkey, packet.payload);
-    // Send ACK back for UDP (delivery confirmation)
-    if (transport == PeerTransport.udp && udpPeerId != null) {
-      onAckRequested?.call(transport, udpPeerId, packet.packetId);
-    }
+    // Send ACK back to confirm delivery. The sender waits for this to
+    // mark the message as "delivered" (2 checkmarks). Works over both
+    // BLE (peerId = bleDeviceId) and UDP (peerId = udpPeerId).
+    onAckRequested?.call(transport, peerId, packet.packetId);
   }
 
   void _handleFragment(BitchatPacket packet) {
