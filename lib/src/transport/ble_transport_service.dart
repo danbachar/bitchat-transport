@@ -183,11 +183,21 @@ class BleTransportService extends TransportService {
     // Clear stopped flag to allow packet processing
     _stopped = false;
 
-    // Start advertising first (so others can find us)
-    await _peripheral.startAdvertising(localName: localName);
+    // Advertising and scanning are independent — a failure in one must
+    // not prevent the other from starting. A device that can't advertise
+    // can still discover and connect to peers as a central. A device
+    // that can't scan can still accept connections as a peripheral.
+    try {
+      await _peripheral.startAdvertising(localName: localName);
+    } catch (e) {
+      _log.e('Failed to start advertising (scanning will still start): $e');
+    }
 
-    // Then start scanning (to find others)
-    await _central.startScan();
+    try {
+      await _central.startScan();
+    } catch (e) {
+      _log.e('Failed to start scanning: $e');
+    }
 
     _setState(TransportState.active);
     _log.i('BLE transport started');
