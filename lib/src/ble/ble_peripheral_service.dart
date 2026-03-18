@@ -70,26 +70,14 @@ class BlePeripheralService {
 
       // Set up BLE state change callback to know when powered on.
       // On iOS cold start, CoreBluetooth reports 'unknown' initially and
-      // transitions to 'poweredOn' asynchronously. We must wait for the
-      // actual callback rather than relying on isSupported() — that returns
-      // true even when the adapter is still in 'unknown' state.
+      // transitions to 'poweredOn' asynchronously. We MUST wait for the
+      // actual callback — isSupported() returns true even when the adapter
+      // is in 'unknown' state, and addService() will time out if called
+      // before CoreBluetooth is truly ready.
       BlePeripheral.setBleStateChangeCallback((bool state) {
         _log.i('BLE peripheral state changed: $state');
         if (state && !_bleReadyCompleter.isCompleted) {
           _bleReadyCompleter.complete();
-        }
-      });
-
-      // On Android (and iOS hot restarts), BLE may already be powered on
-      // and the state change callback won't fire. Give the callback a
-      // moment to deliver the current state, then fall back to isSupported()
-      // as a last resort.
-      Future.delayed(const Duration(milliseconds: 500), () async {
-        if (!_bleReadyCompleter.isCompleted) {
-          if (await BlePeripheral.isSupported()) {
-            _log.i('BLE already powered on (no state callback received)');
-            _bleReadyCompleter.complete();
-          }
         }
       });
 
@@ -114,7 +102,11 @@ class BlePeripheralService {
     }
   }
 
-  /// Start advertising our service
+  /// Start advertising our service.
+  ///
+  /// Waits for CoreBluetooth to be powered on, then adds the GATT service
+  /// and starts advertising. If the initial attempt fails (iOS cold-start
+  /// race), retries once after the BLE state callback fires.
   Future<void> startAdvertising({String? localName}) async {
     if (_isAdvertising) {
       _log.w('Already advertising');
@@ -122,7 +114,8 @@ class BlePeripheralService {
     }
 
     try {
-      // Wait for BLE to be powered on (important for iOS)
+      // Wait for BLE to be powered on (important for iOS cold start).
+      // The completer is resolved by the BleStateChangeCallback.
       _log.i('Waiting for BLE to be powered on...');
       await _bleReadyCompleter.future.timeout(
         const Duration(seconds: 10),
@@ -132,44 +125,59 @@ class BlePeripheralService {
       );
       _log.i('BLE is powered on, adding service...');
 
-      // Add the GATT service with our characteristic
-      await BlePeripheral.addService(
-        BleService(
-          uuid: serviceUuid,
-          primary: true,
-          characteristics: [
-            BleCharacteristic(
-              uuid: characteristicUuid,
-              properties: [
-                CharacteristicProperties.read.index,
-                CharacteristicProperties.write.index,
-                CharacteristicProperties.writeWithoutResponse.index,
-                CharacteristicProperties.notify.index,
-              ],
-              permissions: [
-                AttributePermissions.readable.index,
-                AttributePermissions.writeable.index,
-              ],
-            ),
-          ],
-        ),
-      );
-
-      // Start advertising - NO local name to keep packet small
-      // The 128-bit UUID derived from pubkey is used for discovery
-      // Identity exchange happens via ANNOUNCE after connection
-      await BlePeripheral.startAdvertising(
-        services: [serviceUuid],
-        // localName omitted to fit in legacy advertising packet
-      );
-
-      _isAdvertising = true;
-      _active = true;  // Enable data processing
-      _log.i('Started advertising: $serviceUuid');
+      await _addServiceAndStartAdvertising();
     } catch (e) {
-      _log.e('Failed to start advertising: $e');
-      rethrow;
+      _log.w('First advertising attempt failed: $e');
+
+      // On iOS, the BLE state callback can arrive before CoreBluetooth
+      // is fully ready to accept GATT services. Wait briefly and retry.
+      _log.i('Retrying service addition in 2 seconds...');
+      await Future.delayed(const Duration(seconds: 2));
+
+      try {
+        await _addServiceAndStartAdvertising();
+      } catch (retryError) {
+        _log.e('Retry also failed: $retryError');
+        rethrow;
+      }
     }
+  }
+
+  /// Add the GATT service and start BLE advertising.
+  Future<void> _addServiceAndStartAdvertising() async {
+    await BlePeripheral.addService(
+      BleService(
+        uuid: serviceUuid,
+        primary: true,
+        characteristics: [
+          BleCharacteristic(
+            uuid: characteristicUuid,
+            properties: [
+              CharacteristicProperties.read.index,
+              CharacteristicProperties.write.index,
+              CharacteristicProperties.writeWithoutResponse.index,
+              CharacteristicProperties.notify.index,
+            ],
+            permissions: [
+              AttributePermissions.readable.index,
+              AttributePermissions.writeable.index,
+            ],
+          ),
+        ],
+      ),
+    );
+
+    // Start advertising - NO local name to keep packet small
+    // The 128-bit UUID derived from pubkey is used for discovery
+    // Identity exchange happens via ANNOUNCE after connection
+    await BlePeripheral.startAdvertising(
+      services: [serviceUuid],
+      // localName omitted to fit in legacy advertising packet
+    );
+
+    _isAdvertising = true;
+    _active = true;  // Enable data processing
+    _log.i('Started advertising: $serviceUuid');
   }
 
   /// Stop advertising
