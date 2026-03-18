@@ -3,12 +3,6 @@ import 'signaling_state.dart';
 
 /// Reducer for signaling state.
 SignalingState signalingReducer(SignalingState state, SignalingAction action) {
-  if (action is AddressRegisteredWithFriendAction) {
-    final updated = Map<String, DateTime>.from(state.registeredFriends);
-    updated[action.friendPubkeyHex] = DateTime.now();
-    return state.copyWith(registeredFriends: updated);
-  }
-
   if (action is HolePunchStartedAction) {
     final updated = Map<String, HolePunchStatus>.from(state.holePunchAttempts);
     updated[action.targetPubkeyHex] = HolePunchStatus.requested;

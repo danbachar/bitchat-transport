@@ -853,7 +853,8 @@ void main() {
 
       final peer = result.peers[hex]!;
       expect(peer.connectionState, PeerConnectionState.disconnected);
-      expect(peer.udpAddress, isNull);
+      // udpAddress is preserved — it's the last known location for reconnection
+      expect(peer.udpAddress, '[2001:db8::1]:4001');
     });
 
     test('keeps connected if has BLE device (central)', () {
@@ -877,10 +878,11 @@ void main() {
       final peer = result.peers[hex]!;
       expect(peer.connectionState, PeerConnectionState.connected);
       expect(peer.bleCentralDeviceId, 'central-1');
-      expect(peer.udpAddress, isNull);
+      // udpAddress is preserved — it's the last known location for reconnection
+      expect(peer.udpAddress, '[2001:db8::1]:4001');
     });
 
-    test('clears udpAddress', () {
+    test('preserves udpAddress for reconnection', () {
       final pubkey = _testPubkey(1);
       final hex = _pubkeyHex(pubkey);
       final initial = PeersState(
@@ -897,7 +899,9 @@ void main() {
 
       final result = peersReducer(initial, action);
 
-      expect(result.peers[hex]!.udpAddress, isNull);
+      // UDP address must never be cleared on disconnect — it's
+      // the last known location and the only way to attempt reconnection.
+      expect(result.peers[hex]!.udpAddress, '[2001:db8::1]:4001');
     });
   });
 
@@ -1265,7 +1269,8 @@ void main() {
       expect(peer.bleCentralDeviceId, isNull);
       expect(peer.blePeripheralDeviceId, isNull);
       expect(peer.bleDeviceId, isNull);
-      expect(peer.udpAddress, isNull);
+      // udpAddress is preserved — it's the last known location for reconnection
+      expect(peer.udpAddress, '[2001:db8::1]:4001');
     });
 
     test('clears stale BLE IDs when lastBleSeen exceeds threshold', () {

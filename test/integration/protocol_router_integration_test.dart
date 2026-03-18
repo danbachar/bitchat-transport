@@ -80,7 +80,7 @@ void main() {
       // Bob's router processes the BLE packet
       AnnounceData? receivedAnnounce;
       PeerTransport? receivedTransport;
-      bobRouter.onPeerAnnounced = (data, transport, {bool isNew = false}) {
+      bobRouter.onPeerAnnounced = (data, transport, {bool isNew = false, String? udpPeerId}) {
         receivedAnnounce = data;
         receivedTransport = transport;
       };
@@ -121,7 +121,7 @@ void main() {
       await aliceProtocol.signPacket(packet);
 
       AnnounceData? receivedAnnounce;
-      bobRouter.onPeerAnnounced = (data, transport, {bool isNew = false}) {
+      bobRouter.onPeerAnnounced = (data, transport, {bool isNew = false, String? udpPeerId}) {
         receivedAnnounce = data;
       };
 
@@ -268,7 +268,7 @@ void main() {
       // Bob's router processes it
       AnnounceData? receivedAnnounce;
       PeerTransport? receivedTransport;
-      bobRouter.onPeerAnnounced = (data, transport, {bool isNew = false}) {
+      bobRouter.onPeerAnnounced = (data, transport, {bool isNew = false, String? udpPeerId}) {
         receivedAnnounce = data;
         receivedTransport = transport;
       };
@@ -306,7 +306,7 @@ void main() {
       await aliceProtocol.signPacket(packet);
 
       AnnounceData? receivedAnnounce;
-      bobRouter.onPeerAnnounced = (data, transport, {bool isNew = false}) {
+      bobRouter.onPeerAnnounced = (data, transport, {bool isNew = false, String? udpPeerId}) {
         receivedAnnounce = data;
       };
 
@@ -445,7 +445,7 @@ void main() {
       await aliceProtocol.signPacket(packet);
 
       int announceCount = 0;
-      bobRouter.onPeerAnnounced = (_, __, {bool isNew = false}) {
+      bobRouter.onPeerAnnounced = (_, __, {bool isNew = false, String? udpPeerId}) {
         announceCount++;
       };
 

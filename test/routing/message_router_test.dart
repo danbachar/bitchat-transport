@@ -121,7 +121,7 @@ void main() {
         router.onMessageReceived = (_, __, ___) => anyCalled = true;
         router.onAckReceived = (_) => anyCalled = true;
         router.onReadReceiptReceived = (_) => anyCalled = true;
-        router.onPeerAnnounced = (_, __, {bool isNew = false}) =>
+        router.onPeerAnnounced = (_, __, {bool isNew = false, String? udpPeerId}) =>
             anyCalled = true;
 
         // Create packet without signing (zero signature)
@@ -240,7 +240,7 @@ void main() {
       test('fires onPeerAnnounced callback', () async {
         AnnounceData? receivedData;
         PeerTransport? receivedTransport;
-        router.onPeerAnnounced = (data, transport, {bool isNew = false}) {
+        router.onPeerAnnounced = (data, transport, {bool isNew = false, String? udpPeerId}) {
           receivedData = data;
           receivedTransport = transport;
         };
@@ -275,7 +275,7 @@ void main() {
 
         int announceCount = 0;
         router.onPeerAnnounced =
-            (_, __, {bool isNew = false}) => announceCount++;
+            (_, __, {bool isNew = false, String? udpPeerId}) => announceCount++;
 
         await router.processPacket(
           p,
@@ -593,7 +593,9 @@ void main() {
         );
       });
 
-      test('uses peerId as fallback address when not in payload', () async {
+      test('does not use peerId as fallback address when not in payload', () async {
+        // udpPeerId is a hex pubkey, not an ip:port address — it must not
+        // be stored as udpAddress.
         final payload = buildAnnouncePayload(
           pubkey: otherPubkey,
           nickname: 'NoPeer',
@@ -611,12 +613,12 @@ void main() {
 
         final peer = store.state.peers.getPeerByPubkey(otherPubkey);
         expect(peer, isNotNull);
-        expect(peer!.udpAddress, equals('fallback-peer-id'));
+        expect(peer!.udpAddress, isNull);
       });
 
       test('fires onPeerAnnounced callback with UDP transport', () async {
         PeerTransport? receivedTransport;
-        router.onPeerAnnounced = (_, transport, {bool isNew = false}) {
+        router.onPeerAnnounced = (_, transport, {bool isNew = false, String? udpPeerId}) {
           receivedTransport = transport;
         };
 

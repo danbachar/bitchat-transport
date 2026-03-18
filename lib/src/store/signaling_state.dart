@@ -18,27 +18,20 @@ enum HolePunchStatus {
 /// Redux state for signaling and hole-punch coordination.
 @immutable
 class SignalingState {
-  /// Well-connected friends we've registered our address with.
-  /// Key: friend pubkey hex, value: when we last registered.
-  final Map<String, DateTime> registeredFriends;
-
   /// Active hole-punch attempts.
   /// Key: target peer pubkey hex, value: current status.
   final Map<String, HolePunchStatus> holePunchAttempts;
 
   const SignalingState({
-    this.registeredFriends = const {},
     this.holePunchAttempts = const {},
   });
 
   static const SignalingState initial = SignalingState();
 
   SignalingState copyWith({
-    Map<String, DateTime>? registeredFriends,
     Map<String, HolePunchStatus>? holePunchAttempts,
   }) {
     return SignalingState(
-      registeredFriends: registeredFriends ?? this.registeredFriends,
       holePunchAttempts: holePunchAttempts ?? this.holePunchAttempts,
     );
   }
@@ -48,16 +41,12 @@ class SignalingState {
       identical(this, other) ||
       other is SignalingState &&
           runtimeType == other.runtimeType &&
-          mapEquals(registeredFriends, other.registeredFriends) &&
           mapEquals(holePunchAttempts, other.holePunchAttempts);
 
   @override
-  int get hashCode => Object.hash(
-        registeredFriends.length,
-        holePunchAttempts.length,
-      );
+  int get hashCode => holePunchAttempts.length.hashCode;
 
   @override
   String toString() =>
-      'SignalingState(registered: ${registeredFriends.length}, punches: ${holePunchAttempts.length})';
+      'SignalingState(punches: ${holePunchAttempts.length})';
 }

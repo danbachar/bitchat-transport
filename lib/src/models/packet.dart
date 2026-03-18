@@ -4,7 +4,7 @@ import 'package:uuid/uuid.dart';
 
 /// Packet types matching Bitchat protocol
 enum PacketType {
-  /// Peer identity announcement (sent on connection)
+  /// Peer identity announcement (sent periodically)
   announce(0x01),
   
   /// Application message (GSG blocks go here)

@@ -1,12 +1,6 @@
 /// Base class for signaling actions.
 abstract class SignalingAction {}
 
-/// We successfully registered our address with a well-connected friend.
-class AddressRegisteredWithFriendAction extends SignalingAction {
-  final String friendPubkeyHex;
-  AddressRegisteredWithFriendAction(this.friendPubkeyHex);
-}
-
 /// A hole-punch attempt was initiated.
 class HolePunchStartedAction extends SignalingAction {
   final String targetPubkeyHex;

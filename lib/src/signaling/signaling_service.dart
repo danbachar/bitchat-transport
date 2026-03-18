@@ -15,12 +15,12 @@ import 'signaling_codec.dart';
 /// ## Two roles
 ///
 /// 1. **As a regular agent** (behind NAT):
-///    - Registers our address with well-connected friends (ADDR_REGISTER).
 ///    - Queries friends for other peers' addresses (ADDR_QUERY).
 ///    - Requests hole-punch coordination (PUNCH_REQUEST).
 ///    - Responds to PUNCH_INITIATE by starting the punch.
 ///
 /// 2. **As a well-connected friend** (globally routable):
+///    - Registers friend addresses from ANNOUNCE packets ([processAnnounceFromFriend]).
 ///    - Maintains an [AddressTable] of friend addresses.
 ///    - Responds to ADDR_QUERY from friends.
 ///    - Coordinates hole-punches on PUNCH_REQUEST.
@@ -80,30 +80,6 @@ class SignalingService {
   }
 
   // ===== Outgoing API (called by coordinator) =====
-
-  /// Register our address with all reachable well-connected friends.
-  ///
-  /// Called on UDP init, address change, and when new friends are discovered.
-  Future<void> registerAddressWithFriends(String ip, int port) async {
-    final msg = AddrRegisterMessage(ip: ip, port: port);
-    final payload = codec.encode(msg);
-
-    final friends = store.state.peers.wellConnectedFriends;
-    if (friends.isEmpty) {
-      _log.d('No well-connected friends to register with');
-      return;
-    }
-
-    _log.i('Registering address $ip:$port with ${friends.length} well-connected friends');
-
-    for (final friend in friends) {
-      final sent = await sendSignaling?.call(friend.publicKey, payload);
-      if (sent == true) {
-        store.dispatch(AddressRegisteredWithFriendAction(friend.pubkeyHex));
-        _log.d('Registered with ${friend.displayName}');
-      }
-    }
-  }
 
   /// Query well-connected friends for a peer's address.
   ///
@@ -201,15 +177,10 @@ class SignalingService {
   ///
   /// [senderPubkey] is the authenticated sender from the outer BitchatPacket.
   /// [payload] is the raw signaling payload (type byte + message data).
-  /// [observedIp] and [observedPort] are the sender's address as seen on the
-  /// UDX connection — the NAT-translated public address. Provided by the
-  /// coordinator when the packet arrived over UDP; null for BLE.
   void processSignaling(
     Uint8List senderPubkey,
-    Uint8List payload, {
-    String? observedIp,
-    int? observedPort,
-  }) {
+    Uint8List payload,
+  ) {
     // Only process signaling from friends — drop signaling from strangers.
     final senderHex = _pubkeyToHex(senderPubkey);
     final senderPeer = store.state.peers.getPeerByPubkeyHex(senderHex);
@@ -229,9 +200,6 @@ class SignalingService {
     _log.d('Received signaling from ${senderPeer.displayName}: $msg');
 
     switch (msg) {
-      case AddrRegisterMessage():
-        _handleAddrRegister(senderPubkey, senderHex, msg,
-            observedIp: observedIp, observedPort: observedPort);
       case AddrQueryMessage():
         _handleAddrQuery(senderPubkey, msg);
       case AddrResponseMessage():
@@ -249,36 +217,54 @@ class SignalingService {
 
   // ===== Incoming handlers =====
 
-  /// Handle ADDR_REGISTER: friend telling us their address.
+  /// Process an ANNOUNCE received over UDP from a friend.
   ///
-  /// We store it in the address table (if we're well-connected) so other
-  /// friends can query for it.
+  /// Called by the coordinator when we are well-connected and receive an
+  /// ANNOUNCE over UDP from a friend. Registers the friend's address in our
+  /// address table (so other friends can query for it) and reflects the
+  /// observed address back if it differs from the claimed address.
   ///
-  /// If we have the observed source address from the UDX connection, we
-  /// prefer that over the claimed address (the agent may not know its real
-  /// external port behind NAT). We also send ADDR_REFLECT back so the agent
-  /// can learn its true public address.
-  void _handleAddrRegister(
-    Uint8List senderPubkey,
-    String senderHex,
-    AddrRegisterMessage msg, {
+  /// [senderPubkey] is the authenticated sender from the outer BitchatPacket.
+  /// [claimedAddress] is the address from the ANNOUNCE payload (ip:port string).
+  /// [observedIp] and [observedPort] are the sender's address as seen on the
+  /// UDX connection — the NAT-translated public address.
+  void processAnnounceFromFriend(
+    Uint8List senderPubkey, {
+    String? claimedAddress,
     String? observedIp,
     int? observedPort,
   }) {
-    // Use the observed address (from the UDX connection) when available.
-    // This is the real NAT-translated address — the claimed address may
-    // have an incorrect port (cone NAT port assumption).
-    final effectiveIp = observedIp ?? msg.ip;
-    final effectivePort = observedPort ?? msg.port;
+    final senderHex = _pubkeyToHex(senderPubkey);
 
-    if (observedIp != null && observedPort != null) {
-      if (msg.ip != observedIp || msg.port != observedPort) {
-        _log.i('Address mismatch for ${senderHex.substring(0, 8)}...: '
-            'claimed ${msg.ip}:${msg.port}, observed $observedIp:$observedPort — using observed');
+    // Parse claimed address from ANNOUNCE payload
+    String? claimedIp;
+    int? claimedPort;
+    if (claimedAddress != null && claimedAddress.isNotEmpty) {
+      // Parse ip:port or [ip]:port format
+      final parts = _parseAddress(claimedAddress);
+      if (parts != null) {
+        claimedIp = parts.ip;
+        claimedPort = parts.port;
       }
     }
 
-    _log.i('Address registered: ${senderHex.substring(0, 8)}... → $effectiveIp:$effectivePort');
+    // Use the observed address (from the UDX connection) when available.
+    // This is the real NAT-translated address — the claimed address may
+    // have an incorrect port (cone NAT port assumption).
+    final effectiveIp = observedIp ?? claimedIp;
+    final effectivePort = observedPort ?? claimedPort;
+
+    if (effectiveIp == null || effectivePort == null) return;
+
+    if (observedIp != null && observedPort != null &&
+        claimedIp != null && claimedPort != null) {
+      if (claimedIp != observedIp || claimedPort != observedPort) {
+        _log.i('Address mismatch for ${senderHex.substring(0, 8)}...: '
+            'claimed $claimedIp:$claimedPort, observed $observedIp:$observedPort — using observed');
+      }
+    }
+
+    _log.i('Address registered via ANNOUNCE: ${senderHex.substring(0, 8)}... → $effectiveIp:$effectivePort');
     addressTable.register(senderHex, effectiveIp, effectivePort);
 
     // Reflect the observed address back to the sender so they can learn
@@ -287,6 +273,32 @@ class SignalingService {
       final reflect = AddrReflectMessage(ip: observedIp, port: observedPort);
       sendSignaling?.call(senderPubkey, codec.encode(reflect));
     }
+  }
+
+  /// Parse an address string in "[ip]:port" or "ip:port" format.
+  static ({String ip, int port})? _parseAddress(String addr) {
+    String ipStr;
+    String portStr;
+
+    if (addr.startsWith('[')) {
+      final closeBracket = addr.indexOf(']');
+      if (closeBracket < 0) return null;
+      ipStr = addr.substring(1, closeBracket);
+      final afterBracket = addr.substring(closeBracket + 1);
+      if (!afterBracket.startsWith(':')) return null;
+      portStr = afterBracket.substring(1);
+    } else {
+      final lastColon = addr.lastIndexOf(':');
+      if (lastColon < 0) return null;
+      ipStr = addr.substring(0, lastColon);
+      portStr = addr.substring(lastColon + 1);
+      if (ipStr.contains(':')) return null;
+    }
+
+    final port = int.tryParse(portStr);
+    if (port == null) return null;
+
+    return (ip: ipStr, port: port);
   }
 
   /// Handle ADDR_QUERY: friend asking us for another peer's address.

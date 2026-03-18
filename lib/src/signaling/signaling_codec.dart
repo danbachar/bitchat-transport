@@ -5,9 +5,6 @@ import 'dart:typed_data';
 /// These ride inside [BitchatPacket] payloads with [PacketType.signaling].
 /// Authentication is handled by the outer BitchatPacket's Ed25519 signature.
 enum SignalingType {
-  /// "Here's my current UDP address" — agent → friend
-  addrRegister(0x01),
-
   /// "What's the address of pubkey X?" — agent → friend
   addrQuery(0x02),
 
@@ -23,7 +20,7 @@ enum SignalingType {
   /// "I've opened my NAT, tell the other side" — agent → friend
   punchReady(0x06),
 
-  /// "Your actual public address is ip:port" — friend → agent
+  /// "Your actual public address is ip:port" — friend → agent (triggered by ANNOUNCE)
   addrReflect(0x07);
 
   final int value;
@@ -42,23 +39,6 @@ enum SignalingType {
 /// Base class for decoded signaling messages.
 sealed class SignalingMessage {
   SignalingType get type;
-}
-
-/// Agent registers its current UDP address with a well-connected friend.
-class AddrRegisterMessage extends SignalingMessage {
-  @override
-  SignalingType get type => SignalingType.addrRegister;
-
-  /// The agent's IP address string (IPv4 or IPv6, no brackets).
-  final String ip;
-
-  /// The agent's UDP port.
-  final int port;
-
-  AddrRegisterMessage({required this.ip, required this.port});
-
-  @override
-  String toString() => 'AddrRegister($ip:$port)';
 }
 
 /// Agent asks a well-connected friend for another peer's address.
@@ -163,10 +143,11 @@ class PunchReadyMessage extends SignalingMessage {
 
 /// Well-connected friend reflects the agent's observed public address.
 ///
-/// When a friend receives ADDR_REGISTER, it responds with ADDR_REFLECT
-/// containing the actual source IP:port it observed on the UDX connection.
-/// This lets the agent learn its true NAT-translated address, including the
-/// correct external port — eliminating the cone NAT port assumption.
+/// When a well-connected friend receives an ANNOUNCE over UDP, it compares
+/// the claimed address in the payload with the observed source address on the
+/// UDX connection. If they differ, it sends ADDR_REFLECT back with the actual
+/// address — letting the agent learn its true NAT-translated address,
+/// including the correct external port.
 class AddrReflectMessage extends SignalingMessage {
   @override
   SignalingType get type => SignalingType.addrReflect;
@@ -190,7 +171,6 @@ class AddrReflectMessage extends SignalingMessage {
 /// Wire formats:
 ///
 /// ```
-/// ADDR_REGISTER  : type(1) + ipLen(2) + ipBytes + port(2)
 /// ADDR_QUERY     : type(1) + targetPubkey(32)
 /// ADDR_RESPONSE  : type(1) + targetPubkey(32) + found(1) + [ipLen(2) + ipBytes + port(2)]
 /// PUNCH_REQUEST  : type(1) + targetPubkey(32)
@@ -205,7 +185,6 @@ class SignalingCodec {
 
   Uint8List encode(SignalingMessage msg) {
     return switch (msg) {
-      AddrRegisterMessage() => _encodeAddrRegister(msg),
       AddrQueryMessage() => _encodeAddrQuery(msg),
       AddrResponseMessage() => _encodeAddrResponse(msg),
       PunchRequestMessage() => _encodePunchRequest(msg),
@@ -213,16 +192,6 @@ class SignalingCodec {
       PunchReadyMessage() => _encodePunchReady(msg),
       AddrReflectMessage() => _encodeAddrReflect(msg),
     };
-  }
-
-  Uint8List _encodeAddrRegister(AddrRegisterMessage msg) {
-    final ipBytes = Uint8List.fromList(msg.ip.codeUnits);
-    final buffer = BytesBuilder();
-    buffer.addByte(SignalingType.addrRegister.value);
-    _writeUint16(buffer, ipBytes.length);
-    buffer.add(ipBytes);
-    _writeUint16(buffer, msg.port);
-    return buffer.toBytes();
   }
 
   Uint8List _encodeAddrQuery(AddrQueryMessage msg) {
@@ -295,7 +264,6 @@ class SignalingCodec {
     final payload = Uint8List.sublistView(data, 1);
 
     return switch (type) {
-      SignalingType.addrRegister => _decodeAddrRegister(payload),
       SignalingType.addrQuery => _decodeAddrQuery(payload),
       SignalingType.addrResponse => _decodeAddrResponse(payload),
       SignalingType.punchRequest => _decodePunchRequest(payload),
@@ -303,16 +271,6 @@ class SignalingCodec {
       SignalingType.punchReady => _decodePunchReady(payload),
       SignalingType.addrReflect => _decodeAddrReflect(payload),
     };
-  }
-
-  AddrRegisterMessage _decodeAddrRegister(Uint8List data) {
-    var offset = 0;
-    final ipLen = _readUint16(data, offset);
-    offset += 2;
-    final ip = String.fromCharCodes(data.sublist(offset, offset + ipLen));
-    offset += ipLen;
-    final port = _readUint16(data, offset);
-    return AddrRegisterMessage(ip: ip, port: port);
   }
 
   AddrQueryMessage _decodeAddrQuery(Uint8List data) {
