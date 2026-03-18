@@ -68,7 +68,11 @@ class BlePeripheralService {
       // Initialize the peripheral
       await BlePeripheral.initialize();
 
-      // Set up BLE state change callback to know when powered on
+      // Set up BLE state change callback to know when powered on.
+      // On iOS cold start, CoreBluetooth reports 'unknown' initially and
+      // transitions to 'poweredOn' asynchronously. We must wait for the
+      // actual callback rather than relying on isSupported() — that returns
+      // true even when the adapter is still in 'unknown' state.
       BlePeripheral.setBleStateChangeCallback((bool state) {
         _log.i('BLE peripheral state changed: $state');
         if (state && !_bleReadyCompleter.isCompleted) {
@@ -76,12 +80,18 @@ class BlePeripheralService {
         }
       });
 
-      // If BLE hardware is available, it's likely already powered on
-      // (e.g. re-enabling after disable). Complete immediately to avoid
-      // waiting for a state change callback that won't fire.
-      if (await BlePeripheral.isSupported() && !_bleReadyCompleter.isCompleted) {
-        _bleReadyCompleter.complete();
-      }
+      // On Android (and iOS hot restarts), BLE may already be powered on
+      // and the state change callback won't fire. Give the callback a
+      // moment to deliver the current state, then fall back to isSupported()
+      // as a last resort.
+      Future.delayed(const Duration(milliseconds: 500), () async {
+        if (!_bleReadyCompleter.isCompleted) {
+          if (await BlePeripheral.isSupported()) {
+            _log.i('BLE already powered on (no state callback received)');
+            _bleReadyCompleter.complete();
+          }
+        }
+      });
 
       // Set up connection state callback (Android only, but safe to call on all platforms)
       BlePeripheral.setConnectionStateChangeCallback(_onConnectionStateChanged);
