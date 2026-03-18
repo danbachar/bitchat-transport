@@ -24,7 +24,7 @@ class DiscoveredDevice {
 class ConnectedPeer {
   final String deviceId;
   final BluetoothDevice device;
-  final BluetoothCharacteristic characteristic;
+  BluetoothCharacteristic characteristic;
   final int rssi;
   DateTime lastActivity;
 
@@ -279,6 +279,10 @@ class BleCentralService {
 
   /// Send data to a connected peripheral.
   /// Uses write-without-response to avoid GATT busy errors from queued writes.
+  ///
+  /// On iOS, CoreBluetooth can invalidate GATT service handles between
+  /// discoverServices() and a later write(). If the write fails, we
+  /// re-discover services to get a fresh characteristic handle and retry once.
   Future<bool> sendData(String deviceId, Uint8List data) async {
     final peer = _connected[deviceId];
     if (peer == null) {
@@ -287,20 +291,59 @@ class BleCentralService {
     }
 
     try {
-      // Use write-without-response to avoid ERROR_GATT_WRITE_REQUEST_BUSY.
-      // Android only allows one write-with-response at a time, and rapid
-      // consecutive writes cause timeouts and busy errors.
       await peer.characteristic.write(data, withoutResponse: true);
       peer.lastActivity = DateTime.now();
       return true;
     } catch (e) {
-      _log.e('Failed to send data to $deviceId: $e');
-      // Remove stale entry so we stop writing to the broken GATT handle.
-      // Don't trigger the full disconnect chain — the native connection
-      // will fire the disconnect listener on its own, and the normal
-      // staleness mechanism handles peer cleanup after missed ANNOUNCEs.
-      _connected.remove(deviceId);
-      return false;
+      _log.w('Write failed for $deviceId, refreshing GATT services: $e');
+
+      // Re-discover services to get a fresh characteristic handle.
+      // iOS can invalidate the old handle between connection and first write.
+      final freshChar = await _refreshCharacteristic(peer);
+      if (freshChar == null) {
+        _log.e('Service refresh failed for $deviceId, disconnecting');
+        _connected.remove(deviceId);
+        onConnectionChanged?.call(deviceId, false);
+        return false;
+      }
+
+      // Retry once with the fresh handle.
+      try {
+        peer.characteristic = freshChar;
+        await freshChar.write(data, withoutResponse: true);
+        peer.lastActivity = DateTime.now();
+        _log.i('Retry write succeeded for $deviceId after service refresh');
+        return true;
+      } catch (retryError) {
+        _log.e('Retry write also failed for $deviceId, disconnecting');
+        _connected.remove(deviceId);
+        onConnectionChanged?.call(deviceId, false);
+        return false;
+      }
+    }
+  }
+
+  /// Re-discover GATT services on a connected device and return a fresh
+  /// characteristic handle, or null if the service/characteristic is gone.
+  Future<BluetoothCharacteristic?> _refreshCharacteristic(
+      ConnectedPeer peer) async {
+    try {
+      final services = await peer.device.discoverServices();
+      final shortCharUuid =
+          characteristicUuid.substring(4, 8).toLowerCase(); // "ff01"
+      for (final service in services) {
+        for (final char in service.characteristics) {
+          final charUuidStr = char.uuid.toString().toLowerCase();
+          if (charUuidStr == characteristicUuid.toLowerCase() ||
+              charUuidStr == shortCharUuid) {
+            return char;
+          }
+        }
+      }
+      return null;
+    } catch (e) {
+      _log.e('Failed to refresh services for ${peer.deviceId}: $e');
+      return null;
     }
   }
 
