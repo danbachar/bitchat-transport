@@ -125,10 +125,11 @@ class UdpTransportService extends TransportService {
   /// Our local address as ip:port string, or null if not bound.
   String? get localAddress {
     if (_rawSocket == null) return null;
-    final addr = _rawSocket!.address;
-    final port = _rawSocket!.port;
-    return AddressInfo(addr, port).toAddressString();
+    return _localAddress;
   }
+
+  /// Cached local LAN address (ip:port). Resolved once at initialization.
+  String? _localAddress;
 
   /// Whether the UDX multiplexer is active (accepting streams)
   bool get isMultiplexerActive => _multiplexer != null;
@@ -181,8 +182,11 @@ class UdpTransportService extends TransportService {
       _localPort = _rawSocket!.port;
       _udx = UDX();
 
+      // Resolve actual LAN IP so we share a routable address, not [::].
+      _localAddress = await _resolveLocalAddress(_localPort!);
+
       _setState(TransportState.ready);
-      _log.i('UDP transport bound on port $_localPort');
+      _log.i('UDP transport bound on port $_localPort (local: $_localAddress)');
       return true;
     } catch (e) {
       _log.e('Failed to bind UDP socket: $e');
@@ -277,6 +281,7 @@ class UdpTransportService extends TransportService {
     _rawSocket = null;
     _udx = null;
     _localPort = null;
+    _localAddress = null;
 
     _state = TransportState.disposed;
 
@@ -293,6 +298,9 @@ class UdpTransportService extends TransportService {
   /// The first message sent MUST be an ANNOUNCE packet (caller's responsibility).
   ///
   /// Returns true if the connection was established.
+  /// Timeout for UDX handshake completion.
+  static const Duration _handshakeTimeout = Duration(seconds: 10);
+
   Future<bool> connectToPeer(
       String pubkeyHex, InternetAddress addr, int port) async {
     if (_multiplexer == null) {
@@ -305,6 +313,7 @@ class UdpTransportService extends TransportService {
       return true;
     }
 
+    UDPSocket? udpSocket;
     try {
       final remoteHost = addr.address;
 
@@ -313,8 +322,7 @@ class UdpTransportService extends TransportService {
       _addressToPubkey['$remoteHost:$port'] = pubkeyHex;
 
       // Create UDX connection to the peer
-      final udpSocket =
-          _multiplexer!.createSocket(_udx!, remoteHost, port);
+      udpSocket = _multiplexer!.createSocket(_udx!, remoteHost, port);
 
       // Create outgoing stream. Stream IDs are scoped per UDPSocket (connection),
       // so we always use ID 1. Remote peer also uses ID 1 for their stream.
@@ -327,8 +335,18 @@ class UdpTransportService extends TransportService {
         port,
       );
 
-      // Wait for UDX handshake to complete
-      await udpSocket.handshakeComplete;
+      // Wait for UDX handshake to complete, with timeout.
+      // Without this timeout, the await hangs forever if the remote is
+      // unreachable (firewall, wrong address), leaking UDX sockets and
+      // preventing the auto-connect from ever succeeding.
+      await udpSocket.handshakeComplete.timeout(
+        _handshakeTimeout,
+        onTimeout: () {
+          throw TimeoutException(
+            'UDX handshake timed out after ${_handshakeTimeout.inSeconds}s',
+          );
+        },
+      );
 
       // Store the connection
       _peerConnections[pubkeyHex] = _PeerConnection(
@@ -364,6 +382,18 @@ class UdpTransportService extends TransportService {
       return true;
     } catch (e) {
       _log.e('Failed to connect to peer $pubkeyHex: $e');
+
+      // Clean up the UDX socket on failure to prevent resource leaks.
+      // Without this, each failed attempt leaves a dangling socket in the
+      // multiplexer that never gets garbage collected.
+      if (udpSocket != null) {
+        try {
+          await udpSocket.close();
+        } catch (_) {}
+      }
+      // Remove stale address mapping
+      _addressToPubkey.remove('${addr.address}:$port');
+
       return false;
     }
   }
@@ -498,15 +528,14 @@ class UdpTransportService extends TransportService {
 
   /// Handle an incoming stream on a connection.
   ///
-  /// The first message MUST be an ANNOUNCE BitchatPacket so we can identify the peer.
-  /// We buffer the first read, extract the pubkey, and then set up the connection.
+  /// Any verified BitchatPacket identifies the sender via its header pubkey.
+  /// The coordinator maps the connection after verifying the first packet.
   void _handleIncomingStream(UDPSocket socket, UDXStream stream) {
     _log.d('Incoming UDX stream ${stream.id}');
 
     // Listen for data on this stream.
-    // The first message must be ANNOUNCE — the coordinator handles identification.
     // We don't know the pubkey yet, so we use a temporary key and let the
-    // coordinator re-map after ANNOUNCE processing.
+    // coordinator re-map after processing the first verified packet.
     final tempKey =
         '${socket.remoteAddress}:${socket.remotePort}:${stream.id}';
 
@@ -578,11 +607,11 @@ class UdpTransportService extends TransportService {
   /// Keyed by tempKey, contains the UDPSocket + UDXStream.
   final Map<String, _PeerConnection> _pendingIncoming = {};
 
-  /// Called by the coordinator after processing an ANNOUNCE from an incoming connection.
+  /// Called by the coordinator after verifying a packet from an incoming connection.
   ///
   /// Maps the temporary connection key to the peer's pubkey hex.
   /// The coordinator calls this with the tempKey it received via [onUdpDataReceived]
-  /// and the pubkey extracted from the ANNOUNCE packet.
+  /// and the pubkey extracted from the verified packet's header.
   void mapIncomingConnectionToPubkey(String tempKey, String pubkeyHex) {
     _tempKeyToPubkey[tempKey] = pubkeyHex;
 
@@ -652,6 +681,47 @@ class UdpTransportService extends TransportService {
       if (!_stateController.isClosed) {
         _stateController.add(newState);
       }
+    }
+  }
+
+  /// Resolve the device's actual LAN IP address for the given port.
+  ///
+  /// Enumerates network interfaces to find a usable address. Prefers IPv4
+  /// (widely supported on LANs) over IPv6 link-local. Returns null if no
+  /// suitable interface is found (no WiFi, no ethernet, etc.).
+  Future<String?> _resolveLocalAddress(int port) async {
+    try {
+      final interfaces = await NetworkInterface.list(
+        type: InternetAddressType.any,
+        includeLoopback: false,
+      );
+      // Prefer WiFi/Ethernet IPv4, then any non-loopback IPv4, then IPv6.
+      InternetAddress? bestV4;
+      InternetAddress? bestV6;
+      for (final iface in interfaces) {
+        for (final addr in iface.addresses) {
+          if (addr.isLoopback) continue;
+          if (addr.type == InternetAddressType.IPv4) {
+            // Prefer 192.168.x.x or 10.x.x.x (typical LAN ranges)
+            if (bestV4 == null ||
+                addr.address.startsWith('192.168') ||
+                addr.address.startsWith('10.')) {
+              bestV4 = addr;
+            }
+          } else if (addr.type == InternetAddressType.IPv6 && !addr.isLinkLocal) {
+            bestV6 ??= addr;
+          }
+        }
+      }
+      final best = bestV4 ?? bestV6;
+      if (best == null) {
+        _log.w('No usable network interface found for local address');
+        return null;
+      }
+      return AddressInfo(best, port).toAddressString();
+    } catch (e) {
+      _log.w('Failed to enumerate network interfaces: $e');
+      return null;
     }
   }
 }
