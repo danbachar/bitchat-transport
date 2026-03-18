@@ -1,17 +1,16 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:logger/logger.dart';
-import 'package:public_ip_address/public_ip_address.dart';
 
 import 'address_utils.dart';
 
 /// Discovers our public-facing IP address and combines it with the local
 /// UDP port to form the address we advertise to friends.
 ///
-/// For peers behind NAT, the public IP differs from the local socket address.
-/// We assume the NAT preserves the local port (cone NAT behavior), which is
-/// true for most consumer routers. If port mapping differs, STUN can be used
-/// in the future.
+/// Tries IPv6 first (globally routable = well-connected). If IPv6 is
+/// unavailable, falls back to IPv4 (NAT'd but hole-punchable). Never
+/// advertises private LAN addresses — they are unreachable from outside.
 ///
 /// The discovered address is included in ANNOUNCE messages so friends know
 /// where to send hole-punch packets and establish UDX connections.
@@ -29,10 +28,11 @@ class PublicAddressDiscovery {
 
   /// Discover our public IP address.
   ///
-  /// Uses external service to determine the public-facing IP.
-  /// Result is cached for [cacheDuration] to avoid excessive lookups.
+  /// Tries IPv6 first (for well-connected / globally routable status).
+  /// Falls back to IPv4 (NAT'd but hole-punchable via friends).
+  /// Returns null only if both fail (no internet at all).
   ///
-  /// Returns null if discovery fails (no internet, service unavailable, etc).
+  /// Result is cached for [cacheDuration] to avoid excessive lookups.
   Future<InternetAddress?> discoverPublicIp() async {
     // Return cached value if fresh
     if (_cachedPublicIp != null &&
@@ -41,27 +41,56 @@ class PublicAddressDiscovery {
       return _cachedPublicIp;
     }
 
-    try {
-      final ipService = IpAddress();
-      final ip = await ipService.getIp();
-
-      if (ip == null || ip.isEmpty) {
-        _log.w('Public IP discovery returned empty result');
-        return null;
-      }
-
-      final parsed = InternetAddress.tryParse(ip);
-      if (parsed == null) {
-        _log.w('Failed to parse public IP: $ip');
-        return null;
-      }
-
-      _cachedPublicIp = parsed;
+    // Try IPv6 first — a globally routable IPv6 means we're well-connected.
+    final ipv6 = await _fetchPublicIp('https://ipv6.seeip.org');
+    if (ipv6 != null) {
+      _cachedPublicIp = ipv6;
       _cacheTime = DateTime.now();
-      _log.i('Discovered public IP: ${parsed.address}');
-      return parsed;
+      _log.i('Discovered public IPv6: ${ipv6.address}');
+      return ipv6;
+    }
+
+    // Fall back to IPv4 — behind NAT but hole-punchable.
+    final ipv4 = await _fetchPublicIp('https://ipv4.seeip.org');
+    if (ipv4 != null) {
+      _cachedPublicIp = ipv4;
+      _cacheTime = DateTime.now();
+      _log.i('Discovered public IPv4: ${ipv4.address}');
+      return ipv4;
+    }
+
+    _log.w('Public IP discovery failed for both IPv6 and IPv4');
+    return null;
+  }
+
+  /// Fetch our public IP from the given URL.
+  Future<InternetAddress?> _fetchPublicIp(String url) async {
+    try {
+      final client = HttpClient();
+      client.connectionTimeout = const Duration(seconds: 5);
+      try {
+        final request = await client.getUrl(Uri.parse(url));
+        final response = await request.close();
+        final body = await response.transform(utf8.decoder).join();
+        final ip = body.trim();
+
+        if (ip.isEmpty) {
+          _log.d('Empty response from $url');
+          return null;
+        }
+
+        final parsed = InternetAddress.tryParse(ip);
+        if (parsed == null) {
+          _log.w('Failed to parse IP from $url: $ip');
+          return null;
+        }
+
+        return parsed;
+      } finally {
+        client.close();
+      }
     } catch (e) {
-      _log.e('Public IP discovery failed: $e');
+      _log.d('IP discovery from $url failed: $e');
       return null;
     }
   }
@@ -69,7 +98,8 @@ class PublicAddressDiscovery {
   /// Get our public address string (public_ip:local_port).
   ///
   /// Combines the discovered public IP with the given local port.
-  /// Assumes the NAT preserves the port (cone NAT).
+  /// For IPv4, assumes the NAT preserves the port (cone NAT).
+  /// For IPv6, the address is globally routable and port is direct.
   ///
   /// Returns null if public IP cannot be discovered.
   Future<String?> getPublicAddress(int localPort) async {
