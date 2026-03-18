@@ -212,6 +212,19 @@ PeersState peersReducer(PeersState state, dynamic action) {
       // Update existing peer.
       // Merge BLE IDs: only update the field that's provided in this action,
       // preserve the other from existing state.
+      //
+      // TODO: Revert to unconditional `udpAddress: action.udpAddress` once
+      // the BLE layer sends EITHER a friend ANNOUNCE (with address) OR a
+      // non-friend ANNOUNCE (without address) per recipient — never both.
+      // Currently a friend receives both because the peripheral can't
+      // reliably determine which centrals are friends (BLE device ID
+      // rotation). The non-friend broadcast (no address) arrives and nukes
+      // the address set by the UDP ANNOUNCE, causing peers to flicker in
+      // the online friends list. This null-coalescing is a workaround.
+      //
+      // TODO: Fix BLE peripheral to reliably map central device IDs to
+      // friend public keys so it can skip friends in the broadcast and
+      // only send them the directed friend ANNOUNCE with address.
       final updated = PeerState(
         publicKey: existing.publicKey,
         nickname: action.nickname,
@@ -223,9 +236,9 @@ PeersState peersReducer(PeersState state, dynamic action) {
         bleCentralDeviceId: action.bleCentralDeviceId ?? existing.bleCentralDeviceId,
         blePeripheralDeviceId: action.blePeripheralDeviceId ?? existing.blePeripheralDeviceId,
         lastBleSeen: isBle ? now : existing.lastBleSeen,
-        udpAddress: action.udpAddress,
+        udpAddress: action.udpAddress ?? existing.udpAddress,
         isFriend: existing.isFriend,
-        isWellConnected: wellConnected,
+        isWellConnected: action.udpAddress != null ? wellConnected : existing.isWellConnected,
       );
       return state.copyWith(
         peers: Map.from(state.peers)..[pubkeyHex] = updated,
