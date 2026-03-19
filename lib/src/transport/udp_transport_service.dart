@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
-import 'package:logger/logger.dart';
 import 'package:redux/redux.dart';
 import 'package:dart_udx/dart_udx.dart';
 
@@ -49,7 +48,6 @@ const _defaultUdpDisplayInfo = TransportDisplayInfo(
 ///
 /// Messages to unreachable peers fail immediately. No caching, no relaying.
 class UdpTransportService extends TransportService {
-  final Logger _log = Logger();
 
   /// Our Bitchat identity (Ed25519 keypair)
   final BitchatIdentity identity;
@@ -168,12 +166,12 @@ class UdpTransportService extends TransportService {
   @override
   Future<bool> initialize() async {
     if (_state != TransportState.uninitialized) {
-      _log.w('UDP transport already initialized');
+      debugPrint('UDP transport already initialized');
       return _state.isUsable;
     }
 
     _setState(TransportState.initializing);
-    _log.i('Initializing UDP transport');
+    debugPrint('Initializing UDP transport');
 
     try {
       // Bind to all IPv6 interfaces, random port.
@@ -186,10 +184,10 @@ class UdpTransportService extends TransportService {
       _localAddress = await _resolveLocalAddress(_localPort!);
 
       _setState(TransportState.ready);
-      _log.i('UDP transport bound on port $_localPort (local: $_localAddress)');
+      debugPrint('UDP transport bound on port $_localPort (local: $_localAddress)');
       return true;
     } catch (e) {
-      _log.e('Failed to bind UDP socket: $e');
+      debugPrint('Failed to bind UDP socket: $e');
       _setState(TransportState.error);
       return false;
     }
@@ -208,22 +206,25 @@ class UdpTransportService extends TransportService {
   /// - After hole-punch succeeds if behind NAT
   void startMultiplexer() {
     if (_multiplexer != null) {
-      _log.w('Multiplexer already started');
+      debugPrint('Multiplexer already started');
       return;
     }
     if (_rawSocket == null) {
-      _log.e('Cannot start multiplexer: socket not bound. Call initialize() first.');
+      debugPrint('Cannot start multiplexer: socket not bound. Call initialize() first.');
       return;
     }
 
     _multiplexer = UDXMultiplexer(_rawSocket!);
+
+    // Handle non-UDX packets (raw UDP fallback for when UDX handshake fails)
+    _multiplexer!.onRawPacket = _handleRawPacket;
 
     // Listen for incoming connections from remote peers
     _multiplexerConnectionsSub =
         _multiplexer!.connections.listen(_handleIncomingConnection);
 
     _setState(TransportState.active);
-    _log.i('UDX multiplexer started on port $_localPort');
+    debugPrint('UDX multiplexer started on port $_localPort');
   }
 
   @override
@@ -239,7 +240,7 @@ class UdpTransportService extends TransportService {
 
   @override
   Future<void> stop() async {
-    _log.i('Stopping UDP transport');
+    debugPrint('Stopping UDP transport');
 
     // Close all peer connections (copy keys to avoid concurrent modification)
     final peerKeys = _peerConnections.keys.toList();
@@ -248,7 +249,7 @@ class UdpTransportService extends TransportService {
       try {
         await conn?.stream?.close();
       } catch (e) {
-        _log.w('Error closing stream for $key: $e');
+        debugPrint('Error closing stream for $key: $e');
       }
     }
 
@@ -268,12 +269,12 @@ class UdpTransportService extends TransportService {
     if (_state == TransportState.active) {
       _setState(TransportState.ready);
     }
-    _log.i('UDP transport stopped');
+    debugPrint('UDP transport stopped');
   }
 
   @override
   Future<void> dispose() async {
-    _log.i('Disposing UDP transport');
+    debugPrint('Disposing UDP transport');
     await stop();
 
     // Close the raw socket
@@ -304,12 +305,12 @@ class UdpTransportService extends TransportService {
   Future<bool> connectToPeer(
       String pubkeyHex, InternetAddress addr, int port) async {
     if (_multiplexer == null) {
-      _log.e('Cannot connect: multiplexer not started. Call startMultiplexer() first.');
+      debugPrint('Cannot connect: multiplexer not started. Call startMultiplexer() first.');
       return false;
     }
 
     if (_peerConnections.containsKey(pubkeyHex)) {
-      _log.d('Already connected to $pubkeyHex');
+      debugPrint('Already connected to $pubkeyHex');
       return true;
     }
 
@@ -366,13 +367,13 @@ class UdpTransportService extends TransportService {
       udpSocket.on('stream').listen((UDXEvent event) {
         final incomingStream = event.data as UDXStream;
         if (incomingStream != stream) {
-          _log.d('Incoming stream ${incomingStream.id} on outgoing connection to $pubkeyHex');
+          debugPrint('Incoming stream ${incomingStream.id} on outgoing connection to $pubkeyHex');
           _listenToStream(pubkeyHex, incomingStream);
         }
       });
       udpSocket.flushStreamBuffer();
 
-      _log.i('Connected to peer $pubkeyHex at $remoteHost:$port');
+      debugPrint('Connected to peer $pubkeyHex at $remoteHost:$port');
 
       _connectionController.add(TransportConnectionEvent(
         peerId: pubkeyHex,
@@ -381,7 +382,7 @@ class UdpTransportService extends TransportService {
 
       return true;
     } catch (e) {
-      _log.e('Failed to connect to peer $pubkeyHex: $e');
+      debugPrint('Failed to connect to peer $pubkeyHex: $e');
 
       // Clean up the UDX socket on failure to prevent resource leaks.
       // Without this, each failed attempt leaves a dangling socket in the
@@ -402,25 +403,62 @@ class UdpTransportService extends TransportService {
   Future<bool> sendToPeer(String peerId, Uint8List data) async {
     final conn = _peerConnections[peerId];
     if (conn == null || conn.stream == null) {
-      _log.w('Cannot send to $peerId: not connected');
+      debugPrint('Cannot send to $peerId: not connected');
       return false;
     }
 
     try {
       await conn.stream!.add(data);
-      _log.d('Sent ${data.length} bytes to peer $peerId');
+      debugPrint('Sent ${data.length} bytes to peer $peerId');
       return true;
     } catch (e) {
-      _log.e('Failed to send to peer $peerId: $e');
+      debugPrint('Failed to send to peer $peerId: $e');
       return false;
     }
   }
 
+  // ===== Raw UDP fallback (bypasses UDX) =====
+
+  /// Peers we communicate with via raw UDP (when UDX handshake fails).
+  /// Key: pubkeyHex, Value: target address info.
+  final Map<String, AddressInfo> _rawPeerAddresses = {};
+
+  /// Send data via raw UDP to a peer, bypassing UDX entirely.
+  ///
+  /// Use this when UDX connectToPeer fails (e.g. hairpin routing on same LAN).
+  /// No reliability — packets may be lost, duplicated, or reordered.
+  /// The application layer handles retries via ACKs.
+  bool sendRawTo(String pubkeyHex, InternetAddress ip, int port, Uint8List data) {
+    if (_rawSocket == null) return false;
+    try {
+      final sent = _rawSocket!.send(data, ip, port);
+      if (sent > 0) {
+        // Track this as a raw peer so broadcast can include them
+        _rawPeerAddresses[pubkeyHex] = AddressInfo(ip, port);
+        return true;
+      }
+      return false;
+    } catch (e) {
+      _log.e('Raw UDP send failed to $pubkeyHex: $e');
+      return false;
+    }
+  }
+
+  /// Check if a peer has a raw UDP address (fallback mode).
+  AddressInfo? getRawPeerAddress(String pubkeyHex) => _rawPeerAddresses[pubkeyHex];
+
   @override
   Future<void> broadcast(Uint8List data, {Set<String>? excludePeerIds}) async {
+    // Send via UDX connections
     for (final entry in _peerConnections.entries) {
       if (excludePeerIds != null && excludePeerIds.contains(entry.key)) continue;
       await sendToPeer(entry.key, data);
+    }
+    // Also send via raw UDP to peers where UDX failed
+    for (final entry in _rawPeerAddresses.entries) {
+      if (excludePeerIds != null && excludePeerIds.contains(entry.key)) continue;
+      if (_peerConnections.containsKey(entry.key)) continue; // Already sent via UDX
+      sendRawTo(entry.key, entry.value.ip, entry.value.port, data);
     }
   }
 
@@ -437,7 +475,7 @@ class UdpTransportService extends TransportService {
     try {
       await conn.stream?.close();
     } catch (e) {
-      _log.w('Error closing stream for $pubkeyHex: $e');
+      debugPrint('Error closing stream for $pubkeyHex: $e');
     }
 
     _connectionController.add(TransportConnectionEvent(
@@ -447,14 +485,14 @@ class UdpTransportService extends TransportService {
       reason: 'Disconnected by request',
     ));
 
-    _log.i('Disconnected from peer $pubkeyHex');
+    debugPrint('Disconnected from peer $pubkeyHex');
   }
 
   @override
   void associatePeerWithPubkey(String peerId, Uint8List pubkey) {
     // Peer connections are already keyed by pubkey hex.
     // This is used for incoming connections where we learn the pubkey from ANNOUNCE.
-    _log.d('associatePeerWithPubkey: $peerId (managed via ANNOUNCE)');
+    debugPrint('associatePeerWithPubkey: $peerId (managed via ANNOUNCE)');
   }
 
   @override
@@ -499,7 +537,7 @@ class UdpTransportService extends TransportService {
         ? (socket.remoteAddress as InternetAddress).address
         : '${socket.remoteAddress}';
     final remoteAddr = '$addrStr:${socket.remotePort}';
-    _log.i('Incoming UDX connection from $remoteAddr');
+    debugPrint('Incoming UDX connection from $remoteAddr');
 
     // Check if we already know who this peer is (from a prior connectToPeer call).
     // If so, bypass the tempKey indirection and set up the listener with the
@@ -507,7 +545,7 @@ class UdpTransportService extends TransportService {
     // arrives before ANNOUNCE processing can map the tempKey.
     final knownPubkey = _addressToPubkey[remoteAddr];
     if (knownPubkey != null) {
-      _log.d('Known peer $knownPubkey at $remoteAddr, using direct stream listener');
+      debugPrint('Known peer $knownPubkey at $remoteAddr, using direct stream listener');
       socket.on('stream').listen((UDXEvent event) {
         final stream = event.data as UDXStream;
         _listenToStream(knownPubkey, stream);
@@ -531,7 +569,7 @@ class UdpTransportService extends TransportService {
   /// Any verified BitchatPacket identifies the sender via its header pubkey.
   /// The coordinator maps the connection after verifying the first packet.
   void _handleIncomingStream(UDPSocket socket, UDXStream stream) {
-    _log.d('Incoming UDX stream ${stream.id}');
+    debugPrint('Incoming UDX stream ${stream.id}');
 
     // Listen for data on this stream.
     // We don't know the pubkey yet, so we use a temporary key and let the
@@ -557,7 +595,7 @@ class UdpTransportService extends TransportService {
         // that matches _peerConnections.
         final effectiveId = _tempKeyToPubkey[tempKey] ?? tempKey;
 
-        _log.d(
+        debugPrint(
             'Received ${data.length} bytes from ${socket.remoteAddress}:${socket.remotePort} (id: $effectiveId)');
 
         // Emit on data stream
@@ -573,10 +611,10 @@ class UdpTransportService extends TransportService {
         onUdpDataReceived?.call(effectiveId, data);
       },
       onError: (e) {
-        _log.w('⚠️ UDX stream error from $tempKey: $e');
+        debugPrint('⚠️ UDX stream error from $tempKey: $e');
       },
       onDone: () {
-        _log.i('⚠️ UDX stream closed from $tempKey');
+        debugPrint('⚠️ UDX stream closed from $tempKey');
         // If we have a peer mapped to this temp key, clean up
         final pubkeyHex = _tempKeyToPubkey.remove(tempKey);
         if (pubkeyHex != null) {
@@ -631,8 +669,43 @@ class UdpTransportService extends TransportService {
         transport: TransportType.udp,        connected: true,
       ));
 
-      _log.i('Mapped incoming connection $tempKey → $pubkeyHex');
+      debugPrint('Mapped incoming connection $tempKey → $pubkeyHex');
     }
+  }
+
+  // ===== Raw UDP Fallback Receive =====
+
+  /// Handle a non-UDX packet received on the multiplexer socket.
+  ///
+  /// This fires for packets that don't parse as valid UDX (e.g. BitchatPackets
+  /// sent via [sendRawTo] from a peer where UDX handshake failed).
+  /// Skip hole-punch packets (36 bytes with BCPU magic).
+  void _handleRawPacket(Uint8List data, InternetAddress address, int port) {
+    // Skip punch packets (36 bytes, magic "BCPU")
+    if (data.length == 36 &&
+        data[0] == 0x42 && data[1] == 0x43 && data[2] == 0x50 && data[3] == 0x55) {
+      return;
+    }
+
+    // Skip tiny packets that aren't meaningful
+    if (data.length < 50) return;
+
+    final addrStr = '${address.address}:$port';
+    _log.d('Raw UDP packet: ${data.length} bytes from $addrStr');
+
+    // Try to identify the sender from _rawPeerAddresses (reverse lookup)
+    String? senderPubkeyHex;
+    for (final entry in _rawPeerAddresses.entries) {
+      if (entry.value.ip.address == address.address && entry.value.port == port) {
+        senderPubkeyHex = entry.key;
+        break;
+      }
+    }
+
+    // Forward to coordinator for deserialization — use the pubkeyHex if known,
+    // otherwise use the address string as a temporary ID.
+    final effectiveId = senderPubkeyHex ?? addrStr;
+    onUdpDataReceived?.call(effectiveId, data);
   }
 
   // ===== Stream Listening =====
@@ -643,7 +716,7 @@ class UdpTransportService extends TransportService {
       (Uint8List data) {
         if (data.isEmpty) return;
 
-        _log.d('Received ${data.length} bytes from peer $pubkeyHex');
+        debugPrint('Received ${data.length} bytes from peer $pubkeyHex');
 
         _dataController.add(TransportDataEvent(
           peerId: pubkeyHex,
@@ -654,10 +727,10 @@ class UdpTransportService extends TransportService {
         onUdpDataReceived?.call(pubkeyHex, data);
       },
       onError: (e) {
-        _log.w('⚠️ UDX stream error from $pubkeyHex: $e');
+        debugPrint('⚠️ UDX stream error from $pubkeyHex: $e');
       },
       onDone: () {
-        _log.i('⚠️ UDX stream closed from $pubkeyHex');
+        debugPrint('⚠️ UDX stream closed from $pubkeyHex');
         _peerConnections.remove(pubkeyHex);
 
         if (!_connectionController.isClosed) {
@@ -715,12 +788,12 @@ class UdpTransportService extends TransportService {
       }
       final best = bestV4 ?? bestV6;
       if (best == null) {
-        _log.w('No usable network interface found for local address');
+        debugPrint('No usable network interface found for local address');
         return null;
       }
       return AddressInfo(best, port).toAddressString();
     } catch (e) {
-      _log.w('Failed to enumerate network interfaces: $e');
+      debugPrint('Failed to enumerate network interfaces: $e');
       return null;
     }
   }
