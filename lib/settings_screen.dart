@@ -247,6 +247,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _buildConnectionStatusBadge() {
     final transports = widget.store.state.transports;
     final isWellConnected = transports.isWellConnected;
+    final publicAddress = transports.publicAddress;
 
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -285,6 +286,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       color: Colors.grey[500],
                     ),
                   ),
+                  if (publicAddress != null) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      publicAddress,
+                      style: TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 11,
+                        color: Colors.grey[400],
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),

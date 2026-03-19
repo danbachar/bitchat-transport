@@ -161,6 +161,13 @@ class Bitchat {
   /// to true (connected) or false (failed) when the punch finishes.
   final Map<String, Completer<bool>> _holePunchCompleters = {};
 
+  /// Tracks when we last attempted discovery for each unreachable friend.
+  /// Prevents hammering discovery every announce tick (10s) for the same peer.
+  final Map<String, DateTime> _lastDiscoveryAttempt = {};
+
+  /// Minimum interval between discovery attempts for the same peer.
+  static const _discoveryRetryInterval = Duration(seconds: 60);
+
   // ===== Public callbacks =====
 
   /// Called when an application message is received.
@@ -986,8 +993,17 @@ class Bitchat {
         _log.i('[auto-udp] Proactive UDP connection to '
             '${pubkeyHex.substring(0, 8)} established');
       } else {
-        _log.w('[auto-udp] Proactive UDP connection to '
-            '${pubkeyHex.substring(0, 8)} failed');
+        // Direct connection failed (likely NAT/firewall). Try coordinated
+        // hole-punch via a well-connected friend if one is reachable.
+        final peer = _peersState.getPeerByPubkeyHex(pubkeyHex);
+        if (peer != null && peer.isFriend) {
+          _log.i('[auto-udp] Direct connect to '
+              '${pubkeyHex.substring(0, 8)} failed, trying hole-punch via friends...');
+          await _discoverPeerViaFriends(peer);
+        } else {
+          _log.w('[auto-udp] Proactive UDP connection to '
+              '${pubkeyHex.substring(0, 8)} failed');
+        }
       }
     } catch (e) {
       _log.w('[auto-udp] Error connecting to '
@@ -1019,16 +1035,28 @@ class Bitchat {
     _log.d('[discover] Querying friends for $name address...');
     final entry = await _signalingService.queryPeerAddress(pubkeyBytes);
     if (entry != null) {
-      final address = '${entry.ip}:${entry.port}';
+      final address = AddressInfo(InternetAddress(entry.ip), entry.port).toAddressString();
       _log.i('[discover] Friend knows $name at $address');
       store.dispatch(AssociateUdpAddressAction(
         publicKey: pubkeyBytes,
         address: address,
       ));
-      return true;
+
+      // Try direct connect to the discovered address.
+      if (_udpService != null) {
+        final addr = parseAddressString(address);
+        if (addr != null) {
+          _log.d('[discover] Trying direct UDP to $name at $address...');
+          if (await _udpService!.connectToPeer(pubkeyHex, addr.ip, addr.port)) {
+            _log.i('[discover] Direct UDP to $name succeeded');
+            return true;
+          }
+          _log.d('[discover] Direct UDP to $name failed, falling through to hole-punch');
+        }
+      }
     }
 
-    // Step 2: No address known — request hole-punch coordination.
+    // Step 2: Address unknown or direct connect failed — request hole-punch.
     _log.i('[discover] No address found for $name, requesting hole-punch...');
 
     final completer = Completer<bool>();
@@ -1055,6 +1083,56 @@ class Bitchat {
 
   // ===== Internal setup =====
   
+  /// Periodically try to discover unreachable friends via well-connected friends.
+  ///
+  /// On each announce tick, find friends that we know about but can't currently
+  /// reach via any transport. If we have well-connected friends available
+  /// (reachable via BLE or UDP), ask them to help us find the unreachable ones
+  /// via signaling (ADDR_QUERY → hole-punch coordination).
+  ///
+  /// Throttled: each peer is attempted at most once per [_discoveryRetryInterval].
+  void _discoverUnreachableFriends() {
+    if (!_udpAvailable) return; // Need UDP to establish the connection
+
+    final wellConnected = store.state.peers.wellConnectedFriends;
+    if (wellConnected.isEmpty) return;
+
+    final now = DateTime.now();
+    final friends = _peersState.friends;
+
+    for (final friend in friends) {
+      // Skip friends we can already reach
+      if (friend.hasBleConnection) continue;
+      if (_udpService?.getPeerIdForPubkey(friend.publicKey) != null) continue;
+
+      // Skip if we attempted discovery recently
+      final lastAttempt = _lastDiscoveryAttempt[friend.pubkeyHex];
+      if (lastAttempt != null &&
+          now.difference(lastAttempt) < _discoveryRetryInterval) {
+        continue;
+      }
+
+      // Skip if this friend IS one of our well-connected friends (they're
+      // reachable — that's how we'd signal through them)
+      if (wellConnected.any((wc) => wc.pubkeyHex == friend.pubkeyHex)) continue;
+
+      _log.i('[discover] Friend ${friend.displayName} is unreachable, '
+          'trying discovery via ${wellConnected.length} well-connected friend(s)...');
+      _lastDiscoveryAttempt[friend.pubkeyHex] = now;
+
+      // Fire-and-forget — don't block the announce tick
+      _discoverPeerViaFriends(friend).then((success) {
+        if (success) {
+          _log.i('[discover] Successfully reached ${friend.displayName} via friends');
+          _lastDiscoveryAttempt.remove(friend.pubkeyHex);
+        } else {
+          _log.d('[discover] Discovery failed for ${friend.displayName}, '
+              'will retry in ${_discoveryRetryInterval.inSeconds}s');
+        }
+      });
+    }
+  }
+
   /// Set up MessageRouter callbacks to dispatch to Redux and application layer
   void _setupRouterCallbacks() {
     // Message received from any transport
@@ -1104,20 +1182,38 @@ class Bitchat {
           .map((b) => b.toRadixString(16).padLeft(2, '0'))
           .join();
 
-      // When we are well-connected and receive an ANNOUNCE over UDP from a
-      // friend, register their address in our address table and reflect the
-      // observed address back. This replaces the old ADDR_REGISTER message.
-      if (transport == PeerTransport.udp &&
-          store.state.transports.isWellConnected) {
+      // When we are well-connected and receive an ANNOUNCE from a friend
+      // with a UDP address, register it in our address table. This enables
+      // us to coordinate hole-punches between friends — answering ADDR_QUERY
+      // and sending PUNCH_INITIATE with known addresses.
+      //
+      // Only friends are registered. Signaling (ADDR_QUERY, PUNCH_REQUEST,
+      // PUNCH_INITIATE) is a friend-only service — we only coordinate
+      // between peers we trust.
+      //
+      // UDP: use the observed address (NAT-translated, most reliable).
+      // BLE: use the claimed address from the ANNOUNCE payload (no observed
+      //      address available over BLE, but it's the only option — and for
+      //      peers with public IPv6 on cellular, the claimed address is correct).
+      if (store.state.transports.isWellConnected &&
+          data.udpAddress != null && data.udpAddress!.isNotEmpty) {
         final senderPeer = store.state.peers.getPeerByPubkeyHex(pubkeyHex);
-        if (senderPeer != null && senderPeer.isFriend && _udpService != null) {
-          final remote = _udpService!.getRemoteAddress(pubkeyHex);
-          _signalingService.processAnnounceFromFriend(
-            data.publicKey,
-            claimedAddress: data.udpAddress,
-            observedIp: remote?.ip.address,
-            observedPort: remote?.port,
-          );
+        if (senderPeer != null && senderPeer.isFriend) {
+          if (transport == PeerTransport.udp && _udpService != null) {
+            final remote = _udpService!.getRemoteAddress(pubkeyHex);
+            _signalingService.processAnnounceFromFriend(
+              data.publicKey,
+              claimedAddress: data.udpAddress,
+              observedIp: remote?.ip.address,
+              observedPort: remote?.port,
+            );
+          } else if (transport == PeerTransport.bleDirect) {
+            _signalingService.processAnnounceFromFriend(
+              data.publicKey,
+              claimedAddress: data.udpAddress,
+              // No observed address over BLE — claimed address only.
+            );
+          }
         }
       }
 
@@ -1125,6 +1221,11 @@ class Bitchat {
       // address (from any transport, including BLE), establish a UDP connection
       // so both transports are active simultaneously. This ensures disabling
       // BLE doesn't kill the peer — UDP keeps it alive.
+      //
+      // IMPORTANT: Only ONE side should initiate the connection to avoid
+      // simultaneous-open issues in UDX (two independent socket pairs that
+      // don't share streams, causing one-directional data flow). The device
+      // with the lexicographically smaller pubkey initiates.
       if (data.udpAddress != null &&
           data.udpAddress!.isNotEmpty &&
           _udpService != null &&
@@ -1133,13 +1234,22 @@ class Bitchat {
         if (senderPeer != null &&
             senderPeer.isFriend &&
             _udpService!.getPeerIdForPubkey(data.publicKey) == null) {
-          // Not yet connected via UDP — connect in the background.
-          // _sendViaUdp handles hole-punching, connect, and error handling.
-          // Fire-and-forget: the handshake may take time, don't block
-          // announce processing.
-          _log.i('[auto-udp] Friend ${data.nickname} has UDP address '
-              '${data.udpAddress}, connecting proactively...');
-          _connectToFriendViaUdp(pubkeyHex, data.udpAddress!);
+          // Deterministic initiator: the peer with the smaller pubkey hex
+          // initiates the connection. The other side waits for the incoming
+          // connection to arrive via the multiplexer.
+          final myPubkeyHex = identity.publicKey
+              .map((b) => b.toRadixString(16).padLeft(2, '0'))
+              .join();
+          final iAmInitiator = myPubkeyHex.compareTo(pubkeyHex) < 0;
+
+          if (iAmInitiator) {
+            _log.i('[auto-udp] Friend ${data.nickname} has UDP address '
+                '${data.udpAddress}, connecting proactively (I am initiator)...');
+            _connectToFriendViaUdp(pubkeyHex, data.udpAddress!);
+          } else {
+            _log.d('[auto-udp] Friend ${data.nickname} has UDP address '
+                '${data.udpAddress}, waiting for them to connect (they are initiator)');
+          }
         }
       }
 
@@ -1400,6 +1510,7 @@ class Bitchat {
       _broadcastAnnounce();
       _broadcastAnnounceViaUdp();
       _removeStalePeers();
+      _discoverUnreachableFriends();
     });
   }
   
@@ -1544,15 +1655,27 @@ class Bitchat {
     return sent;
   }
 
-  /// Remove peers that haven't sent an ANNOUNCE within the interval
+  /// Remove peers that haven't sent an ANNOUNCE within the interval.
+  ///
+  /// Peers with live UDP connections are excluded — the stale check is based
+  /// on ANNOUNCE timing, but a live UDX connection means the peer is reachable
+  /// even if BLE ANNOUNCEs stopped (e.g. BLE was disabled).
   void _removeStalePeers() {
     final staleThreshold = config.announceInterval * 2; // Give 2x grace period
-    
+
+    // Collect pubkey hexes of peers with live UDX connections
+    final liveUdpPeers = <String>{};
+    if (_udpService != null) {
+      for (final peer in _peersState.peersList) {
+        if (_udpService!.getPeerIdForPubkey(peer.publicKey) != null) {
+          liveUdpPeers.add(peer.pubkeyHex);
+        }
+      }
+    }
+
     // Dispatch action to remove stale peers via Redux
     store.dispatch(StaleDiscoveredBlePeersRemovedAction(staleThreshold));
-    store.dispatch(StalePeersRemovedAction(staleThreshold));
-    
-    // _log.d('Dispatched stale peer cleanup actions');
+    store.dispatch(StalePeersRemovedAction(staleThreshold, liveUdpPeers: liveUdpPeers));
   }
   
   // ===== BLE Fragmentation Helpers =====

@@ -90,10 +90,14 @@ class SignalingService {
     Duration timeout = const Duration(seconds: 10),
   }) async {
     final targetHex = _pubkeyToHex(targetPubkey);
-    final friends = store.state.peers.wellConnectedFriends;
+    // Exclude the target from the friends list — can't ask a peer to
+    // look up its own address or coordinate a punch to itself.
+    final friends = store.state.peers.wellConnectedFriends
+        .where((f) => _pubkeyToHex(f.publicKey) != targetHex)
+        .toList();
 
     if (friends.isEmpty) {
-      _log.w('No well-connected friends to query');
+      _log.w('No well-connected friends to query (excluding target)');
       return null;
     }
 
@@ -134,13 +138,17 @@ class SignalingService {
   /// Sends PUNCH_REQUEST to the first reachable well-connected friend.
   /// The friend will send PUNCH_INITIATE to both us and the target.
   Future<void> requestHolePunch(Uint8List targetPubkey) async {
-    final friends = store.state.peers.wellConnectedFriends;
+    final targetHex = _pubkeyToHex(targetPubkey);
+
+    // Exclude the target from the friends list — can't ask a peer to
+    // coordinate a hole-punch to itself.
+    final friends = store.state.peers.wellConnectedFriends
+        .where((f) => _pubkeyToHex(f.publicKey) != targetHex)
+        .toList();
     if (friends.isEmpty) {
-      _log.w('No well-connected friends to coordinate hole-punch');
+      _log.w('No well-connected friends to coordinate hole-punch (excluding target)');
       return;
     }
-
-    final targetHex = _pubkeyToHex(targetPubkey);
     _log.i('Requesting hole-punch to ${targetHex.substring(0, 8)}... via well-connected friend');
 
     store.dispatch(HolePunchStartedAction(targetHex));
@@ -355,7 +363,8 @@ class SignalingService {
   ) {
     final targetHex = _pubkeyToHex(msg.targetPubkey);
 
-    // Check that target is also our friend.
+    // Both requester and target must be our friends. We only coordinate
+    // hole-punches between peers we trust.
     final targetPeer = store.state.peers.getPeerByPubkeyHex(targetHex);
     if (targetPeer == null || !targetPeer.isFriend) {
       _log.w('Punch request for non-friend target ${targetHex.substring(0, 8)}..., ignoring');

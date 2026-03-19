@@ -470,14 +470,18 @@ class _ChatScreenState extends State<ChatScreen> {
           children: [
             _buildInfoRow('Public Key', _peerHex),
             const SizedBox(height: 8),
-            _buildInfoRow('Status', widget.peer.connectionState.name),
+            _buildInfoRow('Bluetooth',
+                widget.peer.hasBleConnection
+                    ? 'Connected (${widget.peer.bleCentralDeviceId != null && widget.peer.blePeripheralDeviceId != null ? 'central + peripheral' : widget.peer.bleCentralDeviceId != null ? 'central' : 'peripheral'})'
+                    : 'Not connected'),
+            const SizedBox(height: 8),
+            _buildInfoRow('Internet',
+                widget.peer.udpAddress != null
+                    ? widget.peer.udpAddress!
+                    : 'No address'),
             if (_isFriend) ...[
               const SizedBox(height: 8),
               _buildInfoRow('Friendship', 'Friends ✓'),
-              if (_friendship?.udpAddress != null) ...[
-                const SizedBox(height: 8),
-                _buildInfoRow('Internet', _friendship!.udpAddress!),
-              ],
             ],
           ],
         ),

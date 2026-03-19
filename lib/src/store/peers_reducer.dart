@@ -384,6 +384,12 @@ PeersState peersReducer(PeersState state, dynamic action) {
 
       if (peer.connectionState != PeerConnectionState.connected) return;
       if (peer.lastSeen == null) return;
+
+      // Never mark a peer as stale if we have a live UDP connection to them.
+      // The ANNOUNCE may have stopped arriving over BLE (e.g. BLE disabled),
+      // but the UDP connection is still active and keeping the peer alive.
+      if (action.liveUdpPeers.contains(key)) return;
+
       final timeSinceLastSeen = now.difference(peer.lastSeen!);
       if (timeSinceLastSeen > action.staleThreshold) {
         if (peer.isFriend) {

@@ -378,7 +378,45 @@ class BleTransportService extends TransportService {
       return; // Skip connection attempt — still in backoff
     }
 
+    // Skip if we're already connected to or connecting to this peer under a
+    // different device ID. BLE address rotation produces new device IDs for
+    // the same peer — the service UUID (derived from public key) stays
+    // constant across rotations. Without this check, every rotation triggers
+    // a redundant connection attempt that starves real connections.
+    if (_isDuplicatePeerByServiceUuid(device.deviceId, device.serviceUuid)) {
+      return;
+    }
+
     _autoConnectToPeer(device.deviceId);
+  }
+
+  /// Check if we already have a BLE connection or active connection attempt
+  /// to the peer identified by this service UUID under a different device ID.
+  bool _isDuplicatePeerByServiceUuid(String currentDeviceId, String serviceUuid) {
+    final scannedUuid = serviceUuid.toLowerCase().replaceAll('-', '');
+
+    // Check identified peers (already exchanged ANNOUNCE)
+    for (final peer in _peersState.peersList) {
+      if (!peer.hasBleConnection) continue;
+      final peerUuid = BitchatIdentity.deriveServiceUuid(peer.publicKey)
+          .toLowerCase()
+          .replaceAll('-', '');
+      if (peerUuid == scannedUuid) return true;
+    }
+
+    // Check discovered-but-not-yet-identified peers (connecting or connected
+    // under a different rotated device ID with the same service UUID)
+    for (final discovered in _peersState.discoveredBlePeersList) {
+      if (discovered.transportId == currentDeviceId) continue;
+      if (discovered.serviceUuid == null) continue;
+      final discoveredUuid = discovered.serviceUuid!.toLowerCase().replaceAll('-', '');
+      if (discoveredUuid == scannedUuid &&
+          (discovered.isConnecting || discovered.isConnected)) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   /// Automatically connect to a discovered peer and send ANNOUNCE

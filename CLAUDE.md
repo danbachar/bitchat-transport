@@ -41,6 +41,8 @@ Well-connected friends play a special role: they act as **signaling relays** to 
 
 **Important:** Well-connected friends relay *signaling metadata* (addresses, punch timing), never message content. This preserves the direct-delivery principle.
 
+**Signaling is friend-only.** A well-connected device only coordinates hole-punches between peers that are both its friends. It only registers friends' addresses in its address table, only responds to address queries for friends, and only sends PUNCH_INITIATE to friends. This is a trust boundary — we don't relay for arbitrary peers.
+
 ## Redux Architecture
 
 All peer and transport state lives in an immutable Redux store (`AppState`). Key slices: `PeersState` (discovered BLE devices + identified peers), `TransportsState` (per-transport lifecycle + public address), `MessagesState`, `FriendshipsState`, `SettingsState`. UI reads from the store and subscribes to changes. Actions describe events; reducers produce the next state. No mutable singletons.

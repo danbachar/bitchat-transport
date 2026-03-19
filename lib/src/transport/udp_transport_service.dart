@@ -573,10 +573,10 @@ class UdpTransportService extends TransportService {
         onUdpDataReceived?.call(effectiveId, data);
       },
       onError: (e) {
-        _log.e('Stream error from $tempKey: $e');
+        _log.w('⚠️ UDX stream error from $tempKey: $e');
       },
       onDone: () {
-        _log.d('Stream closed from $tempKey');
+        _log.i('⚠️ UDX stream closed from $tempKey');
         // If we have a peer mapped to this temp key, clean up
         final pubkeyHex = _tempKeyToPubkey.remove(tempKey);
         if (pubkeyHex != null) {
@@ -654,10 +654,10 @@ class UdpTransportService extends TransportService {
         onUdpDataReceived?.call(pubkeyHex, data);
       },
       onError: (e) {
-        _log.e('Stream error from $pubkeyHex: $e');
+        _log.w('⚠️ UDX stream error from $pubkeyHex: $e');
       },
       onDone: () {
-        _log.d('Stream closed from $pubkeyHex');
+        _log.i('⚠️ UDX stream closed from $pubkeyHex');
         _peerConnections.remove(pubkeyHex);
 
         if (!_connectionController.isClosed) {

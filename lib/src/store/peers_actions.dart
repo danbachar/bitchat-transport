@@ -163,7 +163,12 @@ class PeerRemovedAction extends PeerAction {
 class StalePeersRemovedAction extends PeerAction {
   final Duration staleThreshold;
 
-  StalePeersRemovedAction(this.staleThreshold);
+  /// Pubkey hexes of peers with live UDP connections that should NOT be
+  /// marked stale. The coordinator populates this from the UDP service
+  /// since the reducer has no access to transport-layer state.
+  final Set<String> liveUdpPeers;
+
+  StalePeersRemovedAction(this.staleThreshold, {this.liveUdpPeers = const {}});
 }
 
 /// Clear all peers
