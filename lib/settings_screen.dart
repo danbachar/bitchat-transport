@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:redux/redux.dart';
+import 'debug_log_screen.dart';
 import 'src/store/app_state.dart';
 import 'src/store/settings_actions.dart';
 import 'src/transport/transport_service.dart';
@@ -147,6 +148,40 @@ class _SettingsScreenState extends State<SettingsScreen> {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: _buildInfoCard(),
+          ),
+
+          const Divider(height: 32),
+
+          // Debug Logs
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: ListTile(
+              leading: Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.purple.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(Icons.bug_report, color: Colors.purple),
+              ),
+              title: const Text(
+                'Debug Logs',
+                style: TextStyle(fontWeight: FontWeight.w600),
+              ),
+              subtitle: Text(
+                'View live transport logs',
+                style: TextStyle(color: Colors.grey[400], fontSize: 13),
+              ),
+              trailing: const Icon(Icons.chevron_right, color: Colors.grey),
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => const DebugLogScreen(),
+                  ),
+                );
+              },
+            ),
           ),
 
           const SizedBox(height: 32),

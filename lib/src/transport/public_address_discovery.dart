@@ -90,7 +90,7 @@ class PublicAddressDiscovery {
         client.close();
       }
     } catch (e) {
-      _log.d('IP discovery from $url failed: $e');
+      _log.w('IP discovery from $url failed: $e');
       return null;
     }
   }

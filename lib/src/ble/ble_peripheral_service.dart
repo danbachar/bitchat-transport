@@ -257,14 +257,18 @@ class BlePeripheralService {
     if (!_active) return;
 
     if (connected) {
+      // Track the raw connection but DON'T fire onConnectionChanged yet.
+      // The central hasn't subscribed to notifications, so we can't send
+      // data to it. Wait for the subscription event (_onCharacteristicSubscriptionChange)
+      // to fire onConnectionChanged — that's when communication is actually possible.
       _connectedCentrals.add(deviceId);
-      _log.i('Central connected: $deviceId');
+      _log.i('Central connected: $deviceId (waiting for subscription)');
     } else {
       _connectedCentrals.remove(deviceId);
       _log.i('Central disconnected: $deviceId');
+      // Fire disconnect immediately — we need to clean up state
+      onConnectionChanged?.call(deviceId, false);
     }
-
-    onConnectionChanged?.call(deviceId, connected);
   }
 
   void _onCharacteristicSubscriptionChange(

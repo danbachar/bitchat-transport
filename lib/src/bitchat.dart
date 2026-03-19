@@ -1430,7 +1430,13 @@ class Bitchat {
     _bleService!.connectionStream.listen((event) {
       if (event.connected) {
         _log.i('BLE device connected: ${event.peerId}');
-        _broadcastAnnounce();
+        // Send ANNOUNCE directly to the new device immediately.
+        // Don't wait for the next periodic broadcast — by then the device ID
+        // may be stale (BLE address rotation). This also ensures the
+        // peripheral side learns our identity right away (fixes Issue C:
+        // asymmetric discovery where peripheral never receives central's
+        // ANNOUNCE).
+        _sendAnnounceToDevice(event.peerId);
       } else {
         _log.i('BLE device disconnected: ${event.peerId}');
       }
@@ -1593,9 +1599,34 @@ class Bitchat {
     await _udpService!.broadcast(packet.serialize());
   }
 
-  /// Send a minimal ANNOUNCE (no address) to a single BLE device for
-  /// initial identity exchange. Called once when a new BLE connection
-  /// is established, before the peer is identified.
+  /// Send ANNOUNCE directly to a specific BLE device ID.
+  ///
+  /// Called immediately when a new BLE connection is established (either as
+  /// central or peripheral). Sends with address if the device maps to a known
+  /// friend, without address otherwise (privacy). This ensures the other side
+  /// learns our identity immediately — don't wait for the periodic broadcast
+  /// which may use stale device IDs.
+  Future<void> _sendAnnounceToDevice(String deviceId) async {
+    if (_bleService == null || !_bleAvailable) return;
+
+    // Check if this device ID belongs to a known friend
+    final pubkey = _bleService!.getPubkeyForPeerId(deviceId);
+    final isFriend = pubkey != null &&
+        _peersState.getPeerByPubkey(pubkey)?.isFriend == true;
+
+    // Friends get our address, non-friends (or unknown) don't
+    final announce = isFriend
+        ? await _createSignedAnnounce(address: udpAddress)
+        : await _createSignedAnnounce();
+
+    final sent = await _bleService!.sendToPeer(deviceId, announce);
+    if (sent) {
+      _log.d('[ble-announce] Sent immediate ANNOUNCE to $deviceId (friend: $isFriend)');
+    } else {
+      _log.w('[ble-announce] Failed to send ANNOUNCE to $deviceId');
+    }
+  }
+
   /// Create a signed ANNOUNCE packet, optionally with address.
   Future<Uint8List> _createSignedAnnounce({String? address}) async {
     final payload = _protocolHandler.createAnnouncePayload(address: address);

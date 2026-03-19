@@ -3,7 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:logger/logger.dart' show Logger;
+import 'package:logger/logger.dart' show Logger, Level;
+import 'src/debug/log_buffer.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:redux/redux.dart';
 import 'package:flutter_redux/flutter_redux.dart';
@@ -40,7 +41,7 @@ Future<BitchatIdentity> _initIdentity() async {
   const storage = FlutterSecureStorage();
   var identityValue = await storage.read(key: 'identity');
   if (identityValue == null) {
-    print('No identity found, generating new one.');
+    _log.i('No identity found, generating new one.');
     final algorithm = Ed25519();
     final keyPair = await algorithm.newKeyPair();
     final seed = await keyPair.extractPrivateKeyBytes(); // 32-byte seed
@@ -61,15 +62,15 @@ Future<BitchatIdentity> _initIdentity() async {
     identityValue = jsonEncode(id.toJson());
     await storage.write(key: 'identity', value: identityValue);
   } else {
-    print('Identity found in secure storage.');
+    _log.i('Identity found in secure storage.');
   }
 
   final BitchatIdentity identity =
       BitchatIdentity.fromMap(jsonDecode(identityValue));
 
-  print('Private Key Bytes (Seed): ${identity.privateKey.length} bytes');
-  print('Public Key Bytes: ${identity.publicKey.length} bytes');
-  print('Nickname: ${identity.nickname}');
+  _log.d('Private Key Bytes (Seed): ${identity.privateKey.length} bytes');
+  _log.d('Public Key Bytes: ${identity.publicKey.length} bytes');
+  _log.i('Nickname: ${identity.nickname}');
   return identity;
 }
 
@@ -124,8 +125,72 @@ Map<String, dynamic> _serializeAppState(AppState state) {
   };
 }
 
+/// Set up debug log capture by intercepting debugPrint.
+///
+/// The logger package outputs via print/debugPrint. We intercept this to
+/// also feed the in-memory LogBuffer, which drives the Debug Logs screen.
+void _setupDebugLogCapture() {
+  final originalDebugPrint = debugPrint;
+  debugPrint = (String? message, {int? wrapWidth}) {
+    // Forward to original console output
+    originalDebugPrint(message, wrapWidth: wrapWidth);
+
+    // Parse the log line to extract level and feed the buffer
+    if (message != null && message.isNotEmpty) {
+      final entry = _parseLogLine(message);
+      if (entry != null) {
+        LogBuffer.instance.addEntry(entry);
+      }
+    }
+  };
+}
+
+/// Parse a logger output line to extract the level and clean message.
+LogEntry? _parseLogLine(String line) {
+  // Strip ANSI codes
+  final clean = line.replaceAll(RegExp(r'\x1B\[[0-9;]*m'), '').trim();
+  if (clean.isEmpty) return null;
+
+  // Skip box-drawing borders (┌ ├ └ │ alone)
+  if (RegExp(r'^[┌├└─┄]+$').hasMatch(clean)) return null;
+
+  // Skip Flutter framework noise
+  if (clean.startsWith('I/flutter') || clean.startsWith('D/') || clean.startsWith('W/')) {
+    return null;
+  }
+
+  // Detect level from emoji markers.
+  // Logger package uses: ⛔=error, ⚠️=warning, 💡=info, 🐛=debug
+  // App code uses: 📨📦🤝=debug (message parsing), Persisted=debug
+  Level level = Level.debug;
+  String message = clean;
+
+  if (clean.contains('⛔')) {
+    level = Level.error;
+  } else if (clean.contains('⚠️')) {
+    level = Level.warning;
+  } else if (clean.contains('💡')) {
+    level = Level.info;
+  } else if (clean.contains('🐛') || clean.contains('📨') || clean.contains('📦') || clean.contains('🤝')) {
+    level = Level.debug;
+  }
+
+  // Strip the box-drawing prefix (│ )
+  message = message.replaceFirst(RegExp(r'^│\s*'), '');
+
+  return LogEntry(
+    level: level,
+    message: message,
+    timestamp: DateTime.now(),
+  );
+}
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Capture all Flutter print output (including Logger) into the debug log buffer.
+  // This feeds the Debug Logs screen in Settings.
+  _setupDebugLogCapture();
 
   // Create persistence service and load persisted state
   persistenceService = PersistenceService();

@@ -392,10 +392,20 @@ class BleTransportService extends TransportService {
 
   /// Check if we already have a BLE connection or active connection attempt
   /// to the peer identified by this service UUID under a different device ID.
+  ///
+  /// Returns true only if:
+  /// 1. An identified peer (exchanged ANNOUNCE) is connected via BLE with this
+  ///    service UUID — we're already talking to them.
+  /// 2. Another discovered device ID with the same service UUID is actively
+  ///    connecting (isConnecting) — avoid parallel attempts.
+  ///
+  /// Does NOT block on discovered peers that are merely "connected" but not
+  /// yet identified — those may be stale entries from a previous rotation
+  /// that will be cleaned up by the stale peer timer.
   bool _isDuplicatePeerByServiceUuid(String currentDeviceId, String serviceUuid) {
     final scannedUuid = serviceUuid.toLowerCase().replaceAll('-', '');
 
-    // Check identified peers (already exchanged ANNOUNCE)
+    // Check identified peers (already exchanged ANNOUNCE and confirmed connected)
     for (final peer in _peersState.peersList) {
       if (!peer.hasBleConnection) continue;
       final peerUuid = BitchatIdentity.deriveServiceUuid(peer.publicKey)
@@ -404,20 +414,26 @@ class BleTransportService extends TransportService {
       if (peerUuid == scannedUuid) return true;
     }
 
-    // Check discovered-but-not-yet-identified peers (connecting or connected
-    // under a different rotated device ID with the same service UUID)
+    // Check discovered-but-not-yet-identified peers: only block if another
+    // device ID with the same service UUID is actively CONNECTING. Don't
+    // block on isConnected — that state may be stale after a disconnect
+    // and address rotation.
     for (final discovered in _peersState.discoveredBlePeersList) {
       if (discovered.transportId == currentDeviceId) continue;
       if (discovered.serviceUuid == null) continue;
       final discoveredUuid = discovered.serviceUuid!.toLowerCase().replaceAll('-', '');
-      if (discoveredUuid == scannedUuid &&
-          (discovered.isConnecting || discovered.isConnected)) {
+      if (discoveredUuid == scannedUuid && discovered.isConnecting) {
         return true;
       }
     }
 
     return false;
   }
+
+  /// Maximum number of concurrent BLE connection attempts.
+  /// Each attempt takes up to 5s to timeout. Too many in parallel starves
+  /// real connections and burns through the BLE controller's limited slots.
+  static const _maxConcurrentConnections = 2;
 
   /// Automatically connect to a discovered peer and send ANNOUNCE
   Future<bool> _autoConnectToPeer(String deviceId) async {
@@ -429,6 +445,14 @@ class BleTransportService extends TransportService {
     // Skip if already connecting
     final discovered = _peersState.getDiscoveredBlePeer(deviceId);
     if (discovered?.isConnecting == true) {
+      return false;
+    }
+
+    // Limit concurrent connection attempts to avoid starving the BLE stack.
+    final connectingCount = _peersState.discoveredBlePeersList
+        .where((d) => d.isConnecting)
+        .length;
+    if (connectingCount >= _maxConcurrentConnections) {
       return false;
     }
 
