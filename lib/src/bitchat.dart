@@ -950,11 +950,33 @@ class Bitchat {
       return true;
     }
 
-    // Not connected — parse address, hole-punch if needed, then connect
+    // Not connected — check if we should initiate or wait.
+    // Only one side should call connectToPeer to avoid UDX simultaneous-open
+    // (two independent socket pairs where data flows in only one direction).
+    final myPubkeyHex = identity.publicKey
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join();
+    final iAmInitiator = myPubkeyHex.compareTo(pubkeyHex) < 0;
+
     final addr = parseAddressString(udpAddress);
     if (addr == null) {
       _log.w('[udp-send] Invalid address for $peerShort: $udpAddress');
       return false;
+    }
+
+    if (!iAmInitiator) {
+      // We're not the initiator — the other side should connect to us.
+      // Wait briefly for their incoming connection to arrive.
+      _log.d('[udp-send] Not initiator for $peerShort, waiting for incoming connection...');
+      for (var i = 0; i < 10; i++) {
+        await Future.delayed(const Duration(milliseconds: 500));
+        if (await _udpService!.sendToPeer(pubkeyHex, data)) {
+          _log.d('[udp-send] Incoming connection arrived, sent to $peerShort');
+          return true;
+        }
+      }
+      // Timed out waiting — fall through and try connecting ourselves as last resort
+      _log.w('[udp-send] Timed out waiting for incoming connection from $peerShort, connecting ourselves...');
     }
 
     // Hole-punch to open NAT mappings before UDX connection attempt.
