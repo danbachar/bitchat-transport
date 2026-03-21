@@ -1,4 +1,3 @@
-import 'dart:typed_data';
 import 'package:logger/logger.dart';
 import 'package:redux/redux.dart';
 import '../mesh/bloom_filter.dart';
@@ -10,6 +9,7 @@ import '../protocol/protocol_handler.dart';
 import '../store/app_state.dart';
 import '../store/peers_actions.dart';
 import '../store/peers_state.dart';
+import 'package:flutter/foundation.dart';
 
 /// Routes incoming packets from all transports to the appropriate handlers.
 ///
@@ -90,7 +90,7 @@ class MessageRouter {
     // Verify signature — drop invalid packets
     final isValid = await protocolHandler.verifyPacket(packet);
     if (!isValid) {
-      _log.w('Dropping packet with invalid signature (type: ${packet.type})');
+      debugPrint('Dropping packet with invalid signature (type: ${packet.type})');
       return;
     }
 
@@ -223,7 +223,7 @@ class MessageRouter {
       ));
     }
 
-    _log.i(
+    debugPrint(
         'Peer ${isNew ? "connected" : "updated"}: ${data.nickname} via ${transport.name}'
         '${data.udpAddress != null ? " addr=${data.udpAddress}" : ""}');
 
@@ -258,12 +258,12 @@ class MessageRouter {
       final messageId = String.fromCharCodes(packet.payload);
       // Validate: message IDs are short alphanumeric strings (UUID v4 prefix)
       if (messageId.length > 36) {
-        _log.w('Ignoring ACK with invalid message ID length: ${messageId.length}');
+        debugPrint('Ignoring ACK with invalid message ID length: ${messageId.length}');
         return;
       }
       onAckReceived?.call(messageId);
     } catch (e) {
-      _log.w('Failed to decode ACK payload: $e');
+      debugPrint('Failed to decode ACK payload: $e');
     }
   }
 
@@ -276,12 +276,12 @@ class MessageRouter {
     try {
       final messageId = String.fromCharCodes(packet.payload);
       if (messageId.length > 36) {
-        _log.w('Ignoring read receipt with invalid message ID length: ${messageId.length}');
+        debugPrint('Ignoring read receipt with invalid message ID length: ${messageId.length}');
         return;
       }
       onReadReceiptReceived?.call(messageId);
     } catch (e) {
-      _log.w('Failed to decode read receipt payload: $e');
+      debugPrint('Failed to decode read receipt payload: $e');
     }
   }
 

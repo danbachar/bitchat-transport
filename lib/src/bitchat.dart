@@ -269,6 +269,30 @@ class Bitchat {
   bool get _isUdpEnabledInSettings =>
       store.state.settings.udpEnabled;
   
+  /// Explicitly disconnect from a BLE peer
+  Future<void> disconnectBlePeer(String pubkeyHex) async {
+    final peer = _peersState.getPeerByPubkeyHex(pubkeyHex);
+    if (peer != null && _bleService != null) {
+      if (peer.bleCentralDeviceId != null) {
+        store.dispatch(BleDeviceBlacklistedAction(peer.bleCentralDeviceId!));
+        await _bleService!.disconnectFromDevice(peer.bleCentralDeviceId!);
+      }
+      if (peer.blePeripheralDeviceId != null) {
+        store.dispatch(BleDeviceBlacklistedAction(peer.blePeripheralDeviceId!));
+        await _bleService!.disconnectFromDevice(peer.blePeripheralDeviceId!);
+      }
+    }
+  }
+
+  /// Explicitly connect to a discovered BLE device
+  Future<bool> connectBleDevice(String deviceId) async {
+    store.dispatch(BleDeviceUnblacklistedAction(deviceId));
+    if (_bleService != null) {
+      return await _bleService!.connectToDevice(deviceId, isManual: true);
+    }
+    return false;
+  }
+
   // ===== Lifecycle =====
   
   /// Initialize the transport layer.
@@ -502,23 +526,35 @@ class Bitchat {
   /// Well-connected friends are reachable directly (public IP, no NAT),
   /// so we can always reconnect to them without a third party.
   void _onConnectivityChanged(List<ConnectivityResult> results) {
+    // Filter out irrelevant connection types like bluetooth
+    // which just indicate a BLE device connected/disconnected, not an IP network change.
+    // If we don't filter this, every BLE connection change tears down the UDP transport!
+    var ipResults = results
+        .where((r) => r != ConnectivityResult.bluetooth)
+        .toList();
+        
+    // If it's effectively empty (no IP networks), treat it as 'none'
+    if (ipResults.isEmpty) {
+      ipResults = [ConnectivityResult.none];
+    }
+
     // Ignore the first notification (initial state, not a change)
     if (_lastConnectivityResults == null) {
-      _lastConnectivityResults = results;
+      _lastConnectivityResults = ipResults;
       return;
     }
 
     // Ignore if nothing meaningful changed
-    if (_connectivityResultsEqual(_lastConnectivityResults!, results)) return;
-    _lastConnectivityResults = results;
+    if (_connectivityResultsEqual(_lastConnectivityResults!, ipResults)) return;
+    _lastConnectivityResults = ipResults;
 
     // If we lost all connectivity, nothing to do — connections will fail naturally.
-    if (results.contains(ConnectivityResult.none)) {
+    if (ipResults.contains(ConnectivityResult.none)) {
       debugPrint('Network lost — UDP connections will fail');
       return;
     }
 
-    debugPrint('Network changed: $results — restarting UDP transport');
+    debugPrint('Network changed: $ipResults (raw: $results) — restarting UDP transport');
 
     // Serialize with other transport updates to prevent overlapping init/dispose
     final previous = _transportUpdateLock ?? Future.value();

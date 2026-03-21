@@ -1,11 +1,9 @@
 import 'dart:async';
-import 'dart:typed_data';
 
-import 'package:logger/logger.dart';
 import 'package:redux/redux.dart';
+import 'package:flutter/foundation.dart';
 
 import '../store/app_state.dart';
-import '../store/peers_state.dart';
 import '../store/signaling_actions.dart';
 import 'address_table.dart';
 import 'signaling_codec.dart';
@@ -31,7 +29,6 @@ import 'signaling_codec.dart';
 /// [sendSignaling] which the coordinator provides. This keeps the
 /// service transport-agnostic.
 class SignalingService {
-  final Logger _log = Logger();
 
   final Store<AppState> store;
   final SignalingCodec codec;
@@ -97,7 +94,7 @@ class SignalingService {
         .toList();
 
     if (friends.isEmpty) {
-      _log.w('No well-connected friends to query (excluding target)');
+      debugPrint('No well-connected friends to query (excluding target)');
       return null;
     }
 
@@ -109,7 +106,7 @@ class SignalingService {
     final completer = Completer<AddressEntry?>();
     _pendingQueries[targetHex] = completer;
 
-    _log.i('Querying ${friends.length} friends for address of ${targetHex.substring(0, 8)}...');
+    debugPrint('Querying ${friends.length} friends for address of ${targetHex.substring(0, 8)}...');
 
     final msg = AddrQueryMessage(targetPubkey: targetPubkey);
     final payload = codec.encode(msg);
@@ -122,7 +119,7 @@ class SignalingService {
     // Timeout — resolve with null if no response.
     final timer = Timer(timeout, () {
       if (!completer.isCompleted) {
-        _log.w('Address query timed out for ${targetHex.substring(0, 8)}...');
+        debugPrint('Address query timed out for ${targetHex.substring(0, 8)}...');
         completer.complete(null);
       }
     });
@@ -146,10 +143,10 @@ class SignalingService {
         .where((f) => _pubkeyToHex(f.publicKey) != targetHex)
         .toList();
     if (friends.isEmpty) {
-      _log.w('No well-connected friends to coordinate hole-punch (excluding target)');
+      debugPrint('No well-connected friends to coordinate hole-punch (excluding target)');
       return;
     }
-    _log.i('Requesting hole-punch to ${targetHex.substring(0, 8)}... via well-connected friend');
+    debugPrint('Requesting hole-punch to ${targetHex.substring(0, 8)}... via well-connected friend');
 
     store.dispatch(HolePunchStartedAction(targetHex));
 
@@ -160,12 +157,12 @@ class SignalingService {
     for (final friend in friends) {
       final sent = await sendSignaling?.call(friend.publicKey, payload);
       if (sent == true) {
-        _log.d('Punch request sent via ${friend.displayName}');
+        debugPrint('Punch request sent via ${friend.displayName}');
         return;
       }
     }
 
-    _log.w('Failed to send punch request to any well-connected friend');
+    debugPrint('Failed to send punch request to any well-connected friend');
     store.dispatch(HolePunchFailedAction(targetHex, 'No reachable friend'));
   }
 
@@ -193,7 +190,7 @@ class SignalingService {
     final senderHex = _pubkeyToHex(senderPubkey);
     final senderPeer = store.state.peers.getPeerByPubkeyHex(senderHex);
     if (senderPeer == null || !senderPeer.isFriend) {
-      _log.w('Dropping signaling from non-friend ${senderHex.substring(0, 8)}...');
+      debugPrint('Dropping signaling from non-friend ${senderHex.substring(0, 8)}...');
       return;
     }
 
@@ -201,11 +198,11 @@ class SignalingService {
     try {
       msg = codec.decode(payload);
     } catch (e) {
-      _log.w('Failed to decode signaling message: $e');
+      debugPrint('Failed to decode signaling message: $e');
       return;
     }
 
-    _log.d('Received signaling from ${senderPeer.displayName}: $msg');
+    debugPrint('Received signaling from ${senderPeer.displayName}: $msg');
 
     switch (msg) {
       case AddrQueryMessage():
@@ -267,12 +264,12 @@ class SignalingService {
     if (observedIp != null && observedPort != null &&
         claimedIp != null && claimedPort != null) {
       if (claimedIp != observedIp || claimedPort != observedPort) {
-        _log.i('Address mismatch for ${senderHex.substring(0, 8)}...: '
+        debugPrint('Address mismatch for ${senderHex.substring(0, 8)}...: '
             'claimed $claimedIp:$claimedPort, observed $observedIp:$observedPort — using observed');
       }
     }
 
-    _log.i('Address registered via ANNOUNCE: ${senderHex.substring(0, 8)}... → $effectiveIp:$effectivePort');
+    debugPrint('Address registered via ANNOUNCE: ${senderHex.substring(0, 8)}... → $effectiveIp:$effectivePort');
     addressTable.register(senderHex, effectiveIp, effectivePort);
 
     // Reflect the observed address back to the sender so they can learn
@@ -325,7 +322,7 @@ class SignalingService {
     final payload = codec.encode(response);
     sendSignaling?.call(senderPubkey, payload);
 
-    _log.d('Responded to addr query for ${targetHex.substring(0, 8)}...: '
+    debugPrint('Responded to addr query for ${targetHex.substring(0, 8)}...: '
         '${entry != null ? "${entry.ip}:${entry.port}" : "not found"}');
   }
 
@@ -335,12 +332,12 @@ class SignalingService {
     final completer = _pendingQueries[targetHex];
 
     if (completer == null || completer.isCompleted) {
-      _log.d('Ignoring unexpected addr response for ${targetHex.substring(0, 8)}...');
+      debugPrint('Ignoring unexpected addr response for ${targetHex.substring(0, 8)}...');
       return;
     }
 
     if (msg.found) {
-      _log.i('Got address for ${targetHex.substring(0, 8)}...: ${msg.ip}:${msg.port}');
+      debugPrint('Got address for ${targetHex.substring(0, 8)}...: ${msg.ip}:${msg.port}');
       completer.complete(AddressEntry(
         ip: msg.ip!,
         port: msg.port!,
@@ -348,7 +345,7 @@ class SignalingService {
       ));
     } else {
       // Don't complete yet — maybe another friend has the answer.
-      _log.d('Friend reports no address for ${targetHex.substring(0, 8)}...');
+      debugPrint('Friend reports no address for ${targetHex.substring(0, 8)}...');
     }
   }
 
@@ -367,7 +364,7 @@ class SignalingService {
     // hole-punches between peers we trust.
     final targetPeer = store.state.peers.getPeerByPubkeyHex(targetHex);
     if (targetPeer == null || !targetPeer.isFriend) {
-      _log.w('Punch request for non-friend target ${targetHex.substring(0, 8)}..., ignoring');
+      debugPrint('Punch request for non-friend target ${targetHex.substring(0, 8)}..., ignoring');
       return;
     }
 
@@ -376,15 +373,15 @@ class SignalingService {
     final targetAddr = addressTable.lookup(targetHex);
 
     if (requesterAddr == null) {
-      _log.w('Punch request from ${requesterHex.substring(0, 8)}... but they have no registered address');
+      debugPrint('Punch request from ${requesterHex.substring(0, 8)}... but they have no registered address');
       return;
     }
     if (targetAddr == null) {
-      _log.w('Punch request for ${targetHex.substring(0, 8)}... but they have no registered address');
+      debugPrint('Punch request for ${targetHex.substring(0, 8)}... but they have no registered address');
       return;
     }
 
-    _log.i('Coordinating hole-punch: '
+    debugPrint('Coordinating hole-punch: '
         '${requesterHex.substring(0, 8)}...(${requesterAddr.ip}:${requesterAddr.port}) ↔ '
         '${targetHex.substring(0, 8)}...(${targetAddr.ip}:${targetAddr.port})');
 
@@ -407,14 +404,14 @@ class SignalingService {
 
   /// Handle PUNCH_INITIATE: a well-connected friend telling us to start punching.
   void _handlePunchInitiate(PunchInitiateMessage msg) {
-    _log.i('Punch initiate: punch toward '
+    debugPrint('Punch initiate: punch toward '
         '${_pubkeyToHex(msg.peerPubkey).substring(0, 8)}... at ${msg.ip}:${msg.port}');
     onPunchInitiate?.call(msg.peerPubkey, msg.ip, msg.port);
   }
 
   /// Handle PUNCH_READY: the other peer (via friend) says their NAT is open.
   void _handlePunchReady(PunchReadyMessage msg) {
-    _log.i('Punch ready from ${_pubkeyToHex(msg.peerPubkey).substring(0, 8)}...');
+    debugPrint('Punch ready from ${_pubkeyToHex(msg.peerPubkey).substring(0, 8)}...');
     onPunchReady?.call(msg.peerPubkey);
   }
 
@@ -425,7 +422,7 @@ class SignalingService {
   /// it back. We update our public address with this value — it has the
   /// correct external port, unlike our local-port-based guess.
   void _handleAddrReflect(AddrReflectMessage msg) {
-    _log.i('Address reflected by friend: ${msg.ip}:${msg.port}');
+    debugPrint('Address reflected by friend: ${msg.ip}:${msg.port}');
     onAddrReflected?.call(msg.ip, msg.port);
   }
 

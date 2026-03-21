@@ -42,6 +42,9 @@ class DiscoveredPeerState {
   /// Earliest time we can retry connection (null = can retry now)
   final DateTime? nextRetryAfter;
 
+  /// Whether this device was manually disconnected and should not auto-connect
+  final bool isBlacklisted;
+
   const DiscoveredPeerState({
     required this.transportId,
     this.displayName,
@@ -55,6 +58,7 @@ class DiscoveredPeerState {
     this.serviceUuid,
     this.consecutiveFailures = 0,
     this.nextRetryAfter,
+    this.isBlacklisted = false,
   });
 
   /// Signal quality indicator (0.0 - 1.0), derived from rssi
@@ -84,6 +88,7 @@ class DiscoveredPeerState {
     String? serviceUuid,
     int? consecutiveFailures,
     DateTime? nextRetryAfter,
+    bool? isBlacklisted,
   }) {
     return DiscoveredPeerState(
       transportId: transportId ?? this.transportId,
@@ -98,6 +103,7 @@ class DiscoveredPeerState {
       serviceUuid: serviceUuid ?? this.serviceUuid,
       consecutiveFailures: consecutiveFailures ?? this.consecutiveFailures,
       nextRetryAfter: nextRetryAfter ?? this.nextRetryAfter,
+      isBlacklisted: isBlacklisted ?? this.isBlacklisted,
     );
   }
 
@@ -113,7 +119,8 @@ class DiscoveredPeerState {
           lastError == other.lastError &&
           serviceUuid == other.serviceUuid &&
           consecutiveFailures == other.consecutiveFailures &&
-          nextRetryAfter == other.nextRetryAfter;
+          nextRetryAfter == other.nextRetryAfter &&
+          isBlacklisted == other.isBlacklisted;
 
   @override
   int get hashCode => Object.hash(
@@ -125,6 +132,7 @@ class DiscoveredPeerState {
     serviceUuid,
     consecutiveFailures,
     nextRetryAfter,
+    isBlacklisted,
   );
 
   @override

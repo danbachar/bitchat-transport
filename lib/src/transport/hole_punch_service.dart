@@ -1,8 +1,7 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
-import 'package:logger/logger.dart';
+import 'package:flutter/foundation.dart';
 
 /// A UDP hole-punch packet.
 ///
@@ -88,7 +87,6 @@ class PunchPacket {
 /// a birthday-paradox approach (sending to multiple predicted ports) can be
 /// added as a subclass or strategy without changing the interface.
 class HolePunchService {
-  final Logger _log = Logger();
 
   /// The raw UDP socket used for sending (and optionally receiving) punch packets.
   final RawDatagramSocket socket;
@@ -122,7 +120,7 @@ class HolePunchService {
     Duration duration = const Duration(seconds: 2),
     Duration interval = const Duration(milliseconds: 200),
   }) async {
-    _log.i('Punching ${targetIp.address}:$targetPort for ${duration.inMilliseconds}ms');
+    debugPrint('Punching ${targetIp.address}:$targetPort for ${duration.inMilliseconds}ms');
 
     final endTime = DateTime.now().add(duration);
     var sent = 0;
@@ -133,7 +131,7 @@ class HolePunchService {
       await Future.delayed(interval);
     }
 
-    _log.i('Punch complete: sent $sent packets to ${targetIp.address}:$targetPort');
+    debugPrint('Punch complete: sent $sent packets to ${targetIp.address}:$targetPort');
   }
 
   /// Send punch packets and wait for a response from the target.
@@ -150,7 +148,7 @@ class HolePunchService {
     Duration timeout = const Duration(seconds: 5),
     Duration interval = const Duration(milliseconds: 200),
   }) async {
-    _log.i('Punching ${targetIp.address}:$targetPort (waiting for response, '
+    debugPrint('Punching ${targetIp.address}:$targetPort (waiting for response, '
         'timeout: ${timeout.inMilliseconds}ms)');
 
     final completer = Completer<bool>();
@@ -165,7 +163,7 @@ class HolePunchService {
         // Check if it's a punch packet from the target
         final parsed = PunchPacket.tryParse(dg.data);
         if (parsed != null) {
-          _log.i('Received punch response from '
+          debugPrint('Received punch response from '
               '${dg.address.address}:${dg.port}');
           if (!completer.isCompleted) {
             completer.complete(true);
@@ -189,7 +187,7 @@ class HolePunchService {
     // Timeout
     final timeoutTimer = Timer(timeout, () {
       if (!completer.isCompleted) {
-        _log.w('Punch timed out after sending $sent packets');
+        debugPrint('Punch timed out after sending $sent packets');
         completer.complete(false);
       }
     });
@@ -200,7 +198,7 @@ class HolePunchService {
     timeoutTimer.cancel();
     await sub.cancel();
 
-    _log.i('Punch result: ${result ? 'SUCCESS' : 'TIMEOUT'} '
+    debugPrint('Punch result: ${result ? 'SUCCESS' : 'TIMEOUT'} '
         '(sent $sent packets)');
     return result;
   }

@@ -439,7 +439,7 @@ class UdpTransportService extends TransportService {
       }
       return false;
     } catch (e) {
-      _log.e('Raw UDP send failed to $pubkeyHex: $e');
+      debugPrint('Raw UDP send failed to $pubkeyHex: $e');
       return false;
     }
   }
@@ -691,7 +691,7 @@ class UdpTransportService extends TransportService {
     if (data.length < 50) return;
 
     final addrStr = '${address.address}:$port';
-    _log.d('Raw UDP packet: ${data.length} bytes from $addrStr');
+    debugPrint('Raw UDP packet: ${data.length} bytes from $addrStr');
 
     // Try to identify the sender from _rawPeerAddresses (reverse lookup)
     String? senderPubkeyHex;

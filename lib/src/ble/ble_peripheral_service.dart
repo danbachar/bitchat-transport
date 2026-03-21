@@ -1,7 +1,7 @@
 import 'dart:async';
-import 'dart:typed_data';
 import 'package:ble_peripheral_bondless/ble_peripheral_bondless.dart';
 import 'package:logger/logger.dart';
+import 'package:flutter/foundation.dart';
 
 /// Callback when data is received from a connected central
 typedef PeripheralDataCallback = void Function(String deviceId, Uint8List data, int rssi);
@@ -19,7 +19,6 @@ typedef PeripheralConnectionCallback = void Function(String deviceId, bool conne
 /// The service UUID is derived from the user's public key (last 128 bits).
 /// Identity details are exchanged via ANNOUNCE packets after connection.
 class BlePeripheralService {
-  final Logger _log = Logger();
 
   /// BLE Service UUID (derived from public key)
   final String serviceUuid;
@@ -62,7 +61,7 @@ class BlePeripheralService {
 
   /// Initialize the peripheral service
   Future<void> initialize() async {
-    _log.i('Initializing BLE peripheral service');
+    debugPrint('Initializing BLE peripheral service');
 
     try {
       // Initialize the peripheral
@@ -75,7 +74,7 @@ class BlePeripheralService {
       // is in 'unknown' state, and addService() will time out if called
       // before CoreBluetooth is truly ready.
       BlePeripheral.setBleStateChangeCallback((bool state) {
-        _log.i('BLE peripheral state changed: $state');
+        debugPrint('BLE peripheral state changed: $state');
         if (state && !_bleReadyCompleter.isCompleted) {
           _bleReadyCompleter.complete();
         }
@@ -95,9 +94,9 @@ class BlePeripheralService {
       // Set up write request callback
       BlePeripheral.setWriteRequestCallback(_onWriteRequest);
 
-      _log.i('BLE peripheral initialized');
+      debugPrint('BLE peripheral initialized');
     } catch (e) {
-      _log.e('Failed to initialize BLE peripheral: $e');
+      debugPrint('Failed to initialize BLE peripheral: $e');
       rethrow;
     }
   }
@@ -109,35 +108,35 @@ class BlePeripheralService {
   /// race), retries once after the BLE state callback fires.
   Future<void> startAdvertising({String? localName}) async {
     if (_isAdvertising) {
-      _log.w('Already advertising');
+      debugPrint('Already advertising');
       return;
     }
 
     try {
       // Wait for BLE to be powered on (important for iOS cold start).
       // The completer is resolved by the BleStateChangeCallback.
-      _log.i('Waiting for BLE to be powered on...');
+      debugPrint('Waiting for BLE to be powered on...');
       await _bleReadyCompleter.future.timeout(
         const Duration(seconds: 10),
         onTimeout: () {
           throw Exception('Timeout waiting for BLE to power on');
         },
       );
-      _log.i('BLE is powered on, adding service...');
+      debugPrint('BLE is powered on, adding service...');
 
       await _addServiceAndStartAdvertising();
     } catch (e) {
-      _log.w('First advertising attempt failed: $e');
+      debugPrint('First advertising attempt failed: $e');
 
       // On iOS, the BLE state callback can arrive before CoreBluetooth
       // is fully ready to accept GATT services. Wait briefly and retry.
-      _log.i('Retrying service addition in 2 seconds...');
+      debugPrint('Retrying service addition in 2 seconds...');
       await Future.delayed(const Duration(seconds: 2));
 
       try {
         await _addServiceAndStartAdvertising();
       } catch (retryError) {
-        _log.e('Retry also failed: $retryError');
+        debugPrint('Retry also failed: $retryError');
         rethrow;
       }
     }
@@ -177,7 +176,7 @@ class BlePeripheralService {
 
     _isAdvertising = true;
     _active = true;  // Enable data processing
-    _log.i('Started advertising: $serviceUuid');
+    debugPrint('Started advertising: $serviceUuid');
   }
 
   /// Stop advertising
@@ -200,9 +199,9 @@ class BlePeripheralService {
       // Disconnect all connected centrals
       await disconnectAllCentrals();
 
-      _log.i('Stopped advertising');
+      debugPrint('Stopped advertising');
     } catch (e) {
-      _log.e('Failed to stop advertising: $e');
+      debugPrint('Failed to stop advertising: $e');
     }
   }
 
@@ -210,7 +209,7 @@ class BlePeripheralService {
   Future<void> disconnectAllCentrals() async {
     if (_connectedCentrals.isEmpty) return;
 
-    _log.i('Disconnecting all ${_connectedCentrals.length} connected centrals');
+    debugPrint('Disconnecting all ${_connectedCentrals.length} connected centrals');
     final deviceIds = _connectedCentrals.toList();
 
     // Notify disconnection for each central
@@ -225,7 +224,7 @@ class BlePeripheralService {
   /// Send data to a connected central via notification
   Future<bool> sendData(String deviceId, Uint8List data) async {
     if (!_connectedCentrals.contains(deviceId)) {
-      _log.w('Cannot send to disconnected central: $deviceId');
+      debugPrint('Cannot send to disconnected central: $deviceId');
       return false;
     }
 
@@ -238,7 +237,7 @@ class BlePeripheralService {
       );
       return true;
     } catch (e) {
-      _log.e('Failed to send data to $deviceId: $e');
+      debugPrint('Failed to send data to $deviceId: $e');
       return false;
     }
   }
@@ -262,10 +261,10 @@ class BlePeripheralService {
       // data to it. Wait for the subscription event (_onCharacteristicSubscriptionChange)
       // to fire onConnectionChanged — that's when communication is actually possible.
       _connectedCentrals.add(deviceId);
-      _log.i('Central connected: $deviceId (waiting for subscription)');
+      debugPrint('Central connected: $deviceId (waiting for subscription)');
     } else {
       _connectedCentrals.remove(deviceId);
-      _log.i('Central disconnected: $deviceId');
+      debugPrint('Central disconnected: $deviceId');
       // Fire disconnect immediately — we need to clean up state
       onConnectionChanged?.call(deviceId, false);
     }
@@ -282,10 +281,10 @@ class BlePeripheralService {
     // On iOS/Mac/Windows, subscription change indicates device availability
     if (isSubscribed) {
       _connectedCentrals.add(deviceId);
-      _log.i('Central subscribed: $deviceId (char: $characteristicId)');
+      debugPrint('Central subscribed: $deviceId (char: $characteristicId)');
     } else {
       _connectedCentrals.remove(deviceId);
-      _log.i('Central unsubscribed: $deviceId (char: $characteristicId)');
+      debugPrint('Central unsubscribed: $deviceId (char: $characteristicId)');
     }
 
     onConnectionChanged?.call(deviceId, isSubscribed);
@@ -298,7 +297,7 @@ class BlePeripheralService {
     Uint8List? value,
   ) {
     // We don't use read requests - data flows via write + notify
-    _log.d('Read request from $deviceId');
+    debugPrint('Read request from $deviceId');
 
     // Respond with empty data
     return ReadRequestResult(value: Uint8List(0));
@@ -312,11 +311,11 @@ class BlePeripheralService {
   ) {
     // Block ALL writes when peripheral is inactive (BLE disabled)
     if (!_active) {
-      _log.d('Ignoring write request - peripheral inactive');
+      debugPrint('Ignoring write request - peripheral inactive');
       return WriteRequestResult();  // Acknowledge but ignore
     }
 
-    // _log.d('Write request from $deviceId: ${value?.length ?? 0} bytes');
+    // debugPrint('Write request from $deviceId: ${value?.length ?? 0} bytes');
 
     // Deliver data to callback
     if (value != null && value.isNotEmpty) {

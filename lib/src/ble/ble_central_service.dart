@@ -1,9 +1,8 @@
 import 'dart:async';
-import 'dart:typed_data';
 import 'package:collection/collection.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
-import 'package:logger/logger.dart';
 import '../models/identity.dart';
+import 'package:flutter/foundation.dart';
 
 /// Discovered BLE device info (transient DTO for callbacks, not stored)
 class DiscoveredDevice {
@@ -54,7 +53,6 @@ typedef CentralConnectionCallback = void Function(String deviceId, bool connecte
 /// holds connected peer state (with GATT handles) and delegates all
 /// discovery tracking to the caller via [onDeviceDiscovered].
 class BleCentralService {
-  final Logger _log = Logger();
 
   /// Our service UUID (to filter scan results and identify peers)
   final String serviceUuid;
@@ -103,7 +101,7 @@ class BleCentralService {
 
   /// Initialize the central service
   Future<void> initialize() async {
-    _log.i('Initializing BLE central service');
+    debugPrint('Initializing BLE central service');
 
     // Check if Bluetooth is available
     if (!await FlutterBluePlus.isSupported) {
@@ -113,17 +111,17 @@ class BleCentralService {
     // Wait for Bluetooth to be on
     final state = await FlutterBluePlus.adapterState.first;
     if (state != BluetoothAdapterState.on) {
-      _log.w('Bluetooth is not on: $state');
+      debugPrint('Bluetooth is not on: $state');
       // Could prompt user to enable Bluetooth
     }
 
-    _log.i('BLE central initialized');
+    debugPrint('BLE central initialized');
   }
 
   /// Start scanning for peers
   Future<void> startScan({Duration? timeout}) async {
     if (isScanning) {
-      _log.w('Already scanning, ignoring startScan call');
+      debugPrint('Already scanning, ignoring startScan call');
       return;
     }
 
@@ -150,7 +148,7 @@ class BleCentralService {
       // Wait for scan to actually complete by listening to isScanning stream
       await FlutterBluePlus.isScanning.firstWhere((scanning) => !scanning);
     } catch (e) {
-      _log.e('Failed to start scan: $e');
+      debugPrint('Failed to start scan: $e');
       rethrow;
     }
   }
@@ -160,7 +158,7 @@ class BleCentralService {
     if (!isScanning) return;
 
     await FlutterBluePlus.stopScan();
-    _log.i('Scan stopped');
+    debugPrint('Scan stopped');
   }
 
   /// Connect to a device by its ID.
@@ -253,7 +251,7 @@ class BleCentralService {
     try {
       await peer.device.disconnect();
     } catch (e) {
-      // _log.e('Error disconnecting from $deviceId: $e');
+      // debugPrint('Error disconnecting from $deviceId: $e');
     }
 
     _onDeviceDisconnected(deviceId);
@@ -261,7 +259,7 @@ class BleCentralService {
 
   /// Disconnect from all connected devices
   Future<void> disconnectAll() async {
-    _log.i('Disconnecting all ${_connected.length} connected devices');
+    debugPrint('Disconnecting all ${_connected.length} connected devices');
 
     // Clear callbacks first to stop receiving data
     // This prevents processing packets after BLE is disabled
@@ -286,7 +284,7 @@ class BleCentralService {
   Future<bool> sendData(String deviceId, Uint8List data) async {
     final peer = _connected[deviceId];
     if (peer == null) {
-      _log.w('Cannot send to disconnected device: $deviceId');
+      debugPrint('Cannot send to disconnected device: $deviceId');
       return false;
     }
 
@@ -295,13 +293,13 @@ class BleCentralService {
       peer.lastActivity = DateTime.now();
       return true;
     } catch (e) {
-      _log.w('Write failed for $deviceId, refreshing GATT services: $e');
+      debugPrint('Write failed for $deviceId, refreshing GATT services: $e');
 
       // Re-discover services to get a fresh characteristic handle.
       // iOS can invalidate the old handle between connection and first write.
       final freshChar = await _refreshCharacteristic(peer);
       if (freshChar == null) {
-        _log.e('Service refresh failed for $deviceId, disconnecting');
+        debugPrint('Service refresh failed for $deviceId, disconnecting');
         _connected.remove(deviceId);
         onConnectionChanged?.call(deviceId, false);
         return false;
@@ -312,10 +310,10 @@ class BleCentralService {
         peer.characteristic = freshChar;
         await freshChar.write(data, withoutResponse: true);
         peer.lastActivity = DateTime.now();
-        _log.i('Retry write succeeded for $deviceId after service refresh');
+        debugPrint('Retry write succeeded for $deviceId after service refresh');
         return true;
       } catch (retryError) {
-        _log.e('Retry write also failed for $deviceId, disconnecting');
+        debugPrint('Retry write also failed for $deviceId, disconnecting');
         _connected.remove(deviceId);
         onConnectionChanged?.call(deviceId, false);
         return false;
@@ -342,7 +340,7 @@ class BleCentralService {
       }
       return null;
     } catch (e) {
-      _log.e('Failed to refresh services for ${peer.deviceId}: $e');
+      debugPrint('Failed to refresh services for ${peer.deviceId}: $e');
       return null;
     }
   }
@@ -397,7 +395,7 @@ class BleCentralService {
   }
 
   void _onDataReceived(String deviceId, Uint8List data) {
-    _log.d('Data received from $deviceId: ${data.length} bytes');
+    debugPrint('Data received from $deviceId: ${data.length} bytes');
 
     final peer = _connected[deviceId];
     if (peer != null) {
@@ -405,13 +403,13 @@ class BleCentralService {
       // Pass RSSI along with the data
       onDataReceived?.call(deviceId, data, peer.rssi);
     } else {
-      _log.w('Data received from unknown device: $deviceId');
+      debugPrint('Data received from unknown device: $deviceId');
     }
   }
 
   void _onDeviceDisconnected(String deviceId) {
     _connected.remove(deviceId);
-    _log.i('Disconnected from: $deviceId');
+    debugPrint('Disconnected from: $deviceId');
     onConnectionChanged?.call(deviceId, false);
   }
 

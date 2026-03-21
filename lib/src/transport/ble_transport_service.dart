@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
-import 'package:logger/logger.dart';
 import 'package:redux/redux.dart';
 
 import '../transport/transport_service.dart';
@@ -39,7 +38,6 @@ const _defaultBleDisplayInfo = TransportDisplayInfo(
 /// - NO store-and-forward for offline peers
 /// - All routing/forwarding logic belongs in the GSG layer above
 class BleTransportService extends TransportService {
-  final Logger _log = Logger();
 
   /// BLE Service UUID (derived from user's public key)
   final String serviceUuid;
@@ -140,12 +138,12 @@ class BleTransportService extends TransportService {
   @override
   Future<bool> initialize() async {
     if (state != TransportState.uninitialized) {
-      _log.w('BLE transport already initialized');
+      debugPrint('BLE transport already initialized');
       return state == TransportState.ready || state == TransportState.active;
     }
 
     _setState(TransportState.initializing);
-    _log.i('Initializing BLE transport service');
+    debugPrint('Initializing BLE transport service');
 
     try {
       // Set up central callbacks
@@ -162,10 +160,10 @@ class BleTransportService extends TransportService {
       await _peripheral.initialize();
 
       _setState(TransportState.ready);
-      _log.i('BLE transport initialized successfully');
+      debugPrint('BLE transport initialized successfully');
       return true;
     } catch (e) {
-      _log.e('Failed to initialize BLE transport: $e');
+      debugPrint('Failed to initialize BLE transport: $e');
       _setState(TransportState.error);
       return false;
     }
@@ -174,11 +172,11 @@ class BleTransportService extends TransportService {
   @override
   Future<void> start() async {
     if (state != TransportState.ready && state != TransportState.active) {
-      _log.w('Cannot start BLE transport in state: $state');
+      debugPrint('Cannot start BLE transport in state: $state');
       return;
     }
 
-    _log.i('Starting BLE transport');
+    debugPrint('Starting BLE transport');
 
     // Clear stopped flag to allow packet processing
     _stopped = false;
@@ -190,22 +188,22 @@ class BleTransportService extends TransportService {
     try {
       await _peripheral.startAdvertising(localName: localName);
     } catch (e) {
-      _log.e('Failed to start advertising (scanning will still start): $e');
+      debugPrint('Failed to start advertising (scanning will still start): $e');
     }
 
     try {
       await _central.startScan();
     } catch (e) {
-      _log.e('Failed to start scanning: $e');
+      debugPrint('Failed to start scanning: $e');
     }
 
     _setState(TransportState.active);
-    _log.i('BLE transport started');
+    debugPrint('BLE transport started');
   }
 
   @override
   Future<void> stop() async {
-    _log.i('Stopping BLE transport');
+    debugPrint('Stopping BLE transport');
 
     // Set stopped flag FIRST to block any packets in the event queue
     _stopped = true;
@@ -223,7 +221,7 @@ class BleTransportService extends TransportService {
       _setState(TransportState.ready);
     }
 
-    _log.i('BLE transport stopped');
+    debugPrint('BLE transport stopped');
   }
 
   /// Trigger a new scan for peers
@@ -275,7 +273,7 @@ class BleTransportService extends TransportService {
 
   @override
   Future<void> dispose() async {
-    _log.i('Disposing BLE transport');
+    debugPrint('Disposing BLE transport');
 
     await stop();
     await _central.dispose();
@@ -294,7 +292,7 @@ class BleTransportService extends TransportService {
   void onPacketReceived(Uint8List data, {String? fromDeviceId, required int rssi, BleRole? bleRole}) {
     // Block processing if BLE has been stopped
     if (_stopped) {
-      _log.d('Ignoring packet received after BLE stopped');
+      debugPrint('Ignoring packet received after BLE stopped');
       return;
     }
 
@@ -302,21 +300,21 @@ class BleTransportService extends TransportService {
       final packet = BitchatPacket.deserialize(data);
       onBlePacketReceived?.call(packet, bleDeviceId: fromDeviceId, rssi: rssi, bleRole: bleRole);
     } catch (e) {
-      _log.e('Failed to deserialize packet: $e');
+      debugPrint('Failed to deserialize packet: $e');
     }
   }
 
   // ===== Peer Management =====
 
   void onPeerBleConnected(String bleDeviceId, {int? rssi}) {
-    _log.d('BLE peer connected: $bleDeviceId');
+    debugPrint('BLE peer connected: $bleDeviceId');
   }
 
   void onPeerBleDisconnected(Uint8List pubkey, {BleRole? role}) {
     final peer = _peersState.getPeerByPubkey(pubkey);
     if (peer != null) {
       store.dispatch(PeerBleDisconnectedAction(pubkey, role: role));
-      _log.i('Peer disconnected (${role?.name ?? "all"}): ${peer.displayName}');
+      debugPrint('Peer disconnected (${role?.name ?? "all"}): ${peer.displayName}');
       onPeerDisconnected?.call(_peerStateToLegacyPeer(peer));
     }
   }
@@ -373,9 +371,9 @@ class BleTransportService extends TransportService {
 
     if (!isNew && (existing.isConnected || existing.isConnecting)) return;
 
-    // Check if we're in backoff period
-    if (existing != null && existing.isInBackoff) {
-      return; // Skip connection attempt — still in backoff
+    // Check if we're in backoff period or explicitly blacklisted
+    if (existing != null && (existing.isInBackoff || existing.isBlacklisted)) {
+      return; // Skip connection attempt
     }
 
     // Skip if we're already connected to or connecting to this peer under a
@@ -437,6 +435,11 @@ class BleTransportService extends TransportService {
 
   /// Automatically connect to a discovered peer and send ANNOUNCE
   Future<bool> _autoConnectToPeer(String deviceId) async {
+    return connectToDevice(deviceId, isManual: false);
+  }
+
+  /// Connect to a discovered peer manually or automatically and send ANNOUNCE
+  Future<bool> connectToDevice(String deviceId, {bool isManual = true}) async {
     // Skip if already connected
     if (_isConnected(deviceId)) {
       return false;
@@ -449,11 +452,13 @@ class BleTransportService extends TransportService {
     }
 
     // Limit concurrent connection attempts to avoid starving the BLE stack.
-    final connectingCount = _peersState.discoveredBlePeersList
-        .where((d) => d.isConnecting)
-        .length;
-    if (connectingCount >= _maxConcurrentConnections) {
-      return false;
+    if (!isManual) {
+      final connectingCount = _peersState.discoveredBlePeersList
+          .where((d) => d.isConnecting)
+          .length;
+      if (connectingCount >= _maxConcurrentConnections) {
+        return false;
+      }
     }
 
     // Mark as connecting in store
@@ -463,7 +468,7 @@ class BleTransportService extends TransportService {
       final success = await _central.connectToDevice(deviceId);
 
       if (success) {
-        _log.i('Successfully connected to $deviceId');
+        debugPrint('Successfully connected to $deviceId');
         store.dispatch(BleDeviceConnectedAction(deviceId));
         return true;
       } else {
@@ -474,6 +479,11 @@ class BleTransportService extends TransportService {
       store.dispatch(BleDeviceConnectionFailedAction(deviceId, error: e.toString()));
       return false;
     }
+  }
+
+  /// Disconnect manually from a peer
+  Future<void> disconnectFromDevice(String deviceId) async {
+    await _central.disconnectFromDevice(deviceId);
   }
 
   void _handleConnectionChange(String deviceId, bool connected, {required bool isCentral}) {

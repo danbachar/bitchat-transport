@@ -97,6 +97,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
         serviceUuid: existing.serviceUuid,
         consecutiveFailures: 0,
         nextRetryAfter: null,
+        isBlacklisted: existing.isBlacklisted,
       );
       return state.copyWith(
         discoveredBlePeers: Map.from(state.discoveredBlePeers)
@@ -129,6 +130,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
         serviceUuid: existing.serviceUuid,
         consecutiveFailures: newFailures,
         nextRetryAfter: DateTime.now().add(Duration(seconds: backoffSeconds)),
+        isBlacklisted: existing.isBlacklisted,
       );
       return state.copyWith(
         discoveredBlePeers: Map.from(state.discoveredBlePeers)
@@ -145,6 +147,34 @@ PeersState peersReducer(PeersState state, dynamic action) {
       final updated = existing.copyWith(
         isConnecting: false,
         isConnected: false,
+      );
+      return state.copyWith(
+        discoveredBlePeers: Map.from(state.discoveredBlePeers)
+          ..[action.deviceId] = updated,
+      );
+    }
+    return state;
+  }
+
+  if (action is BleDeviceBlacklistedAction) {
+    final existing = state.discoveredBlePeers[action.deviceId];
+    if (existing != null) {
+      final updated = existing.copyWith(
+        isBlacklisted: true,
+      );
+      return state.copyWith(
+        discoveredBlePeers: Map.from(state.discoveredBlePeers)
+          ..[action.deviceId] = updated,
+      );
+    }
+    return state;
+  }
+
+  if (action is BleDeviceUnblacklistedAction) {
+    final existing = state.discoveredBlePeers[action.deviceId];
+    if (existing != null) {
+      final updated = existing.copyWith(
+        isBlacklisted: false,
       );
       return state.copyWith(
         discoveredBlePeers: Map.from(state.discoveredBlePeers)

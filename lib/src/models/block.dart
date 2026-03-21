@@ -1,8 +1,5 @@
 import 'dart:convert';
-import 'dart:typed_data';
-import 'package:logger/logger.dart';
-
-final Logger _log = Logger();
+import 'package:flutter/foundation.dart';
 
 /// Block types for the Bitchat protocol
 enum BlockType {
@@ -78,18 +75,18 @@ abstract class Block {
     try {
       // Check if first byte is a valid block type
       if (data.isEmpty) {
-        _log.w('Block data is empty');
+        debugPrint('Block data is empty');
         return null;
       }
       final typeValue = data[0];
       if (!BlockType.isValidType(typeValue)) {
         // Not a block - treat as legacy plain text
-        _log.d('Data is not a valid block type: $typeValue');
+        debugPrint('Data is not a valid block type: $typeValue');
         return null;
       }
       return deserialize(data);
     } catch (e) {
-      _log.w('Failed to deserialize block: $e');
+      debugPrint('Failed to deserialize block: $e');
       return null;
     }
   }

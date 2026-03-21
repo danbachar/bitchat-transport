@@ -230,7 +230,7 @@ class BitchatPacket {
     }
     final payload = Uint8List.fromList(data.sublist(offset, offset + payloadLength));
     
-    // _log.i("Serialized packet of type $type with payload length $payloadLength");
+    // debugPrint("Serialized packet of type $type with payload length $payloadLength");
     return BitchatPacket(
       packetId: packetId,
       type: type,

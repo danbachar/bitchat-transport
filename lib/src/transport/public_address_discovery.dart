@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:logger/logger.dart';
 
 import 'address_utils.dart';
@@ -46,7 +47,7 @@ class PublicAddressDiscovery {
     if (ipv6 != null) {
       _cachedPublicIp = ipv6;
       _cacheTime = DateTime.now();
-      _log.i('Discovered public IPv6: ${ipv6.address}');
+      debugPrint('Discovered public IPv6: ${ipv6.address}');
       return ipv6;
     }
 
@@ -55,11 +56,11 @@ class PublicAddressDiscovery {
     if (ipv4 != null) {
       _cachedPublicIp = ipv4;
       _cacheTime = DateTime.now();
-      _log.i('Discovered public IPv4: ${ipv4.address}');
+      debugPrint('Discovered public IPv4: ${ipv4.address}');
       return ipv4;
     }
 
-    _log.w('Public IP discovery failed for both IPv6 and IPv4');
+    debugPrint('Public IP discovery failed for both IPv6 and IPv4');
     return null;
   }
 
@@ -75,13 +76,13 @@ class PublicAddressDiscovery {
         final ip = body.trim();
 
         if (ip.isEmpty) {
-          _log.d('Empty response from $url');
+          debugPrint('Empty response from $url');
           return null;
         }
 
         final parsed = InternetAddress.tryParse(ip);
         if (parsed == null) {
-          _log.w('Failed to parse IP from $url: $ip');
+          debugPrint('Failed to parse IP from $url: $ip');
           return null;
         }
 
@@ -90,7 +91,7 @@ class PublicAddressDiscovery {
         client.close();
       }
     } catch (e) {
-      _log.w('IP discovery from $url failed: $e');
+      debugPrint('IP discovery from $url failed: $e');
       return null;
     }
   }
