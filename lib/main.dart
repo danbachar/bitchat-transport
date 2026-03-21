@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:bitchat_transport/bitchat_transport.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -10,13 +11,11 @@ import 'package:redux/redux.dart';
 import 'package:flutter_redux/flutter_redux.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'dart:convert';
-import 'dart:typed_data';
 import 'dart:async';
 import 'package:cryptography/cryptography.dart';
 import 'chat_screen.dart';
 import 'chat_models.dart';
 import 'settings_screen.dart';
-import 'package:redux_remote_devtools/redux_remote_devtools.dart';
 
 // Global notification plugin instance
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
@@ -41,7 +40,7 @@ Future<BitchatIdentity> _initIdentity() async {
   const storage = FlutterSecureStorage();
   var identityValue = await storage.read(key: 'identity');
   if (identityValue == null) {
-    _log.i('No identity found, generating new one.');
+    debugPrint('No identity found, generating new one.');
     final algorithm = Ed25519();
     final keyPair = await algorithm.newKeyPair();
     final seed = await keyPair.extractPrivateKeyBytes(); // 32-byte seed
@@ -62,15 +61,15 @@ Future<BitchatIdentity> _initIdentity() async {
     identityValue = jsonEncode(id.toJson());
     await storage.write(key: 'identity', value: identityValue);
   } else {
-    _log.i('Identity found in secure storage.');
+    debugPrint('Identity found in secure storage.');
   }
 
   final BitchatIdentity identity =
       BitchatIdentity.fromMap(jsonDecode(identityValue));
 
-  _log.d('Private Key Bytes (Seed): ${identity.privateKey.length} bytes');
-  _log.d('Public Key Bytes: ${identity.publicKey.length} bytes');
-  _log.i('Nickname: ${identity.nickname}');
+  debugPrint('Private Key Bytes (Seed): ${identity.privateKey.length} bytes');
+  debugPrint('Public Key Bytes: ${identity.publicKey.length} bytes');
+  debugPrint('Nickname: ${identity.nickname}');
   return identity;
 }
 
@@ -294,6 +293,21 @@ class _BitchatHomeState extends State<BitchatHome>
     };
   }
 
+  /// Get discovered but unconnected nearby devices
+  List<DiscoveredPeerState> get _unconnectedDevices {
+    final peersState = appStore.state.peers;
+    // Map of currently connected device IDs
+    final connectedDeviceIds = peersState.peersList
+        .where((p) => p.hasBleConnection)
+        .expand((p) => [p.bleCentralDeviceId, p.blePeripheralDeviceId])
+        .where((id) => id != null)
+        .toSet();
+
+    return peersState.discoveredBlePeersList
+        .where((d) => !connectedDeviceIds.contains(d.transportId) && !d.isConnected)
+        .toList();
+  }
+
   @override
   void initState() {
     super.initState();
@@ -315,7 +329,7 @@ class _BitchatHomeState extends State<BitchatHome>
   }
 
   void _onConnectivityChanged(List<ConnectivityResult> results) {
-    _log.i('🌐 Connectivity changed: $results');
+    debugPrint('🌐 Connectivity changed: $results');
   }
 
   void _checkPendingChat() {
@@ -387,14 +401,14 @@ class _BitchatHomeState extends State<BitchatHome>
 
       final success = await bitchat.initialize();
       if (!success) {
-        _log.e('Bitchat initialization failed');
+        debugPrint('Bitchat initialization failed');
         return;
       }
 
       // Hydrate Redux store with existing friends from FriendshipStore
       await _hydrateFriendsFromStore();
     } catch (e) {
-      _log.e('Initialization error: $e');
+      debugPrint('Initialization error: $e');
     }
   }
 
@@ -457,24 +471,24 @@ class _BitchatHomeState extends State<BitchatHome>
 
     switch (block.type) {
       case BlockType.say:
-        _log.i('Handling SayBlock from $senderName ($senderHex)');
+        debugPrint('Handling SayBlock from $senderName ($senderHex)');
         final sayBlock = block as SayBlock;
         await _handleTextMessage(
             senderHex, myHex, sayBlock.content, messageId, senderPubkey);
 
       case BlockType.friendshipOffer:
-        _log.i('Hansdling FriendshipOfferBlock from $senderName ($senderHex)');
+        debugPrint('Hansdling FriendshipOfferBlock from $senderName ($senderHex)');
         final offerBlock = block as FriendshipOfferBlock;
         await _handleFriendshipOffer(senderHex, myHex, offerBlock, senderName);
 
       case BlockType.friendshipAccept:
-        _log.i('Handling FriendshipAcceptBlock from $senderName ($senderHex)');
+        debugPrint('Handling FriendshipAcceptBlock from $senderName ($senderHex)');
         final acceptBlock = block as FriendshipAcceptBlock;
         await _handleFriendshipAccept(
             senderHex, myHex, acceptBlock, senderName);
 
       case BlockType.friendshipRevoke:
-        _log.i('Handling FriendshipRevokeBlock from $senderName ($senderHex)');
+        debugPrint('Handling FriendshipRevokeBlock from $senderName ($senderHex)');
         await _handleFriendshipRevoke(senderHex);
     }
   }
@@ -1338,7 +1352,7 @@ class _BitchatHomeState extends State<BitchatHome>
               const Icon(Icons.bluetooth, size: 18, color: Colors.blueGrey),
               const SizedBox(width: 8),
               Text(
-                'Nearby (${_peers.length})',
+                'Nearby (${_peers.length + _unconnectedDevices.length})',
                 style: const TextStyle(
                   fontSize: 14,
                   fontWeight: FontWeight.bold,
@@ -1351,7 +1365,7 @@ class _BitchatHomeState extends State<BitchatHome>
         const SizedBox(height: 8),
 
         Expanded(
-          child: _peers.isEmpty
+          child: (_peers.isEmpty && _unconnectedDevices.isEmpty)
               ? const Center(
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
@@ -1371,15 +1385,25 @@ class _BitchatHomeState extends State<BitchatHome>
                     ],
                   ),
                 )
-              : ListView.builder(
-                  itemCount: _peers.length,
-                  itemBuilder: (context, index) {
-                    // Sort peers by RSSI (strongest first)
-                    final sortedPeers = _peers.values.toList()
-                      ..sort((a, b) => b.rssi.compareTo(a.rssi));
-                    final peer = sortedPeers[index];
-                    return _buildPeerListItem(peer);
-                  },
+              : ListView(
+                  children: [
+                    if (_peers.isNotEmpty) ...[
+                      const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                        child: Text('Connected Peers', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey, fontSize: 12)),
+                      ),
+                      ...(_peers.values.toList()..sort((a, b) => b.rssi.compareTo(a.rssi)))
+                          .map((peer) => _buildPeerListItem(peer)),
+                    ],
+                    if (_unconnectedDevices.isNotEmpty) ...[
+                      const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                        child: Text('Discovered Grassroots Devices', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey, fontSize: 12)),
+                      ),
+                      ...(_unconnectedDevices..sort((a, b) => b.rssi.compareTo(a.rssi)))
+                          .map((device) => _buildUnconnectedDeviceListItem(device)),
+                    ]
+                  ],
                 ),
         ),
       ],
@@ -1592,6 +1616,18 @@ class _BitchatHomeState extends State<BitchatHome>
                 ],
               ),
               const SizedBox(width: 8),
+              if (peer.hasBleConnection)
+                IconButton(
+                  icon: const Icon(Icons.bluetooth_disabled, size: 20),
+                  color: Colors.redAccent,
+                  tooltip: 'Disconnect BLE',
+                  onPressed: () {
+                    _bitchat?.disconnectBlePeer(peer.pubkeyHex);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Disconnecting from ${peer.displayName}')),
+                    );
+                  },
+                ),
               // Friend request / Chat button
               if (!isFriend && !hasPendingRequest)
                 IconButton(
@@ -1614,6 +1650,72 @@ class _BitchatHomeState extends State<BitchatHome>
             ],
           ),
           onTap: () => _openChat(peer),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildUnconnectedDeviceListItem(DiscoveredPeerState device) {
+    // RSSI signal strength indicator
+    IconData signalIcon;
+    Color signalColor;
+    if (device.rssi < -80) {
+      signalIcon = Icons.signal_cellular_alt_1_bar;
+      signalColor = Colors.red;
+    } else if (device.rssi < -60) {
+      signalIcon = Icons.signal_cellular_alt_2_bar;
+      signalColor = Colors.orange;
+    } else {
+      signalIcon = Icons.signal_cellular_alt;
+      signalColor = Colors.green;
+    }
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      child: Card(
+        margin: EdgeInsets.zero,
+        elevation: 1,
+        color: Colors.grey.withOpacity(0.05),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: BorderSide(color: Colors.grey.withOpacity(0.2)),
+        ),
+        child: ListTile(
+          leading: const CircleAvatar(
+            backgroundColor: Colors.grey,
+            child: Icon(Icons.bluetooth, color: Colors.white),
+          ),
+          title: Text(
+            device.displayName ?? 'Unknown Grassroots Device',
+            style: const TextStyle(fontWeight: FontWeight.normal, color: Colors.grey),
+          ),
+          subtitle: Row(
+            children: [
+              Icon(signalIcon, color: signalColor, size: 14),
+              const SizedBox(width: 4),
+              Text(
+                '${device.rssi} dBm · Discovered: ${_formatSecondsAgo(device.discoveredAt)}',
+                style: const TextStyle(fontSize: 12),
+              ),
+            ],
+          ),
+          trailing: device.isConnecting
+              ? const SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : IconButton(
+                  icon: const Icon(Icons.bluetooth_connected),
+                  color: Colors.blue,
+                  tooltip: 'Connect manually',
+                  onPressed: () {
+                    _bitchat?.connectBleDevice(device.transportId);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Connecting to ${device.displayName ?? 'device'}...')),
+                    );
+                  },
+                ),
         ),
       ),
     );

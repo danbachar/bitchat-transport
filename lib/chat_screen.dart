@@ -119,7 +119,7 @@ class _ChatScreenState extends State<ChatScreen> {
     // Send in the background — status updates (sending → sent/delivered/failed)
     // will be dispatched by Bitchat.send() and reflected via the status icon
     final block = SayBlock(content: text);
-    _log.i("Sending '$text' to peer ${widget.peer.displayName}");
+    debugPrint("Sending '$text' to peer ${widget.peer.displayName}");
     widget.bitchat.send(widget.peer.publicKey, block.serialize(), messageId: messageId);
   }
 
@@ -431,7 +431,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _resendMessage(ChatMessageState message) async {
-    _log.i("Resending '${message.content}' to peer ${widget.peer.displayName}");
+    debugPrint("Resending '${message.content}' to peer ${widget.peer.displayName}");
 
     // Send via Bitchat using SayBlock
     final block = SayBlock(content: message.content);
@@ -442,7 +442,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
     if (messageId != null) {
       // Update the old message's status would be complex, so we just log success
-      _log.i("Resend successful with new messageId: $messageId");
+      debugPrint("Resend successful with new messageId: $messageId");
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Message resent'),
