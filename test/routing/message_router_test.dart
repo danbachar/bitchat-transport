@@ -121,7 +121,8 @@ void main() {
         router.onMessageReceived = (_, __, ___) => anyCalled = true;
         router.onAckReceived = (_) => anyCalled = true;
         router.onReadReceiptReceived = (_) => anyCalled = true;
-        router.onPeerAnnounced = (_, __, {bool isNew = false, String? udpPeerId}) =>
+        router.onPeerAnnounced = (_, __,
+                {bool isNew = false, String? udpPeerId}) =>
             anyCalled = true;
 
         // Create packet without signing (zero signature)
@@ -237,10 +238,32 @@ void main() {
         );
       });
 
+      test('drops unsupported IPv4 udpAddress from ANNOUNCE payload', () async {
+        final payload = buildAnnouncePayload(
+          pubkey: otherPubkey,
+          address: '203.0.113.5:4001',
+        );
+        final p = await signedPacket(
+          type: PacketType.announce,
+          payload: payload,
+        );
+
+        await router.processPacket(
+          p,
+          transport: PeerTransport.bleDirect,
+          rssi: -50,
+        );
+
+        final peer = store.state.peers.getPeerByPubkey(otherPubkey);
+        expect(peer, isNotNull);
+        expect(peer!.udpAddress, isNull);
+      });
+
       test('fires onPeerAnnounced callback', () async {
         AnnounceData? receivedData;
         PeerTransport? receivedTransport;
-        router.onPeerAnnounced = (data, transport, {bool isNew = false, String? udpPeerId}) {
+        router.onPeerAnnounced =
+            (data, transport, {bool isNew = false, String? udpPeerId}) {
           receivedData = data;
           receivedTransport = transport;
         };
@@ -593,7 +616,8 @@ void main() {
         );
       });
 
-      test('does not use peerId as fallback address when not in payload', () async {
+      test('does not use peerId as fallback address when not in payload',
+          () async {
         // udpPeerId is a hex pubkey, not an ip:port address — it must not
         // be stored as udpAddress.
         final payload = buildAnnouncePayload(
@@ -618,7 +642,8 @@ void main() {
 
       test('fires onPeerAnnounced callback with UDP transport', () async {
         PeerTransport? receivedTransport;
-        router.onPeerAnnounced = (_, transport, {bool isNew = false, String? udpPeerId}) {
+        router.onPeerAnnounced =
+            (_, transport, {bool isNew = false, String? udpPeerId}) {
           receivedTransport = transport;
         };
 
@@ -671,8 +696,7 @@ void main() {
         expect(receivedPayload, equals(msgPayload));
       });
 
-      test('triggers onAckRequested with correct transport and peerId',
-          () async {
+      test('triggers onAckRequested with canonical UDP peer id', () async {
         PeerTransport? ackTransport;
         String? ackPeerId;
         String? ackMessageId;
@@ -696,14 +720,25 @@ void main() {
         );
 
         expect(ackTransport, equals(PeerTransport.udp));
-        expect(ackPeerId, equals('peer-ack-test'));
+        expect(
+          ackPeerId,
+          equals(
+            otherPubkey.map((b) => b.toRadixString(16).padLeft(2, '0')).join(),
+          ),
+        );
         expect(ackMessageId, equals(p.packetId));
       });
 
-      test('does not trigger onAckRequested for BLE messages', () async {
-        bool ackRequested = false;
+      test('triggers onAckRequested for BLE messages too', () async {
+        PeerTransport? ackTransport;
+        String? ackPeerId;
+        String? ackMessageId;
         router.onMessageReceived = (_, __, ___) {};
-        router.onAckRequested = (_, __, ___) => ackRequested = true;
+        router.onAckRequested = (transport, peerId, messageId) {
+          ackTransport = transport;
+          ackPeerId = peerId;
+          ackMessageId = messageId;
+        };
 
         final p = await signedPacket(
           type: PacketType.message,
@@ -717,7 +752,9 @@ void main() {
           rssi: -60,
         );
 
-        expect(ackRequested, isFalse);
+        expect(ackTransport, equals(PeerTransport.bleDirect));
+        expect(ackPeerId, isNull);
+        expect(ackMessageId, equals(p.packetId));
       });
     });
 

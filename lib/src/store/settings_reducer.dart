@@ -19,6 +19,10 @@ SettingsState settingsReducer(SettingsState state, SettingsAction action) {
     );
   }
 
+  if (action is SetAnchorServerAction) {
+    return state.copyWith(anchorAddress: action.anchorAddress);
+  }
+
   if (action is HydrateSettingsAction) {
     return action.settings;
   }

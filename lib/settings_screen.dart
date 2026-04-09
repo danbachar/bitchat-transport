@@ -26,11 +26,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late bool _bluetoothEnabled;
   late bool _udpEnabled;
 
+  late final TextEditingController _anchorAddressController;
+
   @override
   void initState() {
     super.initState();
     _bluetoothEnabled = widget.store.state.settings.bluetoothEnabled;
     _udpEnabled = widget.store.state.settings.udpEnabled;
+
+    final settings = widget.store.state.settings;
+    _anchorAddressController =
+        TextEditingController(text: settings.anchorAddress ?? '');
+  }
+
+  @override
+  void dispose() {
+    _anchorAddressController.dispose();
+    super.dispose();
   }
 
   @override
@@ -101,6 +113,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
           // Internet connection status
           if (_udpEnabled && widget.store.state.transports.udpState.isUsable)
             _buildConnectionStatusBadge(),
+
+          const Divider(height: 32),
+
+          // Anchor Server Section
+          _buildAnchorServerSection(),
 
           const Divider(height: 32),
 
@@ -283,6 +300,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final transports = widget.store.state.transports;
     final isWellConnected = transports.isWellConnected;
     final publicAddress = transports.publicAddress;
+    final publicIp = transports.publicIp;
 
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -321,10 +339,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       color: Colors.grey[500],
                     ),
                   ),
-                  if (publicAddress != null) ...[
+                  if (publicIp != null || publicAddress != null) ...[
                     const SizedBox(height: 6),
                     Text(
-                      publicAddress,
+                      publicAddress ?? publicIp!,
                       style: TextStyle(
                         fontFamily: 'monospace',
                         fontSize: 11,
@@ -405,6 +423,176 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildAnchorServerSection() {
+    final hasAnchor = widget.store.state.settings.hasAnchor;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Section header
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: Row(
+            children: [
+              const Icon(Icons.cloud_outlined, color: Color(0xFFE8A33C)),
+              const SizedBox(width: 8),
+              const Text(
+                'Anchor Server',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFFE8A33C),
+                ),
+              ),
+              if (hasAnchor) ...[
+                const SizedBox(width: 8),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.green.withOpacity(0.2),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: const Text(
+                    'Configured',
+                    style: TextStyle(fontSize: 10, color: Colors.green),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+
+        const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 16),
+          child: Text(
+            'A personal cloud server that helps your friends find each other '
+            'when you\'re not nearby. The server\'s identity is derived from '
+            'your key — just enter its address.',
+            style: TextStyle(color: Colors.grey, fontSize: 13),
+          ),
+        ),
+
+        const SizedBox(height: 12),
+
+        // Address field
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: TextField(
+            controller: _anchorAddressController,
+            style: const TextStyle(fontFamily: 'monospace', fontSize: 14),
+            decoration: InputDecoration(
+              labelText: 'Server address',
+              hintText: '[2600:1234::1]:9514',
+              hintStyle: TextStyle(
+                color: Colors.grey[700],
+                fontFamily: 'monospace',
+                fontSize: 14,
+              ),
+              prefixIcon: const Icon(Icons.dns_outlined, size: 20),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+            ),
+          ),
+        ),
+
+        const SizedBox(height: 12),
+
+        // Save / Clear buttons
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(
+            children: [
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: _onSaveAnchor,
+                  icon: const Icon(Icons.save_outlined, size: 18),
+                  label: const Text('Save'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF1B3D2F),
+                    foregroundColor: const Color(0xFFE8A33C),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                  ),
+                ),
+              ),
+              if (hasAnchor) ...[
+                const SizedBox(width: 12),
+                OutlinedButton.icon(
+                  onPressed: _onClearAnchor,
+                  icon: const Icon(Icons.clear, size: 18),
+                  label: const Text('Remove'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.red,
+                    side: const BorderSide(color: Colors.red),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _onSaveAnchor() {
+    final address = _anchorAddressController.text.trim();
+
+    if (address.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Server address is required')),
+      );
+      return;
+    }
+
+    widget.store.dispatch(SetAnchorServerAction(anchorAddress: address));
+    widget.onSettingsChanged?.call();
+
+    setState(() {}); // refresh the "Configured" badge
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Anchor server saved')),
+    );
+  }
+
+  void _onClearAnchor() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Remove Anchor Server?'),
+        content: const Text(
+          'Your device will stop syncing its friend list to this server. '
+          'Friends will lose the signaling relay until you configure a new one.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _anchorAddressController.clear();
+              widget.store.dispatch(SetAnchorServerAction(anchorAddress: null));
+              widget.onSettingsChanged?.call();
+              setState(() {});
+            },
+            child: const Text('Remove', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
     );
   }
 

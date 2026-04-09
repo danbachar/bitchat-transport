@@ -26,6 +26,11 @@ class TransportsState {
   /// Our discovered public UDP address (ip:port), null if not yet discovered
   final String? publicAddress;
 
+  /// Our public IP address (no port), for display purposes.
+  /// Set even when behind NAT. Updated by seeip.org discovery and friend
+  /// reflection. Prefers IPv6 over IPv4.
+  final String? publicIp;
+
   const TransportsState({
     this.bleState = TransportState.uninitialized,
     this.udpState = TransportState.uninitialized,
@@ -33,6 +38,7 @@ class TransportsState {
     this.udpError,
     this.bleScanning = false,
     this.publicAddress,
+    this.publicIp,
   });
 
   static const TransportsState initial = TransportsState();
@@ -79,6 +85,7 @@ class TransportsState {
     String? udpError,
     bool? bleScanning,
     String? publicAddress,
+    String? publicIp,
   }) {
     return TransportsState(
       bleState: bleState ?? this.bleState,
@@ -87,10 +94,12 @@ class TransportsState {
       udpError: udpError ?? this.udpError,
       bleScanning: bleScanning ?? this.bleScanning,
       publicAddress: publicAddress ?? this.publicAddress,
+      publicIp: publicIp ?? this.publicIp,
     );
   }
 
   /// Create a copy with publicAddress explicitly cleared (set to null).
+  /// Keeps publicIp — the IP is still valid even if the full address isn't.
   TransportsState clearPublicAddress() {
     return TransportsState(
       bleState: bleState,
@@ -99,6 +108,7 @@ class TransportsState {
       udpError: udpError,
       bleScanning: bleScanning,
       publicAddress: null,
+      publicIp: publicIp,
     );
   }
 
@@ -112,7 +122,8 @@ class TransportsState {
           bleError == other.bleError &&
           udpError == other.udpError &&
           bleScanning == other.bleScanning &&
-          publicAddress == other.publicAddress;
+          publicAddress == other.publicAddress &&
+          publicIp == other.publicIp;
 
   @override
   int get hashCode => Object.hash(
@@ -122,9 +133,10 @@ class TransportsState {
         udpError,
         bleScanning,
         publicAddress,
+        publicIp,
       );
 
   @override
   String toString() =>
-      'TransportsState(ble: $bleState, udp: $udpState, scanning: $bleScanning, publicAddr: $publicAddress)';
+      'TransportsState(ble: $bleState, udp: $udpState, scanning: $bleScanning, publicAddr: $publicAddress, publicIp: $publicIp)';
 }

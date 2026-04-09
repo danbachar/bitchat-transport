@@ -367,9 +367,8 @@ class _BitchatHomeState extends State<BitchatHome>
         store: appStore,
       );
 
-      bitchat.onMessageReceived = (messageId, senderPubkey, payload) {
-        // print('Received ${payload.length} bytes from $senderPubkey');
-        _handleIncomingMessage(messageId, senderPubkey, payload);
+      bitchat.onMessageReceived = (messageId, senderPubkey, payload, transport) {
+        _handleIncomingMessage(messageId, senderPubkey, payload, transport);
       };
 
       // Friend presence is handled at the transport layer; no app-layer
@@ -436,43 +435,34 @@ class _BitchatHomeState extends State<BitchatHome>
   // Friend presence is handled at the transport layer via unified ANNOUNCE
   // messages. BLE and UDP broadcasts include address for friends automatically.
 
-  Future<void> _handleIncomingMessage(
-      String messageId, Uint8List senderPubkey, Uint8List payload) async {
+  Future<void> _handleIncomingMessage(String messageId,
+      Uint8List senderPubkey, Uint8List payload, MessageTransport transport) async {
     final senderHex = ChatMessage.pubkeyToHex(senderPubkey);
-    debugPrint('📨 Message ID: $messageId');
     final myHex = ChatMessage.pubkeyToHex(_identity!.publicKey);
 
-    debugPrint('📨 _handleIncomingMessage: ${payload.length} bytes from $senderHex');
-    debugPrint('📨 First byte (block type): 0x${payload[0].toRadixString(16)}');
-
-    // Try to parse as a block
-    debugPrint('📨 Attempting to parse payload of ${payload.length} bytes, first byte: ${payload.isNotEmpty ? payload[0] : "empty"}');
     final block = Block.tryDeserialize(payload);
 
     if (block != null) {
-      debugPrint('📨 Parsed block type: ${block.type}, runtimeType: ${block.runtimeType}');
-      await _handleBlock(block, senderHex, myHex, messageId, senderPubkey);
+      await _handleBlock(
+          block, senderHex, myHex, messageId, senderPubkey, transport);
     } else {
-      debugPrint('📨 Failed to parse as block - dropping message');
+      debugPrint('📨 Failed to parse block (${payload.length} bytes from $senderHex) - dropping');
     }
   }
 
   Future<void> _handleBlock(Block block, String senderHex, String myHex,
-      String messageId, Uint8List senderPubkey) async {
+      String messageId, Uint8List senderPubkey, MessageTransport transport) async {
     // Find sender name
     final peer = _peers.values
         .where((p) => ChatMessage.pubkeyToHex(p.publicKey) == senderHex)
         .firstOrNull;
     final senderName = peer?.displayName ?? 'Unknown';
-
-    debugPrint('📦 _handleBlock: block.type=${block.type}, block.runtimeType=${block.runtimeType}');
-    debugPrint('📦 _handleBlock: block.type.value=${block.type.value}');
-    debugPrint('📦 _handleBlock: is FriendshipAcceptBlock? ${block is FriendshipAcceptBlock}');
+    final transportName = transport == MessageTransport.udp ? 'UDX' : 'BLE';
 
     switch (block.type) {
       case BlockType.say:
-        debugPrint('Handling SayBlock from $senderName ($senderHex)');
         final sayBlock = block as SayBlock;
+        debugPrint('💬 [$transportName] Message from $senderName: "${sayBlock.content}"');
         await _handleTextMessage(
             senderHex, myHex, sayBlock.content, messageId, senderPubkey);
 

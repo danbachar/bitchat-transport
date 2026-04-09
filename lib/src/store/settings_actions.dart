@@ -30,6 +30,16 @@ class UpdateTransportSettingsAction extends SettingsAction {
   });
 }
 
+/// Configure the bootstrap anchor server address.
+///
+/// The anchor's public key is derived from the owner's identity —
+/// only the address needs to be stored.
+class SetAnchorServerAction extends SettingsAction {
+  final String? anchorAddress;
+
+  SetAnchorServerAction({this.anchorAddress});
+}
+
 /// Hydrate settings from persistence
 class HydrateSettingsAction extends SettingsAction {
   final SettingsState settings;

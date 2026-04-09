@@ -233,6 +233,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
         blePeripheralDeviceId: action.blePeripheralDeviceId,
         lastBleSeen: isBle ? now : null,
         udpAddress: action.udpAddress,
+        linkLocalAddress: action.linkLocalAddress,
         isWellConnected: wellConnected,
       );
       return state.copyWith(
@@ -267,8 +268,10 @@ PeersState peersReducer(PeersState state, dynamic action) {
         blePeripheralDeviceId: action.blePeripheralDeviceId ?? existing.blePeripheralDeviceId,
         lastBleSeen: isBle ? now : existing.lastBleSeen,
         udpAddress: action.udpAddress ?? existing.udpAddress,
+        linkLocalAddress: action.linkLocalAddress ?? existing.linkLocalAddress,
         isFriend: existing.isFriend,
         isWellConnected: action.udpAddress != null ? wellConnected : existing.isWellConnected,
+        hasLiveUdpConnection: existing.hasLiveUdpConnection,
       );
       return state.copyWith(
         peers: Map.from(state.peers)..[pubkeyHex] = updated,
@@ -304,7 +307,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
       final hasAnyBle = newCentralId != null || newPeripheralId != null;
 
       // If no other transport, mark as disconnected
-      final newConnectionState = (hasAnyBle || existing.udpAddress != null)
+      final newConnectionState = (hasAnyBle || existing.hasLiveUdpConnection)
           ? existing.connectionState
           : PeerConnectionState.disconnected;
 
@@ -321,11 +324,26 @@ PeersState peersReducer(PeersState state, dynamic action) {
         blePeripheralDeviceId: newPeripheralId,
         lastBleSeen: hasAnyBle ? existing.lastBleSeen : null,
         udpAddress: existing.udpAddress,
+        linkLocalAddress: existing.linkLocalAddress,
         isFriend: existing.isFriend,
         isWellConnected: existing.isWellConnected,
+        hasLiveUdpConnection: existing.hasLiveUdpConnection,
       );
       return state.copyWith(
         peers: Map.from(state.peers)..[pubkeyHex] = updated,
+      );
+    }
+    return state;
+  }
+
+  if (action is PeerUdpConnectionChangedAction) {
+    final existing = state.peers[action.pubkeyHex];
+    if (existing != null) {
+      final updated = existing.copyWith(
+        hasLiveUdpConnection: action.connected,
+      );
+      return state.copyWith(
+        peers: Map.from(state.peers)..[action.pubkeyHex] = updated,
       );
     }
     return state;
@@ -341,6 +359,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
           : PeerConnectionState.disconnected;
       // Preserve UDP address — it's the last known location and needed
       // for reconnection. Never clear peer addresses.
+      // Clear hasLiveUdpConnection — transport-level disconnect means no live stream.
       final updated = PeerState(
         publicKey: existing.publicKey,
         nickname: existing.nickname,
@@ -353,8 +372,10 @@ PeersState peersReducer(PeersState state, dynamic action) {
         blePeripheralDeviceId: existing.blePeripheralDeviceId,
         lastBleSeen: existing.lastBleSeen,
         udpAddress: existing.udpAddress,  // Preserve for reconnection
+        linkLocalAddress: existing.linkLocalAddress,
         isFriend: existing.isFriend,
         isWellConnected: existing.isWellConnected,
+        hasLiveUdpConnection: false,
       );
       return state.copyWith(
         peers: Map.from(state.peers)..[pubkeyHex] = updated,
@@ -405,8 +426,10 @@ PeersState peersReducer(PeersState state, dynamic action) {
             blePeripheralDeviceId: null,
             lastBleSeen: null,
             udpAddress: peer.udpAddress,
+            linkLocalAddress: peer.linkLocalAddress,
             isFriend: peer.isFriend,
             isWellConnected: peer.isWellConnected,
+            hasLiveUdpConnection: peer.hasLiveUdpConnection,
           );
           return;
         }
@@ -440,8 +463,10 @@ PeersState peersReducer(PeersState state, dynamic action) {
             blePeripheralDeviceId: null,
             lastBleSeen: null,
             udpAddress: peer.udpAddress,  // Preserve for reconnection
+            linkLocalAddress: peer.linkLocalAddress,
             isFriend: true,
             isWellConnected: peer.isWellConnected,
+            hasLiveUdpConnection: peer.hasLiveUdpConnection,
           );
         } else {
           staleKeys.add(key);

@@ -83,6 +83,20 @@ AddressInfo? parseAddressString(String addr) {
   return AddressInfo(ip, port);
 }
 
+/// Parse an address string and require IPv6.
+///
+/// Returns null for malformed inputs and for valid IPv4 addresses.
+AddressInfo? parseIpv6AddressString(String addr) {
+  final parsed = parseAddressString(addr);
+  if (parsed == null) return null;
+  if (parsed.ip.type != InternetAddressType.IPv6) return null;
+  return parsed;
+}
+
+/// Whether an address string is a valid IPv6 `ip:port` pair.
+bool isIpv6AddressString(String addrString) =>
+    parseIpv6AddressString(addrString) != null;
+
 /// Check if an IP address is a globally routable IPv6 address.
 ///
 /// Globally routable means it can be reached from the public internet.
@@ -133,10 +147,20 @@ bool isGloballyRoutableIPv6(InternetAddress addr) {
   if (_isIPv4Compatible(bytes)) return false;
 
   // Documentation (2001:0db8::/32)
-  if (bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x0D && bytes[3] == 0xB8) return false;
+  if (bytes[0] == 0x20 &&
+      bytes[1] == 0x01 &&
+      bytes[2] == 0x0D &&
+      bytes[3] == 0xB8) {
+    return false;
+  }
 
   // Teredo (2001:0000::/32)
-  if (bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x00 && bytes[3] == 0x00) return false;
+  if (bytes[0] == 0x20 &&
+      bytes[1] == 0x01 &&
+      bytes[2] == 0x00 &&
+      bytes[3] == 0x00) {
+    return false;
+  }
 
   // 6to4 (2002::/16)
   if (bytes[0] == 0x20 && bytes[1] == 0x02) return false;

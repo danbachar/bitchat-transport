@@ -32,3 +32,10 @@ class PublicAddressUpdatedAction extends TransportAction {
 
   PublicAddressUpdatedAction(this.publicAddress);
 }
+
+/// Public IP (no port) discovered or reflected by a friend.
+class PublicIpUpdatedAction extends TransportAction {
+  final String publicIp;
+
+  PublicIpUpdatedAction(this.publicIp);
+}

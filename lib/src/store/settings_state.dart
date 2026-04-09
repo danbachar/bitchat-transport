@@ -40,6 +40,13 @@ class SettingsState {
   /// Default: Bluetooth first, then UDP
   final List<TransportProtocol> transportPriority;
 
+  /// Bootstrap anchor server address (e.g. "[2600:1234::1]:9514").
+  /// Null means no anchor configured.
+  ///
+  /// The anchor's public key is not stored here — it is derived
+  /// deterministically from the owner's identity at runtime.
+  final String? anchorAddress;
+
   const SettingsState({
     this.bluetoothEnabled = true,
     this.udpEnabled = true,
@@ -47,6 +54,7 @@ class SettingsState {
       TransportProtocol.bluetooth,
       TransportProtocol.udp,
     ],
+    this.anchorAddress,
   });
 
   static const SettingsState initial = SettingsState();
@@ -67,15 +75,23 @@ class SettingsState {
     return null;
   }
 
+  /// Whether an anchor server is configured.
+  bool get hasAnchor => anchorAddress != null && anchorAddress!.isNotEmpty;
+
   SettingsState copyWith({
     bool? bluetoothEnabled,
     bool? udpEnabled,
     List<TransportProtocol>? transportPriority,
+    // Use Object? + sentinel so callers can pass null to clear.
+    Object? anchorAddress = _sentinel,
   }) {
     return SettingsState(
       bluetoothEnabled: bluetoothEnabled ?? this.bluetoothEnabled,
       udpEnabled: udpEnabled ?? this.udpEnabled,
       transportPriority: transportPriority ?? this.transportPriority,
+      anchorAddress: identical(anchorAddress, _sentinel)
+          ? this.anchorAddress
+          : anchorAddress as String?,
     );
   }
 
@@ -83,6 +99,7 @@ class SettingsState {
         'bluetoothEnabled': bluetoothEnabled,
         'udpEnabled': udpEnabled,
         'transportPriority': transportPriority.map((t) => t.name).toList(),
+        'anchorAddress': anchorAddress,
       };
 
   factory SettingsState.fromJson(Map<String, dynamic> json) {
@@ -96,6 +113,7 @@ class SettingsState {
                   ))
               .toList() ??
           const [TransportProtocol.bluetooth, TransportProtocol.udp],
+      anchorAddress: json['anchorAddress'] as String?,
     );
   }
 
@@ -106,16 +124,21 @@ class SettingsState {
           runtimeType == other.runtimeType &&
           bluetoothEnabled == other.bluetoothEnabled &&
           udpEnabled == other.udpEnabled &&
-          listEquals(transportPriority, other.transportPriority);
+          listEquals(transportPriority, other.transportPriority) &&
+          anchorAddress == other.anchorAddress;
 
   @override
   int get hashCode => Object.hash(
         bluetoothEnabled,
         udpEnabled,
         Object.hashAll(transportPriority),
+        anchorAddress,
       );
 
   @override
   String toString() =>
       'SettingsState(bt: $bluetoothEnabled, udp: $udpEnabled)';
 }
+
+/// Sentinel for copyWith — distinguishes "not passed" from "passed null".
+const _sentinel = Object();

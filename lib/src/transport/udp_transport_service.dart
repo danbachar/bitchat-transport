@@ -48,7 +48,6 @@ const _defaultUdpDisplayInfo = TransportDisplayInfo(
 ///
 /// Messages to unreachable peers fail immediately. No caching, no relaying.
 class UdpTransportService extends TransportService {
-
   /// Our Bitchat identity (Ed25519 keypair)
   final BitchatIdentity identity;
 
@@ -175,7 +174,7 @@ class UdpTransportService extends TransportService {
 
     try {
       // Bind to all IPv6 interfaces, random port.
-      // IPv6 socket also accepts IPv4 on most platforms (dual-stack).
+      // Bitchat only advertises and dials IPv6 UDP addresses.
       _rawSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv6, 0);
       _localPort = _rawSocket!.port;
       _udx = UDX();
@@ -184,7 +183,8 @@ class UdpTransportService extends TransportService {
       _localAddress = await _resolveLocalAddress(_localPort!);
 
       _setState(TransportState.ready);
-      debugPrint('UDP transport bound on port $_localPort (local: $_localAddress)');
+      debugPrint(
+          'UDP transport bound on port $_localPort (local: $_localAddress)');
       return true;
     } catch (e) {
       debugPrint('Failed to bind UDP socket: $e');
@@ -210,7 +210,8 @@ class UdpTransportService extends TransportService {
       return;
     }
     if (_rawSocket == null) {
-      debugPrint('Cannot start multiplexer: socket not bound. Call initialize() first.');
+      debugPrint(
+          'Cannot start multiplexer: socket not bound. Call initialize() first.');
       return;
     }
 
@@ -305,7 +306,8 @@ class UdpTransportService extends TransportService {
   Future<bool> connectToPeer(
       String pubkeyHex, InternetAddress addr, int port) async {
     if (_multiplexer == null) {
-      debugPrint('Cannot connect: multiplexer not started. Call startMultiplexer() first.');
+      debugPrint(
+          'Cannot connect: multiplexer not started. Call startMultiplexer() first.');
       return false;
     }
 
@@ -367,7 +369,8 @@ class UdpTransportService extends TransportService {
       udpSocket.on('stream').listen((UDXEvent event) {
         final incomingStream = event.data as UDXStream;
         if (incomingStream != stream) {
-          debugPrint('Incoming stream ${incomingStream.id} on outgoing connection to $pubkeyHex');
+          debugPrint(
+              'Incoming stream ${incomingStream.id} on outgoing connection to $pubkeyHex');
           _listenToStream(pubkeyHex, incomingStream);
         }
       });
@@ -377,7 +380,8 @@ class UdpTransportService extends TransportService {
 
       _connectionController.add(TransportConnectionEvent(
         peerId: pubkeyHex,
-        transport: TransportType.udp,        connected: true,
+        transport: TransportType.udp,
+        connected: true,
       ));
 
       return true;
@@ -428,7 +432,8 @@ class UdpTransportService extends TransportService {
   /// Use this when UDX connectToPeer fails (e.g. hairpin routing on same LAN).
   /// No reliability — packets may be lost, duplicated, or reordered.
   /// The application layer handles retries via ACKs.
-  bool sendRawTo(String pubkeyHex, InternetAddress ip, int port, Uint8List data) {
+  bool sendRawTo(
+      String pubkeyHex, InternetAddress ip, int port, Uint8List data) {
     if (_rawSocket == null) return false;
     try {
       final sent = _rawSocket!.send(data, ip, port);
@@ -445,19 +450,26 @@ class UdpTransportService extends TransportService {
   }
 
   /// Check if a peer has a raw UDP address (fallback mode).
-  AddressInfo? getRawPeerAddress(String pubkeyHex) => _rawPeerAddresses[pubkeyHex];
+  AddressInfo? getRawPeerAddress(String pubkeyHex) =>
+      _rawPeerAddresses[pubkeyHex];
 
   @override
   Future<void> broadcast(Uint8List data, {Set<String>? excludePeerIds}) async {
     // Send via UDX connections
     for (final entry in _peerConnections.entries) {
-      if (excludePeerIds != null && excludePeerIds.contains(entry.key)) continue;
+      if (excludePeerIds != null && excludePeerIds.contains(entry.key)) {
+        continue;
+      }
       await sendToPeer(entry.key, data);
     }
     // Also send via raw UDP to peers where UDX failed
     for (final entry in _rawPeerAddresses.entries) {
-      if (excludePeerIds != null && excludePeerIds.contains(entry.key)) continue;
-      if (_peerConnections.containsKey(entry.key)) continue; // Already sent via UDX
+      if (excludePeerIds != null && excludePeerIds.contains(entry.key)) {
+        continue;
+      }
+      if (_peerConnections.containsKey(entry.key)) {
+        continue; // Already sent via UDX
+      }
       sendRawTo(entry.key, entry.value.ip, entry.value.port, data);
     }
   }
@@ -497,8 +509,7 @@ class UdpTransportService extends TransportService {
 
   @override
   String? getPeerIdForPubkey(Uint8List pubkey) {
-    final hex =
-        pubkey.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    final hex = pubkey.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
     return _peerConnections.containsKey(hex) ? hex : null;
   }
 
@@ -532,10 +543,7 @@ class UdpTransportService extends TransportService {
   /// Handle a new incoming UDX connection (remote peer connected to us).
   void _handleIncomingConnection(UDPSocket socket) {
     // Normalize address string to match the format stored by connectToPeer.
-    // socket.remoteAddress may be String or InternetAddress depending on dart_udx.
-    final addrStr = socket.remoteAddress is InternetAddress
-        ? (socket.remoteAddress as InternetAddress).address
-        : '${socket.remoteAddress}';
+    final addrStr = socket.remoteAddress.address;
     final remoteAddr = '$addrStr:${socket.remotePort}';
     debugPrint('Incoming UDX connection from $remoteAddr');
 
@@ -545,7 +553,8 @@ class UdpTransportService extends TransportService {
     // arrives before ANNOUNCE processing can map the tempKey.
     final knownPubkey = _addressToPubkey[remoteAddr];
     if (knownPubkey != null) {
-      debugPrint('Known peer $knownPubkey at $remoteAddr, using direct stream listener');
+      debugPrint(
+          'Known peer $knownPubkey at $remoteAddr, using direct stream listener');
       socket.on('stream').listen((UDXEvent event) {
         final stream = event.data as UDXStream;
         _listenToStream(knownPubkey, stream);
@@ -574,8 +583,7 @@ class UdpTransportService extends TransportService {
     // Listen for data on this stream.
     // We don't know the pubkey yet, so we use a temporary key and let the
     // coordinator re-map after processing the first verified packet.
-    final tempKey =
-        '${socket.remoteAddress}:${socket.remotePort}:${stream.id}';
+    final tempKey = '${socket.remoteAddress}:${socket.remotePort}:${stream.id}';
 
     // Store as pending until ANNOUNCE reveals the pubkey
     _pendingIncoming[tempKey] = _PeerConnection(
@@ -666,7 +674,8 @@ class UdpTransportService extends TransportService {
 
       _connectionController.add(TransportConnectionEvent(
         peerId: pubkeyHex,
-        transport: TransportType.udp,        connected: true,
+        transport: TransportType.udp,
+        connected: true,
       ));
 
       debugPrint('Mapped incoming connection $tempKey → $pubkeyHex');
@@ -683,7 +692,10 @@ class UdpTransportService extends TransportService {
   void _handleRawPacket(Uint8List data, InternetAddress address, int port) {
     // Skip punch packets (36 bytes, magic "BCPU")
     if (data.length == 36 &&
-        data[0] == 0x42 && data[1] == 0x43 && data[2] == 0x50 && data[3] == 0x55) {
+        data[0] == 0x42 &&
+        data[1] == 0x43 &&
+        data[2] == 0x50 &&
+        data[3] == 0x55) {
       return;
     }
 
@@ -696,7 +708,8 @@ class UdpTransportService extends TransportService {
     // Try to identify the sender from _rawPeerAddresses (reverse lookup)
     String? senderPubkeyHex;
     for (final entry in _rawPeerAddresses.entries) {
-      if (entry.value.ip.address == address.address && entry.value.port == port) {
+      if (entry.value.ip.address == address.address &&
+          entry.value.port == port) {
         senderPubkeyHex = entry.key;
         break;
       }
@@ -759,39 +772,29 @@ class UdpTransportService extends TransportService {
 
   /// Resolve the device's actual LAN IP address for the given port.
   ///
-  /// Enumerates network interfaces to find a usable address. Prefers IPv4
-  /// (widely supported on LANs) over IPv6 link-local. Returns null if no
-  /// suitable interface is found (no WiFi, no ethernet, etc.).
+  /// Enumerates network interfaces to find a usable non-link-local IPv6
+  /// address. Returns null if no suitable IPv6 interface is found.
   Future<String?> _resolveLocalAddress(int port) async {
     try {
       final interfaces = await NetworkInterface.list(
-        type: InternetAddressType.any,
+        type: InternetAddressType.IPv6,
         includeLoopback: false,
       );
-      // Prefer WiFi/Ethernet IPv4, then any non-loopback IPv4, then IPv6.
-      InternetAddress? bestV4;
+
       InternetAddress? bestV6;
       for (final iface in interfaces) {
         for (final addr in iface.addresses) {
           if (addr.isLoopback) continue;
-          if (addr.type == InternetAddressType.IPv4) {
-            // Prefer 192.168.x.x or 10.x.x.x (typical LAN ranges)
-            if (bestV4 == null ||
-                addr.address.startsWith('192.168') ||
-                addr.address.startsWith('10.')) {
-              bestV4 = addr;
-            }
-          } else if (addr.type == InternetAddressType.IPv6 && !addr.isLinkLocal) {
+          if (addr.type == InternetAddressType.IPv6 && !addr.isLinkLocal) {
             bestV6 ??= addr;
           }
         }
       }
-      final best = bestV4 ?? bestV6;
-      if (best == null) {
-        debugPrint('No usable network interface found for local address');
+      if (bestV6 == null) {
+        debugPrint('No usable IPv6 network interface found for local address');
         return null;
       }
-      return AddressInfo(best, port).toAddressString();
+      return AddressInfo(bestV6, port).toAddressString();
     } catch (e) {
       debugPrint('Failed to enumerate network interfaces: $e');
       return null;

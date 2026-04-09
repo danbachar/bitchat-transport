@@ -1,4 +1,4 @@
-import 'package:logger/logger.dart';
+import 'dart:io';
 import 'package:redux/redux.dart';
 import '../mesh/bloom_filter.dart';
 import '../models/identity.dart';
@@ -9,6 +9,7 @@ import '../protocol/protocol_handler.dart';
 import '../store/app_state.dart';
 import '../store/peers_actions.dart';
 import '../store/peers_state.dart';
+import '../transport/address_utils.dart';
 import 'package:flutter/foundation.dart';
 
 /// Routes incoming packets from all transports to the appropriate handlers.
@@ -23,8 +24,6 @@ import 'package:flutter/foundation.dart';
 ///
 /// All transports feed into [processPacket] — one entry point, one format.
 class MessageRouter {
-  final Logger _log = Logger();
-
   final BitchatIdentity identity;
   final Store<AppState> store;
   final ProtocolHandler protocolHandler;
@@ -53,14 +52,12 @@ class MessageRouter {
 
   /// Called when a signaling packet is received.
   /// The coordinator routes this to [SignalingService.processSignaling].
-  void Function(Uint8List senderPubkey, Uint8List payload)?
-      onSignalingReceived;
+  void Function(Uint8List senderPubkey, Uint8List payload)? onSignalingReceived;
 
   /// Called when a verified packet arrives over UDP, providing the sender's
   /// pubkey so the coordinator can map the connection (replacing tempKey-based
   /// identification that previously required ANNOUNCE as the first message).
-  void Function(Uint8List senderPubkey, String udpPeerId)?
-      onUdpPeerIdentified;
+  void Function(Uint8List senderPubkey, String udpPeerId)? onUdpPeerIdentified;
 
   /// Convenience accessor for peers state
   PeersState get _peersState => store.state.peers;
@@ -90,15 +87,19 @@ class MessageRouter {
     // Verify signature — drop invalid packets
     final isValid = await protocolHandler.verifyPacket(packet);
     if (!isValid) {
-      debugPrint('Dropping packet with invalid signature (type: ${packet.type})');
+      debugPrint(
+          'Dropping packet with invalid signature (type: ${packet.type})');
       return;
     }
+
+    String? effectiveUdpPeerId = udpPeerId;
 
     // Map incoming UDP connections from any verified packet's senderPubkey.
     // Previously required ANNOUNCE as the first message on a stream; now any
     // verified packet identifies the sender.
     if (transport == PeerTransport.udp && udpPeerId != null) {
       onUdpPeerIdentified?.call(packet.senderPubkey, udpPeerId);
+      effectiveUdpPeerId = _pubkeyToHex(packet.senderPubkey);
     }
 
     // ANNOUNCE always processed (peer may have updated info)
@@ -108,7 +109,7 @@ class MessageRouter {
         transport: transport,
         bleDeviceId: bleDeviceId,
         bleRole: bleRole,
-        udpPeerId: udpPeerId,
+        udpPeerId: effectiveUdpPeerId,
         rssi: rssi,
       );
       return;
@@ -123,8 +124,12 @@ class MessageRouter {
       case PacketType.announce:
         return; // Already handled above
       case PacketType.message:
-      // TODO: why do messages have different types than packets?
-        _handleMessage(packet, transport: transport, peerId: udpPeerId ?? bleDeviceId);
+        // TODO: why do messages have different types than packets?
+        _handleMessage(
+          packet,
+          transport: transport,
+          peerId: effectiveUdpPeerId ?? bleDeviceId,
+        );
       case PacketType.fragmentStart:
       case PacketType.fragmentContinue:
       case PacketType.fragmentEnd:
@@ -191,7 +196,8 @@ class MessageRouter {
     // udpPeerId is the sender's hex pubkey, NOT an ip:port address —
     // using it as a fallback would corrupt the peer's stored udpAddress
     // and clear their well-connected status.
-    final udpAddress = data.udpAddress;
+    final udpAddress = _normalizeUdpAddress(data.udpAddress);
+    final linkLocalAddress = _normalizeLinkLocalAddress(data.linkLocalAddress);
 
     // Set the correct BLE device ID field based on role
     String? centralId;
@@ -213,6 +219,7 @@ class MessageRouter {
       bleCentralDeviceId: centralId,
       blePeripheralDeviceId: peripheralId,
       udpAddress: udpAddress,
+      linkLocalAddress: linkLocalAddress,
     ));
 
     if (resolvedBleDeviceId != null && resolvedBleRole != null) {
@@ -258,7 +265,8 @@ class MessageRouter {
       final messageId = String.fromCharCodes(packet.payload);
       // Validate: message IDs are short alphanumeric strings (UUID v4 prefix)
       if (messageId.length > 36) {
-        debugPrint('Ignoring ACK with invalid message ID length: ${messageId.length}');
+        debugPrint(
+            'Ignoring ACK with invalid message ID length: ${messageId.length}');
         return;
       }
       onAckReceived?.call(messageId);
@@ -276,7 +284,8 @@ class MessageRouter {
     try {
       final messageId = String.fromCharCodes(packet.payload);
       if (messageId.length > 36) {
-        debugPrint('Ignoring read receipt with invalid message ID length: ${messageId.length}');
+        debugPrint(
+            'Ignoring read receipt with invalid message ID length: ${messageId.length}');
         return;
       }
       onReadReceiptReceived?.call(messageId);
@@ -298,6 +307,44 @@ class MessageRouter {
       if (a[i] != b[i]) return false;
     }
     return true;
+  }
+
+  static String _pubkeyToHex(Uint8List pubkey) =>
+      pubkey.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
+  String? _normalizeUdpAddress(String? udpAddress) {
+    if (udpAddress == null || udpAddress.isEmpty) return null;
+
+    final parsed = parseIpv6AddressString(udpAddress);
+    if (parsed != null) {
+      return parsed.toAddressString();
+    }
+
+    final legacyParsed = parseAddressString(udpAddress);
+    if (legacyParsed != null &&
+        legacyParsed.ip.type != InternetAddressType.IPv6) {
+      debugPrint('Ignoring unsupported IPv4 UDP address from ANNOUNCE: '
+          '$udpAddress. UDP transport requires IPv6.');
+      return null;
+    }
+
+    debugPrint('Ignoring malformed UDP address from ANNOUNCE: $udpAddress');
+    return null;
+  }
+
+  String? _normalizeLinkLocalAddress(String? udpAddress) {
+    final normalized = _normalizeUdpAddress(udpAddress);
+    if (normalized == null) return null;
+
+    final parsed = parseIpv6AddressString(normalized);
+    if (parsed == null) return null;
+    if (!parsed.ip.isLinkLocal) {
+      debugPrint(
+          'Ignoring non-link-local address in ANNOUNCE link-local field: '
+          '$udpAddress');
+      return null;
+    }
+    return parsed.toAddressString();
   }
 
   // ===== Deduplication API =====

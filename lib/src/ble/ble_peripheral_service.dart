@@ -1,13 +1,14 @@
 import 'dart:async';
 import 'package:ble_peripheral_bondless/ble_peripheral_bondless.dart';
-import 'package:logger/logger.dart';
 import 'package:flutter/foundation.dart';
 
 /// Callback when data is received from a connected central
-typedef PeripheralDataCallback = void Function(String deviceId, Uint8List data, int rssi);
+typedef PeripheralDataCallback = void Function(
+    String deviceId, Uint8List data, int rssi);
 
 /// Callback when a central connects/disconnects
-typedef PeripheralConnectionCallback = void Function(String deviceId, bool connected);
+typedef PeripheralConnectionCallback = void Function(
+    String deviceId, bool connected);
 
 /// BLE Peripheral service - advertises our presence and accepts connections.
 ///
@@ -19,12 +20,12 @@ typedef PeripheralConnectionCallback = void Function(String deviceId, bool conne
 /// The service UUID is derived from the user's public key (last 128 bits).
 /// Identity details are exchanged via ANNOUNCE packets after connection.
 class BlePeripheralService {
-
   /// BLE Service UUID (derived from public key)
   final String serviceUuid;
 
   /// Characteristic UUID for data transfer
-  static const String characteristicUuid = '0000ff01-0000-1000-8000-00805f9b34fb';
+  static const String characteristicUuid =
+      '0000ff01-0000-1000-8000-00805f9b34fb';
 
   /// Maximum characteristic value size
   static const int maxCharacteristicSize = 512;
@@ -56,8 +57,12 @@ class BlePeripheralService {
   /// Number of connected centrals
   int get connectedCount => _connectedCentrals.length;
 
+  /// Connected centrals as device IDs.
+  Set<String> get connectedDeviceIds => Set.unmodifiable(_connectedCentrals);
+
   /// Whether a specific device is connected as a central
-  bool isDeviceConnected(String deviceId) => _connectedCentrals.contains(deviceId);
+  bool isDeviceConnected(String deviceId) =>
+      _connectedCentrals.contains(deviceId);
 
   /// Initialize the peripheral service
   Future<void> initialize() async {
@@ -175,7 +180,7 @@ class BlePeripheralService {
     );
 
     _isAdvertising = true;
-    _active = true;  // Enable data processing
+    _active = true; // Enable data processing
     debugPrint('Started advertising: $serviceUuid');
   }
 
@@ -209,7 +214,8 @@ class BlePeripheralService {
   Future<void> disconnectAllCentrals() async {
     if (_connectedCentrals.isEmpty) return;
 
-    debugPrint('Disconnecting all ${_connectedCentrals.length} connected centrals');
+    debugPrint(
+        'Disconnecting all ${_connectedCentrals.length} connected centrals');
     final deviceIds = _connectedCentrals.toList();
 
     // Notify disconnection for each central
@@ -243,7 +249,8 @@ class BlePeripheralService {
   }
 
   /// Send data to all connected centrals
-  Future<void> broadcastData(Uint8List data, {Set<String>? excludeDevices}) async {
+  Future<void> broadcastData(Uint8List data,
+      {Set<String>? excludeDevices}) async {
     for (final deviceId in _connectedCentrals) {
       if (excludeDevices != null && excludeDevices.contains(deviceId)) continue;
       await sendData(deviceId, data);
@@ -312,7 +319,7 @@ class BlePeripheralService {
     // Block ALL writes when peripheral is inactive (BLE disabled)
     if (!_active) {
       debugPrint('Ignoring write request - peripheral inactive');
-      return WriteRequestResult();  // Acknowledge but ignore
+      return WriteRequestResult(); // Acknowledge but ignore
     }
 
     // debugPrint('Write request from $deviceId: ${value?.length ?? 0} bytes');

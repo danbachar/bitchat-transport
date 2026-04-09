@@ -6,12 +6,13 @@ import 'package:logger/logger.dart';
 
 import 'address_utils.dart';
 
-/// Discovers our public-facing IP address and combines it with the local
+/// Discovers our public-facing IPv6 address and combines it with the local
 /// UDP port to form the address we advertise to friends.
 ///
-/// Tries IPv6 first (globally routable = well-connected). If IPv6 is
-/// unavailable, falls back to IPv4 (NAT'd but hole-punchable). Never
-/// advertises private LAN addresses — they are unreachable from outside.
+/// Only IPv6 is supported. The UDP transport binds to an IPv6 socket and
+/// cannot send to IPv4 destinations. If the device has no globally routable
+/// IPv6 address, Internet transport is unavailable — the device can still
+/// communicate via BLE.
 ///
 /// The discovered address is included in ANNOUNCE messages so friends know
 /// where to send hole-punch packets and establish UDX connections.
@@ -27,11 +28,21 @@ class PublicAddressDiscovery {
   /// Cache duration (public IP doesn't change often)
   static const Duration cacheDuration = Duration(minutes: 5);
 
-  /// Discover our public IP address.
+  /// The best public IP we know of (IPv6 preferred over IPv4).
+  /// Set even when the address isn't globally routable for UDP — useful
+  /// for display purposes on NAT'd devices.
+  InternetAddress? _bestPublicIp;
+
+  /// The best public IP discovered so far (IPv6 > IPv4).
+  /// Available even when the device is behind NAT and has no open port.
+  InternetAddress? get bestPublicIp => _bestPublicIp;
+
+  /// Discover our public IPv6 address.
   ///
-  /// Tries IPv6 first (for well-connected / globally routable status).
-  /// Falls back to IPv4 (NAT'd but hole-punchable via friends).
-  /// Returns null only if both fail (no internet at all).
+  /// Returns a globally routable IPv6 address, or null if unavailable.
+  /// IPv4 is not supported — the UDP transport binds to an IPv6 socket
+  /// and cannot send to IPv4 destinations. A device without IPv6 has no
+  /// Internet transport; it can still communicate via BLE.
   ///
   /// Result is cached for [cacheDuration] to avoid excessive lookups.
   Future<InternetAddress?> discoverPublicIp() async {
@@ -42,25 +53,25 @@ class PublicAddressDiscovery {
       return _cachedPublicIp;
     }
 
-    // Try IPv6 first — a globally routable IPv6 means we're well-connected.
     final ipv6 = await _fetchPublicIp('https://ipv6.seeip.org');
-    if (ipv6 != null) {
+    if (ipv6 != null && ipv6.type == InternetAddressType.IPv6) {
       _cachedPublicIp = ipv6;
       _cacheTime = DateTime.now();
+      _bestPublicIp = ipv6;
       debugPrint('Discovered public IPv6: ${ipv6.address}');
       return ipv6;
     }
 
-    // Fall back to IPv4 — behind NAT but hole-punchable.
-    final ipv4 = await _fetchPublicIp('https://ipv4.seeip.org');
+    // No IPv6 — try IPv4 for display purposes (transport still won't work
+    // without IPv6, but we can show the user their public IP).
+    final ipv4 = await _fetchPublicIp('https://api.seeip.org');
     if (ipv4 != null) {
-      _cachedPublicIp = ipv4;
-      _cacheTime = DateTime.now();
-      debugPrint('Discovered public IPv4: ${ipv4.address}');
-      return ipv4;
+      _bestPublicIp = ipv4;
+      debugPrint('No public IPv6 — discovered public IPv4: ${ipv4.address}');
+    } else {
+      debugPrint('No public IPv6 address available — Internet transport unavailable');
     }
 
-    debugPrint('Public IP discovery failed for both IPv6 and IPv4');
     return null;
   }
 
@@ -98,20 +109,48 @@ class PublicAddressDiscovery {
 
   /// Get our public address string (public_ip:local_port).
   ///
-  /// Combines the discovered public IP with the given local port.
-  /// For IPv4, assumes the NAT preserves the port (cone NAT).
-  /// For IPv6, the address is globally routable and port is direct.
-  ///
-  /// Returns null if public IP cannot be discovered.
+  /// Combines the discovered public IPv6 with the given local port.
+  /// Returns null if no public IPv6 is available.
   Future<String?> getPublicAddress(int localPort) async {
     final ip = await discoverPublicIp();
     if (ip == null) return null;
     return AddressInfo(ip, localPort).toAddressString();
   }
 
+  /// Discover our link-local IPv6 address from network interfaces.
+  ///
+  /// Link-local addresses (fe80::) work on the same L2 segment and can
+  /// bypass WiFi AP client isolation that blocks global IPv6 traffic.
+  /// Returns the address as `[fe80::...%iface]:port` ready for use, or
+  /// null if no link-local IPv6 interface is found.
+  Future<String?> getLinkLocalAddress(int localPort) async {
+    try {
+      final interfaces = await NetworkInterface.list(
+        type: InternetAddressType.IPv6,
+        includeLoopback: false,
+      );
+
+      for (final iface in interfaces) {
+        for (final addr in iface.addresses) {
+          if (addr.isLinkLocal) {
+            // Link-local addresses need a scope/zone ID for socket ops.
+            // Dart's InternetAddress.address includes it (e.g. fe80::1%wlan0).
+            final llAddr = AddressInfo(addr, localPort).toAddressString();
+            debugPrint('Discovered link-local IPv6: ${addr.address} on ${iface.name}');
+            return llAddr;
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('Link-local discovery failed: $e');
+    }
+    return null;
+  }
+
   /// Invalidate the cached public IP (e.g. on network change).
   void invalidateCache() {
     _cachedPublicIp = null;
     _cacheTime = null;
+    _bestPublicIp = null;
   }
 }

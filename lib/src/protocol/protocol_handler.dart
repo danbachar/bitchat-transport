@@ -19,13 +19,16 @@ class ProtocolHandler {
 
   /// Create ANNOUNCE payload
   ///
-  /// Format: [pubkey(32) + version(2) + nickLen(1) + nick + addrLen(2) + addr?]
+  /// Format: [pubkey(32) + version(2) + nickLen(1) + nick + addrLen(2) + addr? + llAddrLen(2) + llAddr?]
   ///
   /// The address field is included when the sender has a UDP address.
   /// Omitted (addrLen 0) only for BLE announcements to non-friends (privacy).
-  Uint8List createAnnouncePayload({String? address}) {
+  /// The link-local address is optional and only included for BLE friends on
+  /// the same LAN — used as a faster alternative to global IPv6.
+  Uint8List createAnnouncePayload({String? address, String? linkLocalAddress}) {
     final nicknameBytes = Uint8List.fromList(identity.nickname.codeUnits);
     final addressBytes = address != null ? Uint8List.fromList(address.codeUnits) : Uint8List(0);
+    final llAddrBytes = linkLocalAddress != null ? Uint8List.fromList(linkLocalAddress.codeUnits) : Uint8List(0);
     final buffer = BytesBuilder();
 
     // Pubkey (32 bytes)
@@ -46,6 +49,14 @@ class ProtocolHandler {
     buffer.add(addrLenBytes.buffer.asUint8List());
     if (addressBytes.isNotEmpty) {
       buffer.add(addressBytes);
+    }
+
+    // Link-local address length (2 bytes) + link-local address
+    final llAddrLenBytes = ByteData(2);
+    llAddrLenBytes.setUint16(0, llAddrBytes.length, Endian.big);
+    buffer.add(llAddrLenBytes.buffer.asUint8List());
+    if (llAddrBytes.isNotEmpty) {
+      buffer.add(llAddrBytes);
     }
 
     return buffer.toBytes();
@@ -84,8 +95,8 @@ class ProtocolHandler {
 
   /// Decode ANNOUNCE payload
   ///
-  /// Format: [pubkey(32) + version(2) + nickLen(1) + nick + addrLen(2) + addr?]
-  /// Returns: AnnounceData with public key, nickname, version, and optional address
+  /// Format: [pubkey(32) + version(2) + nickLen(1) + nick + addrLen(2) + addr? + llAddrLen(2) + llAddr?]
+  /// Returns: AnnounceData with public key, nickname, version, optional address, and optional link-local
   AnnounceData decodeAnnounce(Uint8List data) {
     var offset = 0;
 
@@ -112,6 +123,19 @@ class ProtocolHandler {
       offset += 2;
       if (addrLength > 0 && offset + addrLength <= data.length) {
         address = String.fromCharCodes(data.sublist(offset, offset + addrLength));
+        offset += addrLength;
+      }
+    }
+
+    // Link-local address length (2 bytes) + link-local address (optional)
+    String? linkLocalAddress;
+    if (offset + 2 <= data.length) {
+      final llAddrLength = ByteData.view(data.buffer, data.offsetInBytes + offset, 2)
+          .getUint16(0, Endian.big);
+      offset += 2;
+      if (llAddrLength > 0 && offset + llAddrLength <= data.length) {
+        linkLocalAddress = String.fromCharCodes(data.sublist(offset, offset + llAddrLength));
+        offset += llAddrLength;
       }
     }
 
@@ -120,6 +144,7 @@ class ProtocolHandler {
       nickname: nickname,
       protocolVersion: version,
       udpAddress: address,
+      linkLocalAddress: linkLocalAddress,
     );
   }
 
@@ -183,14 +208,16 @@ class AnnounceData {
   final String nickname;
   final int protocolVersion;
   final String? udpAddress;
+  final String? linkLocalAddress;
 
   const AnnounceData({
     required this.publicKey,
     required this.nickname,
     required this.protocolVersion,
     this.udpAddress,
+    this.linkLocalAddress,
   });
 
   @override
-  String toString() => 'AnnounceData($nickname, v$protocolVersion${udpAddress != null ? ", addr: $udpAddress" : ""})';
+  String toString() => 'AnnounceData($nickname, v$protocolVersion${udpAddress != null ? ", addr: $udpAddress" : ""}${linkLocalAddress != null ? ", ll: $linkLocalAddress" : ""})';
 }

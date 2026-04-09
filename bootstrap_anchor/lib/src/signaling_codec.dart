@@ -1,29 +1,13 @@
 import 'dart:typed_data';
 
-/// Signaling message types for well-connected friend coordination.
-///
-/// These ride inside [BitchatPacket] payloads with [PacketType.signaling].
-/// Authentication is handled by the outer BitchatPacket's Ed25519 signature.
+/// Signaling message types — identical to the client-side SignalingType.
 enum SignalingType {
-  /// "What's the address of pubkey X?" — agent → friend
   addrQuery(0x02),
-
-  /// "Pubkey X is at ip:port Y" (or not found) — friend → agent
   addrResponse(0x03),
-
-  /// "Please coordinate a hole-punch with pubkey X" — agent → friend
   punchRequest(0x04),
-
-  /// "Start sending UDP to ip:port Y for hole-punch" — friend → agent
   punchInitiate(0x05),
-
-  /// "I've opened my NAT, tell the other side" — agent → friend
   punchReady(0x06),
-
-  /// "Your actual public address is ip:port" — friend → agent (triggered by ANNOUNCE)
   addrReflect(0x07),
-
-  /// "Here's my full friend list" — owner → anchor server
   friendsSync(0x08);
 
   final int value;
@@ -39,177 +23,79 @@ enum SignalingType {
 
 // ===== Message classes =====
 
-/// Base class for decoded signaling messages.
 sealed class SignalingMessage {
   SignalingType get type;
 }
 
-/// Agent asks a well-connected friend for another peer's address.
 class AddrQueryMessage extends SignalingMessage {
   @override
   SignalingType get type => SignalingType.addrQuery;
-
-  /// The public key of the peer whose address we want (32 bytes).
   final Uint8List targetPubkey;
-
   AddrQueryMessage({required this.targetPubkey});
-
-  @override
-  String toString() =>
-      'AddrQuery(target: ${targetPubkey.sublist(0, 4).map((b) => b.toRadixString(16).padLeft(2, '0')).join()}...)';
 }
 
-/// Response to an address query: the peer's address (or not found).
 class AddrResponseMessage extends SignalingMessage {
   @override
   SignalingType get type => SignalingType.addrResponse;
-
-  /// The public key that was queried (32 bytes).
   final Uint8List targetPubkey;
-
-  /// The peer's IP address, or null if not found.
   final String? ip;
-
-  /// The peer's UDP port, or null if not found.
   final int? port;
-
-  /// Whether the peer was found in the address table.
   bool get found => ip != null && port != null;
-
-  AddrResponseMessage({
-    required this.targetPubkey,
-    this.ip,
-    this.port,
-  });
-
-  @override
-  String toString() =>
-      'AddrResponse(target: ${targetPubkey.sublist(0, 4).map((b) => b.toRadixString(16).padLeft(2, '0')).join()}..., '
-      '${found ? "$ip:$port" : "not found"})';
+  AddrResponseMessage({required this.targetPubkey, this.ip, this.port});
 }
 
-/// Agent requests a well-connected friend to coordinate a hole-punch.
 class PunchRequestMessage extends SignalingMessage {
   @override
   SignalingType get type => SignalingType.punchRequest;
-
-  /// The public key of the peer we want to punch through to (32 bytes).
   final Uint8List targetPubkey;
-
   PunchRequestMessage({required this.targetPubkey});
-
-  @override
-  String toString() =>
-      'PunchRequest(target: ${targetPubkey.sublist(0, 4).map((b) => b.toRadixString(16).padLeft(2, '0')).join()}...)';
 }
 
-/// Well-connected friend tells agent to start hole-punching to a peer.
 class PunchInitiateMessage extends SignalingMessage {
   @override
   SignalingType get type => SignalingType.punchInitiate;
-
-  /// The public key of the peer to punch toward (32 bytes).
   final Uint8List peerPubkey;
-
-  /// The peer's IP address to send punch packets to.
   final String ip;
-
-  /// The peer's UDP port to send punch packets to.
   final int port;
-
-  PunchInitiateMessage({
-    required this.peerPubkey,
-    required this.ip,
-    required this.port,
-  });
-
-  @override
-  String toString() =>
-      'PunchInitiate(peer: ${peerPubkey.sublist(0, 4).map((b) => b.toRadixString(16).padLeft(2, '0')).join()}..., '
-      '$ip:$port)';
+  PunchInitiateMessage(
+      {required this.peerPubkey, required this.ip, required this.port});
 }
 
-/// Agent tells a well-connected friend that its NAT is open.
 class PunchReadyMessage extends SignalingMessage {
   @override
   SignalingType get type => SignalingType.punchReady;
-
-  /// The public key of the peer we're punching toward (32 bytes).
   final Uint8List peerPubkey;
-
   PunchReadyMessage({required this.peerPubkey});
-
-  @override
-  String toString() =>
-      'PunchReady(peer: ${peerPubkey.sublist(0, 4).map((b) => b.toRadixString(16).padLeft(2, '0')).join()}...)';
 }
 
-/// Well-connected friend reflects the agent's observed public address.
-///
-/// When a well-connected friend receives an ANNOUNCE over UDP, it compares
-/// the claimed address in the payload with the observed source address on the
-/// UDX connection. If they differ, it sends ADDR_REFLECT back with the actual
-/// address — letting the agent learn its true NAT-translated address,
-/// including the correct external port.
 class AddrReflectMessage extends SignalingMessage {
   @override
   SignalingType get type => SignalingType.addrReflect;
-
-  /// The agent's observed public IP address.
   final String ip;
-
-  /// The agent's observed public UDP port.
   final int port;
-
   AddrReflectMessage({required this.ip, required this.port});
-
-  @override
-  String toString() => 'AddrReflect($ip:$port)';
 }
 
 /// Owner pushes their full friend list to the anchor server.
-///
-/// Sent on first connection to the anchor and whenever the friend list changes.
-/// The anchor replaces its entire friend list with this data.
 class FriendsSyncMessage extends SignalingMessage {
   @override
   SignalingType get type => SignalingType.friendsSync;
-
-  /// List of friends to sync.
   final List<FriendsSyncEntry> friends;
-
   FriendsSyncMessage({required this.friends});
-
-  @override
-  String toString() => 'FriendsSync(${friends.length} friends)';
 }
 
-/// A single friend entry in a FRIENDS_SYNC message.
 class FriendsSyncEntry {
   final Uint8List pubkey;
   final String nickname;
-
   FriendsSyncEntry({required this.pubkey, required this.nickname});
 }
 
 // ===== Codec =====
 
 /// Binary encoder/decoder for signaling messages.
-///
-/// Wire formats:
-///
-/// ```
-/// ADDR_QUERY     : type(1) + targetPubkey(32)
-/// ADDR_RESPONSE  : type(1) + targetPubkey(32) + found(1) + [ipLen(2) + ipBytes + port(2)]
-/// PUNCH_REQUEST  : type(1) + targetPubkey(32)
-/// PUNCH_INITIATE : type(1) + peerPubkey(32) + ipLen(2) + ipBytes + port(2)
-/// PUNCH_READY    : type(1) + peerPubkey(32)
-/// ADDR_REFLECT   : type(1) + ipLen(2) + ipBytes + port(2)
-/// ```
+/// Wire-compatible with the Flutter client's SignalingCodec.
 class SignalingCodec {
   const SignalingCodec();
-
-  // ===== Encoding =====
 
   Uint8List encode(SignalingMessage msg) {
     return switch (msg) {
@@ -222,6 +108,26 @@ class SignalingCodec {
       FriendsSyncMessage() => _encodeFriendsSync(msg),
     };
   }
+
+  SignalingMessage decode(Uint8List data) {
+    if (data.isEmpty) {
+      throw const FormatException('Empty signaling payload');
+    }
+    final type = SignalingType.fromValue(data[0]);
+    final payload = Uint8List.sublistView(data, 1);
+
+    return switch (type) {
+      SignalingType.addrQuery => _decodeAddrQuery(payload),
+      SignalingType.addrResponse => _decodeAddrResponse(payload),
+      SignalingType.punchRequest => _decodePunchRequest(payload),
+      SignalingType.punchInitiate => _decodePunchInitiate(payload),
+      SignalingType.punchReady => _decodePunchReady(payload),
+      SignalingType.addrReflect => _decodeAddrReflect(payload),
+      SignalingType.friendsSync => _decodeFriendsSync(payload),
+    };
+  }
+
+  // ===== Encoding =====
 
   Uint8List _encodeAddrQuery(AddrQueryMessage msg) {
     final buffer = BytesBuilder();
@@ -281,35 +187,12 @@ class SignalingCodec {
 
   // ===== Decoding =====
 
-  /// Decode a signaling payload into a [SignalingMessage].
-  ///
-  /// Throws [FormatException] if the payload is malformed.
-  SignalingMessage decode(Uint8List data) {
-    if (data.isEmpty) {
-      throw const FormatException('Empty signaling payload');
-    }
-
-    final type = SignalingType.fromValue(data[0]);
-    final payload = Uint8List.sublistView(data, 1);
-
-    return switch (type) {
-      SignalingType.addrQuery => _decodeAddrQuery(payload),
-      SignalingType.addrResponse => _decodeAddrResponse(payload),
-      SignalingType.punchRequest => _decodePunchRequest(payload),
-      SignalingType.punchInitiate => _decodePunchInitiate(payload),
-      SignalingType.punchReady => _decodePunchReady(payload),
-      SignalingType.addrReflect => _decodeAddrReflect(payload),
-      SignalingType.friendsSync => _decodeFriendsSync(payload),
-    };
-  }
-
   AddrQueryMessage _decodeAddrQuery(Uint8List data) {
     if (data.length < 32) {
       throw const FormatException('AddrQuery payload too short');
     }
     return AddrQueryMessage(
-      targetPubkey: Uint8List.fromList(data.sublist(0, 32)),
-    );
+        targetPubkey: Uint8List.fromList(data.sublist(0, 32)));
   }
 
   AddrResponseMessage _decodeAddrResponse(Uint8List data) {
@@ -318,23 +201,16 @@ class SignalingCodec {
     }
     final targetPubkey = Uint8List.fromList(data.sublist(0, 32));
     final found = data[32] != 0;
-
     if (!found) {
       return AddrResponseMessage(targetPubkey: targetPubkey);
     }
-
     var offset = 33;
     final ipLen = _readUint16(data, offset);
     offset += 2;
     final ip = String.fromCharCodes(data.sublist(offset, offset + ipLen));
     offset += ipLen;
     final port = _readUint16(data, offset);
-
-    return AddrResponseMessage(
-      targetPubkey: targetPubkey,
-      ip: ip,
-      port: port,
-    );
+    return AddrResponseMessage(targetPubkey: targetPubkey, ip: ip, port: port);
   }
 
   PunchRequestMessage _decodePunchRequest(Uint8List data) {
@@ -342,8 +218,7 @@ class SignalingCodec {
       throw const FormatException('PunchRequest payload too short');
     }
     return PunchRequestMessage(
-      targetPubkey: Uint8List.fromList(data.sublist(0, 32)),
-    );
+        targetPubkey: Uint8List.fromList(data.sublist(0, 32)));
   }
 
   PunchInitiateMessage _decodePunchInitiate(Uint8List data) {
@@ -357,12 +232,7 @@ class SignalingCodec {
     final ip = String.fromCharCodes(data.sublist(offset, offset + ipLen));
     offset += ipLen;
     final port = _readUint16(data, offset);
-
-    return PunchInitiateMessage(
-      peerPubkey: peerPubkey,
-      ip: ip,
-      port: port,
-    );
+    return PunchInitiateMessage(peerPubkey: peerPubkey, ip: ip, port: port);
   }
 
   PunchReadyMessage _decodePunchReady(Uint8List data) {
@@ -370,8 +240,7 @@ class SignalingCodec {
       throw const FormatException('PunchReady payload too short');
     }
     return PunchReadyMessage(
-      peerPubkey: Uint8List.fromList(data.sublist(0, 32)),
-    );
+        peerPubkey: Uint8List.fromList(data.sublist(0, 32)));
   }
 
   AddrReflectMessage _decodeAddrReflect(Uint8List data) {

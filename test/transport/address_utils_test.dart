@@ -31,7 +31,8 @@ void main() {
       });
 
       test('parses full-length IPv6', () {
-        final result = parseAddressString('[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:443');
+        final result =
+            parseAddressString('[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:443');
         expect(result, isNotNull);
         expect(result!.port, equals(443));
       });
@@ -129,6 +130,29 @@ void main() {
     });
   });
 
+  group('parseIpv6AddressString', () {
+    test('accepts bracketed IPv6 addresses', () {
+      final result = parseIpv6AddressString('[2001:db8::1]:4242');
+      expect(result, isNotNull);
+      expect(result!.ip.address, '2001:db8::1');
+      expect(result.port, 4242);
+    });
+
+    test('rejects IPv4 addresses', () {
+      expect(parseIpv6AddressString('192.168.1.5:4242'), isNull);
+    });
+  });
+
+  group('isIpv6AddressString', () {
+    test('returns true for valid IPv6 address strings', () {
+      expect(isIpv6AddressString('[2001:db8::1]:4242'), isTrue);
+    });
+
+    test('returns false for IPv4 address strings', () {
+      expect(isIpv6AddressString('192.168.1.5:4242'), isFalse);
+    });
+  });
+
   // =========================================================================
   // AddressInfo.toAddressString
   // =========================================================================
@@ -187,18 +211,25 @@ void main() {
   // =========================================================================
   group('isGloballyRoutableIPv6', () {
     group('returns true for globally routable addresses', () {
-      test('standard global unicast (2001:db8 is documentation, but 2607:: is real)', () {
+      test(
+          'standard global unicast (2001:db8 is documentation, but 2607:: is real)',
+          () {
         // Google's public DNS
-        expect(isGloballyRoutableIPv6(InternetAddress('2607:f8b0:4004:800::200e')), isTrue);
+        expect(
+            isGloballyRoutableIPv6(InternetAddress('2607:f8b0:4004:800::200e')),
+            isTrue);
       });
 
       test('another global unicast', () {
-        expect(isGloballyRoutableIPv6(InternetAddress('2a00:1450:4009:823::200e')), isTrue);
+        expect(
+            isGloballyRoutableIPv6(InternetAddress('2a00:1450:4009:823::200e')),
+            isTrue);
       });
 
       test('global unicast starting with 2001:4', () {
         // Not documentation (2001:db8), not Teredo (2001:0000)
-        expect(isGloballyRoutableIPv6(InternetAddress('2001:4860:4860::8888')), isTrue);
+        expect(isGloballyRoutableIPv6(InternetAddress('2001:4860:4860::8888')),
+            isTrue);
       });
 
       test('global unicast starting with 2400::', () {
@@ -232,7 +263,8 @@ void main() {
       });
 
       test('link-local (fe80::abcd:1234)', () {
-        expect(isGloballyRoutableIPv6(InternetAddress('fe80::abcd:1234')), isFalse);
+        expect(isGloballyRoutableIPv6(InternetAddress('fe80::abcd:1234')),
+            isFalse);
       });
 
       test('ULA fd00::', () {
@@ -244,7 +276,8 @@ void main() {
       });
 
       test('ULA fdxx::xx', () {
-        expect(isGloballyRoutableIPv6(InternetAddress('fd12:3456:789a::1')), isFalse);
+        expect(isGloballyRoutableIPv6(InternetAddress('fd12:3456:789a::1')),
+            isFalse);
       });
 
       test('documentation (2001:db8::)', () {
@@ -252,11 +285,13 @@ void main() {
       });
 
       test('documentation (2001:0db8:85a3::)', () {
-        expect(isGloballyRoutableIPv6(InternetAddress('2001:0db8:85a3::1')), isFalse);
+        expect(isGloballyRoutableIPv6(InternetAddress('2001:0db8:85a3::1')),
+            isFalse);
       });
 
       test('Teredo (2001:0000::)', () {
-        expect(isGloballyRoutableIPv6(InternetAddress('2001:0000::1')), isFalse);
+        expect(
+            isGloballyRoutableIPv6(InternetAddress('2001:0000::1')), isFalse);
       });
 
       test('Teredo (2001::1) — note: 2001:0:... is Teredo', () {
@@ -270,7 +305,8 @@ void main() {
       });
 
       test('6to4 (2002:c0a8::)', () {
-        expect(isGloballyRoutableIPv6(InternetAddress('2002:c0a8::1')), isFalse);
+        expect(
+            isGloballyRoutableIPv6(InternetAddress('2002:c0a8::1')), isFalse);
       });
 
       test('multicast (ff00::)', () {
@@ -299,17 +335,24 @@ void main() {
 
     group('returns false for IPv4-mapped/compatible IPv6', () {
       test('IPv4-mapped (::ffff:192.168.1.1)', () {
-        expect(isGloballyRoutableIPv6(InternetAddress('::ffff:192.168.1.1')), isFalse);
+        expect(isGloballyRoutableIPv6(InternetAddress('::ffff:192.168.1.1')),
+            isFalse);
       });
 
       test('IPv4-mapped (::ffff:127.0.0.1)', () {
-        expect(isGloballyRoutableIPv6(InternetAddress('::ffff:127.0.0.1')), isFalse);
+        expect(isGloballyRoutableIPv6(InternetAddress('::ffff:127.0.0.1')),
+            isFalse);
       });
     });
 
     group('edge cases', () {
-      test('2001:db8:ffff:ffff:ffff:ffff:ffff:ffff (documentation range boundary)', () {
-        expect(isGloballyRoutableIPv6(InternetAddress('2001:db8:ffff:ffff:ffff:ffff:ffff:ffff')), isFalse);
+      test(
+          '2001:db8:ffff:ffff:ffff:ffff:ffff:ffff (documentation range boundary)',
+          () {
+        expect(
+            isGloballyRoutableIPv6(
+                InternetAddress('2001:db8:ffff:ffff:ffff:ffff:ffff:ffff')),
+            isFalse);
       });
 
       test('2001:db9::1 (just past documentation range — IS routable)', () {
@@ -344,7 +387,8 @@ void main() {
   // =========================================================================
   group('isGloballyRoutableAddress', () {
     test('returns true for routable IPv6 address string', () {
-      expect(isGloballyRoutableAddress('[2607:f8b0:4004:800::200e]:4242'), isTrue);
+      expect(
+          isGloballyRoutableAddress('[2607:f8b0:4004:800::200e]:4242'), isTrue);
     });
 
     test('returns false for non-routable IPv6 address string', () {

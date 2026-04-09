@@ -27,5 +27,9 @@ TransportsState transportsReducer(TransportsState state, TransportAction action)
     return state.copyWith(publicAddress: action.publicAddress);
   }
 
+  if (action is PublicIpUpdatedAction) {
+    return state.copyWith(publicIp: action.publicIp);
+  }
+
   return state;
 }

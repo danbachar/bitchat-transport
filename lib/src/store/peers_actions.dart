@@ -118,6 +118,7 @@ class PeerAnnounceReceivedAction extends PeerAction {
   final String? blePeripheralDeviceId;
 
   final String? udpAddress;
+  final String? linkLocalAddress;
 
   PeerAnnounceReceivedAction({
     required this.publicKey,
@@ -128,6 +129,7 @@ class PeerAnnounceReceivedAction extends PeerAction {
     this.bleCentralDeviceId,
     this.blePeripheralDeviceId,
     this.udpAddress,
+    this.linkLocalAddress,
   });
 }
 
@@ -150,6 +152,18 @@ class PeerBleDisconnectedAction extends PeerAction {
   final BleRole? role;
 
   PeerBleDisconnectedAction(this.publicKey, {this.role});
+}
+
+/// A UDX connection to a peer was established or closed.
+/// Updates [PeerState.hasLiveUdpConnection].
+class PeerUdpConnectionChangedAction extends PeerAction {
+  final String pubkeyHex;
+  final bool connected;
+
+  PeerUdpConnectionChangedAction({
+    required this.pubkeyHex,
+    required this.connected,
+  });
 }
 
 /// Mark peer as disconnected from UDP
