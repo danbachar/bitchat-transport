@@ -709,19 +709,31 @@ class _BitchatHomeState extends State<BitchatHome>
     final peerHex = peer.pubkeyHex;
     final myHex = ChatMessage.pubkeyToHex(_identity!.publicKey);
 
-    // Create and record the friend request in Redux
-    appStore.dispatch(CreateFriendRequestAction(
-      peerPubkeyHex: peerHex,
-      nickname: peer.displayName,
-    ));
-
     // Create the friendship offer block
     final block = FriendshipOfferBlock(
       message: 'Hey, let\'s be friends!',
     );
 
     // Send via Bitchat
-    await _bitchat!.send(peer.publicKey, block.serialize());
+    final messageId = await _bitchat!.send(peer.publicKey, block.serialize());
+    if (messageId == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content:
+                Text('Failed to send friend request to ${peer.displayName}'),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+      return;
+    }
+
+    // Create and record the friend request in Redux
+    appStore.dispatch(CreateFriendRequestAction(
+      peerPubkeyHex: peerHex,
+      nickname: peer.displayName,
+    ));
 
     // Save as a chat message in Redux
     appStore.dispatch(SaveChatMessageAction(

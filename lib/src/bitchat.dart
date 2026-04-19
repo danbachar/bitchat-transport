@@ -1020,7 +1020,7 @@ class Bitchat {
     // All transports failed
     store.dispatch(MessageFailedAction(messageId: messageId));
     debugPrint('All transports failed to send message to ${peer.displayName}');
-    return messageId;
+    return null;
   }
 
   /// Send a read receipt to the original sender of a message.
