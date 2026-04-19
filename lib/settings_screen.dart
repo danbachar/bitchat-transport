@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:redux/redux.dart';
 import 'debug_log_screen.dart';
 import 'src/store/app_state.dart';
 import 'src/store/settings_actions.dart';
+import 'src/store/transports_state.dart';
 import 'src/transport/transport_service.dart';
 
 /// Settings screen for configuring transport protocols
@@ -25,6 +28,7 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   late bool _bluetoothEnabled;
   late bool _udpEnabled;
+  StreamSubscription<AppState>? _storeSubscription;
 
   late final TextEditingController _anchorAddressController;
 
@@ -37,10 +41,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final settings = widget.store.state.settings;
     _anchorAddressController =
         TextEditingController(text: settings.anchorAddress ?? '');
+    _storeSubscription = widget.store.onChange.listen((state) {
+      final settings = state.settings;
+      if (_bluetoothEnabled != settings.bluetoothEnabled) {
+        _bluetoothEnabled = settings.bluetoothEnabled;
+      }
+      if (_udpEnabled != settings.udpEnabled) {
+        _udpEnabled = settings.udpEnabled;
+      }
+      if (mounted) {
+        setState(() {});
+      }
+    });
   }
 
   @override
   void dispose() {
+    _storeSubscription?.cancel();
     _anchorAddressController.dispose();
     super.dispose();
   }
@@ -301,6 +318,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final isWellConnected = transports.isWellConnected;
     final publicAddress = transports.publicAddress;
     final publicIp = transports.publicIp;
+    final connectionType = transports.networkConnectionType;
 
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -339,6 +357,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       color: Colors.grey[500],
                     ),
                   ),
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      Icon(
+                        _networkTypeIcon(connectionType),
+                        size: 14,
+                        color: Colors.grey[400],
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        'Connection type: ${connectionType.displayName}',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.grey[400],
+                        ),
+                      ),
+                    ],
+                  ),
                   if (publicIp != null || publicAddress != null) ...[
                     const SizedBox(height: 6),
                     Text(
@@ -357,6 +393,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
       ),
     );
+  }
+
+  IconData _networkTypeIcon(NetworkConnectionType connectionType) {
+    switch (connectionType) {
+      case NetworkConnectionType.wifi:
+        return Icons.wifi;
+      case NetworkConnectionType.cellular:
+        return Icons.signal_cellular_alt;
+      case NetworkConnectionType.ethernet:
+        return Icons.settings_ethernet;
+      case NetworkConnectionType.vpn:
+        return Icons.lock_outline;
+      case NetworkConnectionType.other:
+        return Icons.device_hub_outlined;
+      case NetworkConnectionType.offline:
+        return Icons.portable_wifi_off;
+    }
   }
 
   Widget _buildInfoCard() {

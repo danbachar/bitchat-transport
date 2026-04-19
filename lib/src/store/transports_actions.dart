@@ -1,4 +1,5 @@
 import '../transport/transport_service.dart';
+import 'transports_state.dart';
 
 /// Base class for transport state actions
 abstract class TransportAction {}
@@ -38,4 +39,14 @@ class PublicIpUpdatedAction extends TransportAction {
   final String publicIp;
 
   PublicIpUpdatedAction(this.publicIp);
+}
+
+/// Clears the discovered public address and public IP.
+class ClearPublicConnectivityAction extends TransportAction {}
+
+/// Updates the current Internet connection type (Wi-Fi, cellular, etc.).
+class NetworkConnectionTypeUpdatedAction extends TransportAction {
+  final NetworkConnectionType connectionType;
+
+  NetworkConnectionTypeUpdatedAction(this.connectionType);
 }

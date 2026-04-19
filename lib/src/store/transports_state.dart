@@ -2,6 +2,34 @@ import 'package:flutter/foundation.dart';
 import '../transport/transport_service.dart';
 import '../transport/address_utils.dart';
 
+enum NetworkConnectionType {
+  wifi,
+  cellular,
+  ethernet,
+  vpn,
+  other,
+  offline,
+}
+
+extension NetworkConnectionTypeX on NetworkConnectionType {
+  String get displayName {
+    switch (this) {
+      case NetworkConnectionType.wifi:
+        return 'Wi-Fi';
+      case NetworkConnectionType.cellular:
+        return 'Cellular';
+      case NetworkConnectionType.ethernet:
+        return 'Ethernet';
+      case NetworkConnectionType.vpn:
+        return 'VPN';
+      case NetworkConnectionType.other:
+        return 'Other';
+      case NetworkConnectionType.offline:
+        return 'Offline';
+    }
+  }
+}
+
 /// Per-transport lifecycle state for Redux store.
 ///
 /// Tracks the lifecycle state of each transport independently,
@@ -31,6 +59,9 @@ class TransportsState {
   /// reflection. Prefers IPv6 over IPv4.
   final String? publicIp;
 
+  /// The current IP network type used for Internet connectivity.
+  final NetworkConnectionType networkConnectionType;
+
   const TransportsState({
     this.bleState = TransportState.uninitialized,
     this.udpState = TransportState.uninitialized,
@@ -39,14 +70,14 @@ class TransportsState {
     this.bleScanning = false,
     this.publicAddress,
     this.publicIp,
+    this.networkConnectionType = NetworkConnectionType.offline,
   });
 
   static const TransportsState initial = TransportsState();
 
   /// Whether any transport is active
   bool get isAnyActive =>
-      bleState == TransportState.active ||
-      udpState == TransportState.active;
+      bleState == TransportState.active || udpState == TransportState.active;
 
   /// Whether the system is in a healthy state (any transport active)
   bool get isHealthy => isAnyActive;
@@ -67,12 +98,10 @@ class TransportsState {
         udpState == TransportState.initializing) {
       return 'Starting...';
     }
-    if (bleState == TransportState.ready ||
-        udpState == TransportState.ready) {
+    if (bleState == TransportState.ready || udpState == TransportState.ready) {
       return 'Ready';
     }
-    if (bleState == TransportState.error ||
-        udpState == TransportState.error) {
+    if (bleState == TransportState.error || udpState == TransportState.error) {
       return bleError ?? udpError ?? 'Error';
     }
     return 'Initializing...';
@@ -86,6 +115,7 @@ class TransportsState {
     bool? bleScanning,
     String? publicAddress,
     String? publicIp,
+    NetworkConnectionType? networkConnectionType,
   }) {
     return TransportsState(
       bleState: bleState ?? this.bleState,
@@ -95,6 +125,8 @@ class TransportsState {
       bleScanning: bleScanning ?? this.bleScanning,
       publicAddress: publicAddress ?? this.publicAddress,
       publicIp: publicIp ?? this.publicIp,
+      networkConnectionType:
+          networkConnectionType ?? this.networkConnectionType,
     );
   }
 
@@ -109,6 +141,21 @@ class TransportsState {
       bleScanning: bleScanning,
       publicAddress: null,
       publicIp: publicIp,
+      networkConnectionType: networkConnectionType,
+    );
+  }
+
+  /// Create a copy with both publicAddress and publicIp cleared.
+  TransportsState clearPublicConnectivity() {
+    return TransportsState(
+      bleState: bleState,
+      udpState: udpState,
+      bleError: bleError,
+      udpError: udpError,
+      bleScanning: bleScanning,
+      publicAddress: null,
+      publicIp: null,
+      networkConnectionType: networkConnectionType,
     );
   }
 
@@ -123,7 +170,8 @@ class TransportsState {
           udpError == other.udpError &&
           bleScanning == other.bleScanning &&
           publicAddress == other.publicAddress &&
-          publicIp == other.publicIp;
+          publicIp == other.publicIp &&
+          networkConnectionType == other.networkConnectionType;
 
   @override
   int get hashCode => Object.hash(
@@ -134,9 +182,10 @@ class TransportsState {
         bleScanning,
         publicAddress,
         publicIp,
+        networkConnectionType,
       );
 
   @override
   String toString() =>
-      'TransportsState(ble: $bleState, udp: $udpState, scanning: $bleScanning, publicAddr: $publicAddress, publicIp: $publicIp)';
+      'TransportsState(ble: $bleState, udp: $udpState, scanning: $bleScanning, publicAddr: $publicAddress, publicIp: $publicIp, network: ${networkConnectionType.displayName})';
 }

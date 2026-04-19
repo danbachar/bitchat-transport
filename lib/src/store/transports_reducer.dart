@@ -1,7 +1,8 @@
 import 'transports_state.dart';
 import 'transports_actions.dart';
 
-TransportsState transportsReducer(TransportsState state, TransportAction action) {
+TransportsState transportsReducer(
+    TransportsState state, TransportAction action) {
   if (action is BleTransportStateChangedAction) {
     return state.copyWith(
       bleState: action.state,
@@ -29,6 +30,14 @@ TransportsState transportsReducer(TransportsState state, TransportAction action)
 
   if (action is PublicIpUpdatedAction) {
     return state.copyWith(publicIp: action.publicIp);
+  }
+
+  if (action is ClearPublicConnectivityAction) {
+    return state.clearPublicConnectivity();
+  }
+
+  if (action is NetworkConnectionTypeUpdatedAction) {
+    return state.copyWith(networkConnectionType: action.connectionType);
   }
 
   return state;

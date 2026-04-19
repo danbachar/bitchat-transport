@@ -137,6 +137,7 @@ class Bitchat {
 
   /// The in-flight background public-address discovery task.
   Future<void>? _publicAddressDiscoveryFuture;
+  int _publicAddressDiscoveryGeneration = 0;
 
   /// Timer for periodic ANNOUNCE broadcasts
   Timer? _announceTimer;
@@ -240,6 +241,7 @@ class Bitchat {
     _connectivitySubscription = Connectivity().onConnectivityChanged.listen(
           _onConnectivityChanged,
         );
+    _seedConnectivityState();
 
     // Listen to Redux store changes for settings and friendship updates
     _lastSettingsState = store.state.settings;
@@ -582,6 +584,62 @@ class Bitchat {
     _signalingService.sendFriendsSync(_anchorPubkey!);
   }
 
+  void _seedConnectivityState() {
+    unawaited(() async {
+      try {
+        final results = await Connectivity().checkConnectivity();
+        final ipResults = _normalizeConnectivityResults(results);
+        _lastConnectivityResults ??= ipResults;
+        store.dispatch(NetworkConnectionTypeUpdatedAction(
+          _connectionTypeFromResults(ipResults),
+        ));
+      } catch (e) {
+        debugPrint('Failed to read initial connectivity state: $e');
+      }
+    }());
+  }
+
+  List<ConnectivityResult> _normalizeConnectivityResults(
+    List<ConnectivityResult> results,
+  ) {
+    final ipResults =
+        results.where((r) => r != ConnectivityResult.bluetooth).toList();
+    if (ipResults.isEmpty) {
+      return [ConnectivityResult.none];
+    }
+    return ipResults;
+  }
+
+  NetworkConnectionType _connectionTypeFromResults(
+    List<ConnectivityResult> results,
+  ) {
+    if (results.contains(ConnectivityResult.none)) {
+      return NetworkConnectionType.offline;
+    }
+    if (results.contains(ConnectivityResult.wifi)) {
+      return NetworkConnectionType.wifi;
+    }
+    if (results.contains(ConnectivityResult.mobile)) {
+      return NetworkConnectionType.cellular;
+    }
+    if (results.contains(ConnectivityResult.ethernet)) {
+      return NetworkConnectionType.ethernet;
+    }
+    if (results.contains(ConnectivityResult.vpn)) {
+      return NetworkConnectionType.vpn;
+    }
+    return NetworkConnectionType.other;
+  }
+
+  void _clearDiscoveredPublicConnectivity() {
+    _publicAddressDiscoveryGeneration++;
+    _publicAddress = null;
+    _linkLocalAddress = null;
+    _publicAddressDiscovery.invalidateCache();
+    _publicAddressDiscoveryFuture = null;
+    store.dispatch(ClearPublicConnectivityAction());
+  }
+
   static Uint8List _hexToBytes(String hex) {
     final bytes = <int>[];
     for (var i = 0; i < hex.length; i += 2) {
@@ -606,13 +664,10 @@ class Bitchat {
     // Filter out irrelevant connection types like bluetooth
     // which just indicate a BLE device connected/disconnected, not an IP network change.
     // If we don't filter this, every BLE connection change tears down the UDP transport!
-    var ipResults =
-        results.where((r) => r != ConnectivityResult.bluetooth).toList();
-
-    // If it's effectively empty (no IP networks), treat it as 'none'
-    if (ipResults.isEmpty) {
-      ipResults = [ConnectivityResult.none];
-    }
+    final ipResults = _normalizeConnectivityResults(results);
+    store.dispatch(NetworkConnectionTypeUpdatedAction(
+      _connectionTypeFromResults(ipResults),
+    ));
 
     // Ignore the first notification (initial state, not a change)
     if (_lastConnectivityResults == null) {
@@ -623,10 +678,17 @@ class Bitchat {
     // Ignore if nothing meaningful changed
     if (_connectivityResultsEqual(_lastConnectivityResults!, ipResults)) return;
     _lastConnectivityResults = ipResults;
+    _clearDiscoveredPublicConnectivity();
 
     // If we lost all connectivity, nothing to do — connections will fail naturally.
     if (ipResults.contains(ConnectivityResult.none)) {
       debugPrint('Network lost — UDP connections will fail');
+      return;
+    }
+
+    if (!_isUdpEnabledInSettings) {
+      debugPrint('Network changed while UDP is disabled — cleared cached '
+          'public connectivity and will rediscover on re-enable');
       return;
     }
 
@@ -673,10 +735,7 @@ class Bitchat {
       _udpService = null;
     }
 
-    _publicAddress = null;
-    _publicAddressDiscovery.invalidateCache();
-    _publicAddressDiscoveryFuture = null;
-    store.dispatch(PublicAddressUpdatedAction(null));
+    _clearDiscoveredPublicConnectivity();
     store
         .dispatch(UdpTransportStateChangedAction(TransportState.uninitialized));
 
@@ -788,8 +847,7 @@ class Bitchat {
         _udpService = null;
       }
 
-      _publicAddress = null;
-      store.dispatch(PublicAddressUpdatedAction(null));
+      _clearDiscoveredPublicConnectivity();
 
       // Reset Redux state so _udpAvailable returns false
       store.dispatch(
@@ -1036,11 +1094,18 @@ class Bitchat {
 
   /// Discover our public IPv6 address and combine it with the bound UDP port.
   Future<void> _discoverPublicAddress() async {
-    final localPort = _udpService?.localPort;
+    final udpService = _udpService;
+    final discoveryGeneration = _publicAddressDiscoveryGeneration;
+    final localPort = udpService?.localPort;
     if (localPort == null) return;
 
     final publicAddr =
         await _publicAddressDiscovery.getPublicAddress(localPort);
+    if (_publicAddressDiscoveryGeneration != discoveryGeneration ||
+        _udpService != udpService ||
+        !_isUdpEnabledInSettings) {
+      return;
+    }
     if (publicAddr != null) {
       _publicAddress = publicAddr;
       store.dispatch(PublicAddressUpdatedAction(publicAddr));
@@ -1058,6 +1123,11 @@ class Bitchat {
 
     // Discover link-local IPv6 for same-LAN fallback.
     final llAddr = await _publicAddressDiscovery.getLinkLocalAddress(localPort);
+    if (_publicAddressDiscoveryGeneration != discoveryGeneration ||
+        _udpService != udpService ||
+        !_isUdpEnabledInSettings) {
+      return;
+    }
     if (llAddr != null) {
       _linkLocalAddress = llAddr;
       debugPrint('Link-local UDP address: $_linkLocalAddress');

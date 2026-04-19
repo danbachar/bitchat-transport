@@ -187,6 +187,45 @@ void main() {
             appReducer(result, BleScanningChangedAction(false));
         expect(result2.transports.bleScanning, isFalse);
       });
+
+      test('NetworkConnectionTypeUpdatedAction updates connection type', () {
+        const initial = AppState.initial;
+
+        final result = appReducer(
+          initial,
+          NetworkConnectionTypeUpdatedAction(NetworkConnectionType.wifi),
+        );
+
+        expect(
+          result.transports.networkConnectionType,
+          NetworkConnectionType.wifi,
+        );
+        expect(
+            result.transports.publicAddress, initial.transports.publicAddress);
+        expect(result.transports.publicIp, initial.transports.publicIp);
+      });
+
+      test('ClearPublicConnectivityAction clears stale public network info',
+          () {
+        final state = AppState.initial.copyWith(
+          transports: const TransportsState(
+            udpState: TransportState.active,
+            publicAddress: '203.0.113.10:4242',
+            publicIp: '203.0.113.10',
+            networkConnectionType: NetworkConnectionType.cellular,
+          ),
+        );
+
+        final result = appReducer(state, ClearPublicConnectivityAction());
+
+        expect(result.transports.publicAddress, isNull);
+        expect(result.transports.publicIp, isNull);
+        expect(
+          result.transports.networkConnectionType,
+          NetworkConnectionType.cellular,
+        );
+        expect(result.transports.udpState, TransportState.active);
+      });
     });
 
     // =========================================================
