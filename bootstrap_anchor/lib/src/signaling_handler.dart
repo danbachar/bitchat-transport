@@ -6,15 +6,29 @@ import 'peer_table.dart';
 import 'protocol.dart';
 import 'signaling_codec.dart';
 
-/// Handles all signaling logic for the bootstrap anchor.
+/// Handles all signaling logic for the rendezvous agent.
 ///
-/// The anchor is a personal well-connected friend — it only serves the
-/// owner and their explicit friend list. Signaling from strangers is dropped.
+/// The rendezvous agent is a public service — it accepts cold-call
+/// connections from any agent and coordinates hole-punches between
+/// agents that can prove they are friends via friendship attestations.
+///
+/// Authorization model (spec §7.1):
+/// - Has no friends list and does not participate in the social graph.
+/// - Accepts cold-call connections from any agent.
+/// - Verifies friendship proofs to confirm the requesting agents are friends.
+/// - Observes connecting agents' addresses via the source IP:port.
+/// - Coordinates UDP hole-punches by relaying addresses.
+///
+/// Currently: The server registers any peer that sends a valid ANNOUNCE
+/// and coordinates punches between registered peers. Friendship proof
+/// verification is a TODO — for now, any registered peer can request
+/// signaling for any other registered peer. This is safe for a private
+/// deployment but must be tightened before federation.
 ///
 /// Responsibilities:
-/// - Maintains an address table from friend ANNOUNCE packets.
-/// - Responds to ADDR_QUERY from friends.
-/// - Coordinates hole-punches between friends on PUNCH_REQUEST.
+/// - Maintains an address table from peer ANNOUNCE packets.
+/// - Responds to ADDR_QUERY from registered peers.
+/// - Coordinates hole-punches between registered peers on PUNCH_REQUEST.
 /// - Reflects observed addresses back via ADDR_REFLECT.
 /// - Forwards PUNCH_READY between counterparts.
 class SignalingHandler {
@@ -39,8 +53,9 @@ class SignalingHandler {
 
   /// Process an ANNOUNCE received over UDP from a peer.
   ///
-  /// Only registers addresses for friends. Strangers are tracked in the
-  /// peer table (for diagnostics) but get no address table entry.
+  /// Any peer that sends a valid (signature-verified) ANNOUNCE is registered
+  /// in the address table. This is the rendezvous agent's equivalent of
+  /// peer_address/2 — it observes the connecting agent's public address.
   void processAnnounce(
     AnnounceData data, {
     String? observedIp,
@@ -48,20 +63,16 @@ class SignalingHandler {
   }) {
     final senderHex = data.pubkeyHex;
 
-    // Update peer table (friends get real entries, strangers get logged)
+    // Register the peer as verified (they sent a valid signed ANNOUNCE)
+    peerTable.addVerified(senderHex, nickname: data.nickname);
+
+    // Update peer table with ANNOUNCE data
     peerTable.upsert(
       publicKey: data.publicKey,
       nickname: data.nickname,
       pubkeyHex: senderHex,
       udpAddress: data.udpAddress,
     );
-
-    // Only register addresses for friends
-    if (!peerTable.isFriend(senderHex)) {
-      _log('ANNOUNCE from stranger ${data.nickname} '
-          '(${senderHex.substring(0, 8)}...) — ignored');
-      return;
-    }
 
     // Determine effective address (prefer observed over claimed)
     String? effectiveIp;
@@ -79,18 +90,19 @@ class SignalingHandler {
     }
 
     if (effectiveIp != null && effectivePort != null) {
-      if (InternetAddress.tryParse(effectiveIp)?.type ==
-          InternetAddressType.IPv6) {
+      final family = InternetAddress.tryParse(effectiveIp)?.type;
+      if (family != null) {
         addressTable.register(senderHex, effectiveIp, effectivePort);
         _log('Address registered: ${data.nickname} '
-            '(${senderHex.substring(0, 8)}...) → $effectiveIp:$effectivePort');
+            '(${senderHex.substring(0, 8)}...) → $effectiveIp:$effectivePort '
+            '(${_familyLabel(family)})');
       } else {
-        _log('Ignoring non-IPv6 address for ${data.nickname}: '
+        _log('Ignoring invalid address for ${data.nickname}: '
             '$effectiveIp:$effectivePort');
       }
     }
 
-    // Reflect observed address back to the friend
+    // Reflect observed address back to the peer
     if (observedIp != null && observedPort != null) {
       final reflect = AddrReflectMessage(ip: observedIp, port: observedPort);
       sendSignaling?.call(data.publicKey, codec.encode(reflect));
@@ -98,62 +110,65 @@ class SignalingHandler {
   }
 
   /// Process an incoming signaling packet.
-  void processSignaling(Uint8List senderPubkey, Uint8List payload) {
+  void processSignaling(
+    Uint8List senderPubkey,
+    Uint8List payload, {
+    String? observedIp,
+    int? observedPort,
+  }) {
     final senderHex = _pubkeyToHex(senderPubkey);
-
-    // Only process signaling from the owner or friends — drop strangers.
-    // Exception: the owner is always allowed (they may be connecting for the
-    // first time and need to send FRIENDS_SYNC before the table is populated).
-    final isOwner = senderHex == peerTable.ownerPubkeyHex;
-    if (!isOwner && !peerTable.isFriend(senderHex)) {
-      _log('Dropping signaling from non-friend ${senderHex.substring(0, 8)}...');
-      return;
-    }
+    final requesterFamily = _familyForIp(observedIp);
 
     SignalingMessage msg;
     try {
       msg = codec.decode(payload);
     } catch (e) {
-      _log('Failed to decode signaling from ${senderHex.substring(0, 8)}...: $e');
+      _log(
+          'Failed to decode signaling from ${senderHex.substring(0, 8)}...: $e');
       return;
     }
 
-    final senderName =
-        peerTable.lookupFriend(senderHex)?.nickname ?? senderHex.substring(0, 8);
+    final senderName = peerTable.lookupVerified(senderHex)?.nickname ??
+        senderHex.substring(0, 8);
     _log('Signaling from $senderName: ${msg.runtimeType}');
 
     switch (msg) {
       case AddrQueryMessage():
-        _handleAddrQuery(senderPubkey, msg);
+        _handleAddrQuery(
+          senderPubkey,
+          msg,
+          requesterFamily: requesterFamily,
+        );
       case AddrResponseMessage():
-        _log('Ignoring AddrResponse (anchor does not query)');
+        _log('Ignoring AddrResponse (server does not query)');
       case PunchRequestMessage():
-        _handlePunchRequest(senderPubkey, senderHex, msg);
+        _handlePunchRequest(
+          senderPubkey,
+          senderHex,
+          msg,
+          requesterFamily: requesterFamily,
+        );
       case PunchInitiateMessage():
-        _log('Ignoring PunchInitiate (anchor is well-connected)');
+        _log('Ignoring PunchInitiate (server is well-connected)');
       case PunchReadyMessage():
         _handlePunchReady(senderPubkey, msg);
       case AddrReflectMessage():
-        _log('Ignoring AddrReflect (anchor knows its own address)');
-      case FriendsSyncMessage():
-        _handleFriendsSync(senderPubkey, senderHex, msg);
+        _log('Ignoring AddrReflect (server knows its own address)');
     }
   }
 
-  void _handleAddrQuery(Uint8List senderPubkey, AddrQueryMessage msg) {
+  void _handleAddrQuery(
+    Uint8List senderPubkey,
+    AddrQueryMessage msg, {
+    InternetAddressType? requesterFamily,
+  }) {
     final targetHex = _pubkeyToHex(msg.targetPubkey);
 
-    // Only answer queries for targets that are also our friends.
-    // The anchor only keeps addresses of friends, so this is implicit,
-    // but we check explicitly for clarity.
-    if (!peerTable.isFriend(targetHex)) {
-      _log('Addr query for non-friend ${targetHex.substring(0, 8)}... — not found');
-      final response = AddrResponseMessage(targetPubkey: msg.targetPubkey);
-      sendSignaling?.call(senderPubkey, codec.encode(response));
-      return;
-    }
+    // TODO: Verify friendship proof — for now, any registered peer can query.
+    // In the spec model, the querier should present a friendship attestation
+    // for the target peer.
 
-    final entry = addressTable.lookup(targetHex);
+    final entry = addressTable.lookup(targetHex, family: requesterFamily);
     final response = AddrResponseMessage(
       targetPubkey: msg.targetPubkey,
       ip: entry?.ip,
@@ -162,25 +177,25 @@ class SignalingHandler {
     sendSignaling?.call(senderPubkey, codec.encode(response));
 
     _log('Addr query for ${targetHex.substring(0, 8)}...: '
-        '${entry != null ? "${entry.ip}:${entry.port}" : "not found"}');
+        '${entry != null ? "${entry.ip}:${entry.port}" : "not found"}'
+        '${requesterFamily != null ? " for ${_familyLabel(requesterFamily)} requester" : ""}');
   }
 
   void _handlePunchRequest(
     Uint8List requesterPubkey,
     String requesterHex,
-    PunchRequestMessage msg,
-  ) {
+    PunchRequestMessage msg, {
+    InternetAddressType? requesterFamily,
+  }) {
     final targetHex = _pubkeyToHex(msg.targetPubkey);
 
-    // Both requester and target must be friends. We only coordinate
-    // hole-punches between peers we trust.
-    if (!peerTable.isFriend(targetHex)) {
-      _log('Punch request for non-friend target ${targetHex.substring(0, 8)}... — ignoring');
-      return;
-    }
+    // TODO: Verify friendship proof — for now, any registered peer can
+    // request a punch to any other registered peer.
 
-    final requesterAddr = addressTable.lookup(requesterHex);
-    final targetAddr = addressTable.lookup(targetHex);
+    final requesterAddr =
+        addressTable.lookup(requesterHex, family: requesterFamily) ??
+            addressTable.lookup(requesterHex);
+    final targetAddr = addressTable.lookup(targetHex, family: requesterFamily);
 
     if (requesterAddr == null) {
       _log('Punch request from ${requesterHex.substring(0, 8)}... '
@@ -188,15 +203,25 @@ class SignalingHandler {
       return;
     }
     if (targetAddr == null) {
+      final fallbackTarget = addressTable.lookup(targetHex);
+      if (fallbackTarget != null &&
+          requesterFamily != null &&
+          fallbackTarget.family != requesterFamily) {
+        _log('Punch request for ${targetHex.substring(0, 8)}... '
+            'cannot be coordinated across families '
+            '(${_familyLabel(requesterFamily)} requester, '
+            '${_familyLabel(fallbackTarget.family)} target)');
+        return;
+      }
       _log('Punch request for ${targetHex.substring(0, 8)}... '
           'but they have no registered address');
       return;
     }
 
-    final requesterName =
-        peerTable.lookupFriend(requesterHex)?.nickname ?? requesterHex.substring(0, 8);
-    final targetName =
-        peerTable.lookupFriend(targetHex)?.nickname ?? targetHex.substring(0, 8);
+    final requesterName = peerTable.lookupVerified(requesterHex)?.nickname ??
+        requesterHex.substring(0, 8);
+    final targetName = peerTable.lookupVerified(targetHex)?.nickname ??
+        targetHex.substring(0, 8);
 
     _log('Coordinating hole-punch: '
         '$requesterName(${requesterAddr.ip}:${requesterAddr.port}) <-> '
@@ -242,54 +267,16 @@ class SignalingHandler {
         'for ${readyHex.substring(0, 8)}...');
   }
 
-  /// Called when the owner sends their friend list. Replaces the anchor's
-  /// entire friend list with the owner's. Only the owner can do this.
-  void _handleFriendsSync(
-    Uint8List senderPubkey,
-    String senderHex,
-    FriendsSyncMessage msg,
-  ) {
-    if (senderHex != peerTable.ownerPubkeyHex) {
-      _log('FRIENDS_SYNC from non-owner ${senderHex.substring(0, 8)}... — rejected');
-      return;
-    }
-
-    // Clear existing friends (except owner) and replace with the new list.
-    final oldFriends = peerTable.friendPubkeyHexes.toSet();
-
-    // Remove friends not in the new list (except owner)
-    for (final hex in oldFriends) {
-      if (hex == peerTable.ownerPubkeyHex) continue;
-      final stillFriend = msg.friends.any((f) => _pubkeyToHex(f.pubkey) == hex);
-      if (!stillFriend) {
-        peerTable.removeFriend(hex);
-        addressTable.remove(hex);
-      }
-    }
-
-    // Add new friends
-    for (final entry in msg.friends) {
-      final hex = _pubkeyToHex(entry.pubkey);
-      peerTable.addFriend(hex, nickname: entry.nickname);
-    }
-
-    _log('Friend list synced from owner: ${msg.friends.length} friends');
-    for (final entry in msg.friends) {
-      final hex = _pubkeyToHex(entry.pubkey);
-      _log('  ${entry.nickname} (${hex.substring(0, 8)}...)');
-    }
-
-    // Notify server to persist the updated friend list
-    onFriendsSynced?.call();
-  }
-
-  /// Called after FRIENDS_SYNC is processed — server should persist the list.
-  void Function()? onFriendsSynced;
-
   // ===== Helpers =====
 
   static String _pubkeyToHex(Uint8List pubkey) =>
       pubkey.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
+  static InternetAddressType? _familyForIp(String? ip) =>
+      ip == null ? null : InternetAddress.tryParse(ip)?.type;
+
+  static String _familyLabel(InternetAddressType family) =>
+      family == InternetAddressType.IPv6 ? 'IPv6' : 'IPv4';
 
   static ({String ip, int port})? _parseAddress(String addr) {
     if (addr.startsWith('[')) {

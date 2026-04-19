@@ -1,14 +1,17 @@
 import 'dart:typed_data';
 
 /// Signaling message types — identical to the client-side SignalingType.
+///
+/// Note: friendsSync (0x08) is no longer used in the spec-aligned model.
+/// The server still recognizes the byte value to log a clean rejection,
+/// but it has no corresponding message class.
 enum SignalingType {
   addrQuery(0x02),
   addrResponse(0x03),
   punchRequest(0x04),
   punchInitiate(0x05),
   punchReady(0x06),
-  addrReflect(0x07),
-  friendsSync(0x08);
+  addrReflect(0x07);
 
   final int value;
   const SignalingType(this.value);
@@ -16,7 +19,7 @@ enum SignalingType {
   static SignalingType fromValue(int value) {
     return SignalingType.values.firstWhere(
       (t) => t.value == value,
-      orElse: () => throw ArgumentError('Unknown signaling type: $value'),
+      orElse: () => throw ArgumentError('Unknown signaling type: 0x${value.toRadixString(16)}'),
     );
   }
 }
@@ -76,20 +79,6 @@ class AddrReflectMessage extends SignalingMessage {
   AddrReflectMessage({required this.ip, required this.port});
 }
 
-/// Owner pushes their full friend list to the anchor server.
-class FriendsSyncMessage extends SignalingMessage {
-  @override
-  SignalingType get type => SignalingType.friendsSync;
-  final List<FriendsSyncEntry> friends;
-  FriendsSyncMessage({required this.friends});
-}
-
-class FriendsSyncEntry {
-  final Uint8List pubkey;
-  final String nickname;
-  FriendsSyncEntry({required this.pubkey, required this.nickname});
-}
-
 // ===== Codec =====
 
 /// Binary encoder/decoder for signaling messages.
@@ -105,7 +94,6 @@ class SignalingCodec {
       PunchInitiateMessage() => _encodePunchInitiate(msg),
       PunchReadyMessage() => _encodePunchReady(msg),
       AddrReflectMessage() => _encodeAddrReflect(msg),
-      FriendsSyncMessage() => _encodeFriendsSync(msg),
     };
   }
 
@@ -123,7 +111,6 @@ class SignalingCodec {
       SignalingType.punchInitiate => _decodePunchInitiate(payload),
       SignalingType.punchReady => _decodePunchReady(payload),
       SignalingType.addrReflect => _decodeAddrReflect(payload),
-      SignalingType.friendsSync => _decodeFriendsSync(payload),
     };
   }
 
@@ -251,47 +238,6 @@ class SignalingCodec {
     offset += ipLen;
     final port = _readUint16(data, offset);
     return AddrReflectMessage(ip: ip, port: port);
-  }
-
-  Uint8List _encodeFriendsSync(FriendsSyncMessage msg) {
-    final buffer = BytesBuilder();
-    buffer.addByte(SignalingType.friendsSync.value);
-    _writeUint16(buffer, msg.friends.length);
-    for (final friend in msg.friends) {
-      buffer.add(friend.pubkey);
-      final nickBytes = Uint8List.fromList(friend.nickname.codeUnits);
-      buffer.addByte(nickBytes.length);
-      buffer.add(nickBytes);
-    }
-    return buffer.toBytes();
-  }
-
-  FriendsSyncMessage _decodeFriendsSync(Uint8List data) {
-    if (data.length < 2) {
-      throw const FormatException('FriendsSync payload too short');
-    }
-    var offset = 0;
-    final count = _readUint16(data, offset);
-    offset += 2;
-
-    final friends = <FriendsSyncEntry>[];
-    for (var i = 0; i < count; i++) {
-      if (offset + 33 > data.length) {
-        throw FormatException('FriendsSync truncated at entry $i');
-      }
-      final pubkey = Uint8List.fromList(data.sublist(offset, offset + 32));
-      offset += 32;
-      final nickLen = data[offset];
-      offset += 1;
-      if (offset + nickLen > data.length) {
-        throw FormatException('FriendsSync nickname truncated at entry $i');
-      }
-      final nickname =
-          String.fromCharCodes(data.sublist(offset, offset + nickLen));
-      offset += nickLen;
-      friends.add(FriendsSyncEntry(pubkey: pubkey, nickname: nickname));
-    }
-    return FriendsSyncMessage(friends: friends);
   }
 
   // ===== Helpers =====
