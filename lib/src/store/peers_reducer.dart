@@ -185,14 +185,16 @@ PeersState peersReducer(PeersState state, dynamic action) {
   }
 
   if (action is BleDeviceRemovedAction) {
-    final newMap = Map<String, DiscoveredPeerState>.from(state.discoveredBlePeers);
+    final newMap =
+        Map<String, DiscoveredPeerState>.from(state.discoveredBlePeers);
     newMap.remove(action.deviceId);
     return state.copyWith(discoveredBlePeers: newMap);
   }
 
   if (action is StaleDiscoveredBlePeersRemovedAction) {
     final now = DateTime.now();
-    final newMap = Map<String, DiscoveredPeerState>.from(state.discoveredBlePeers);
+    final newMap =
+        Map<String, DiscoveredPeerState>.from(state.discoveredBlePeers);
     newMap.removeWhere((_, peer) {
       final timeSinceLastSeen = now.difference(peer.lastSeen);
       return timeSinceLastSeen > action.staleThreshold;
@@ -214,7 +216,8 @@ PeersState peersReducer(PeersState state, dynamic action) {
     final isBle = action.transport == PeerTransport.bleDirect;
 
     // Derive well-connected status from the UDP address in this ANNOUNCE.
-    // A peer is well-connected if they advertise a globally routable IPv6 address.
+    // A peer is well-connected if they advertise a globally routable public
+    // UDP address for the active IP family.
     // The address in the ANNOUNCE is authoritative — if absent, the peer has no address.
     final wellConnected = action.udpAddress != null &&
         isGloballyRoutableAddress(action.udpAddress!);
@@ -264,13 +267,17 @@ PeersState peersReducer(PeersState state, dynamic action) {
         rssi: action.rssi,
         protocolVersion: action.protocolVersion,
         lastSeen: now,
-        bleCentralDeviceId: action.bleCentralDeviceId ?? existing.bleCentralDeviceId,
-        blePeripheralDeviceId: action.blePeripheralDeviceId ?? existing.blePeripheralDeviceId,
+        bleCentralDeviceId:
+            action.bleCentralDeviceId ?? existing.bleCentralDeviceId,
+        blePeripheralDeviceId:
+            action.blePeripheralDeviceId ?? existing.blePeripheralDeviceId,
         lastBleSeen: isBle ? now : existing.lastBleSeen,
         udpAddress: action.udpAddress ?? existing.udpAddress,
         linkLocalAddress: action.linkLocalAddress ?? existing.linkLocalAddress,
         isFriend: existing.isFriend,
-        isWellConnected: action.udpAddress != null ? wellConnected : existing.isWellConnected,
+        isWellConnected: action.udpAddress != null
+            ? wellConnected
+            : existing.isWellConnected,
         hasLiveUdpConnection: existing.hasLiveUdpConnection,
       );
       return state.copyWith(
@@ -299,11 +306,14 @@ PeersState peersReducer(PeersState state, dynamic action) {
     final existing = state.peers[pubkeyHex];
     if (existing != null) {
       // Determine which BLE IDs to clear based on role
-      final clearCentral = action.role == null || action.role == BleRole.central;
-      final clearPeripheral = action.role == null || action.role == BleRole.peripheral;
+      final clearCentral =
+          action.role == null || action.role == BleRole.central;
+      final clearPeripheral =
+          action.role == null || action.role == BleRole.peripheral;
 
       final newCentralId = clearCentral ? null : existing.bleCentralDeviceId;
-      final newPeripheralId = clearPeripheral ? null : existing.blePeripheralDeviceId;
+      final newPeripheralId =
+          clearPeripheral ? null : existing.blePeripheralDeviceId;
       final hasAnyBle = newCentralId != null || newPeripheralId != null;
 
       // If no other transport, mark as disconnected
@@ -371,7 +381,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
         bleCentralDeviceId: existing.bleCentralDeviceId,
         blePeripheralDeviceId: existing.blePeripheralDeviceId,
         lastBleSeen: existing.lastBleSeen,
-        udpAddress: existing.udpAddress,  // Preserve for reconnection
+        udpAddress: existing.udpAddress, // Preserve for reconnection
         linkLocalAddress: existing.linkLocalAddress,
         isFriend: existing.isFriend,
         isWellConnected: existing.isWellConnected,
@@ -462,7 +472,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
             bleCentralDeviceId: null,
             blePeripheralDeviceId: null,
             lastBleSeen: null,
-            udpAddress: peer.udpAddress,  // Preserve for reconnection
+            udpAddress: peer.udpAddress, // Preserve for reconnection
             linkLocalAddress: peer.linkLocalAddress,
             isFriend: true,
             isWellConnected: peer.isWellConnected,

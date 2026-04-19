@@ -23,8 +23,9 @@ enum SignalingType {
   /// "Your actual public address is ip:port" — friend → agent (triggered by ANNOUNCE)
   addrReflect(0x07),
 
-  /// "Here's my full friend list" — owner → anchor server
-  friendsSync(0x08);
+  // 0x08 was friendsSync — removed (spec-aligned model uses friendship
+  // proofs instead of pushing friend lists to the server).
+  ;
 
   final int value;
   const SignalingType(this.value);
@@ -167,31 +168,6 @@ class AddrReflectMessage extends SignalingMessage {
   String toString() => 'AddrReflect($ip:$port)';
 }
 
-/// Owner pushes their full friend list to the anchor server.
-///
-/// Sent on first connection to the anchor and whenever the friend list changes.
-/// The anchor replaces its entire friend list with this data.
-class FriendsSyncMessage extends SignalingMessage {
-  @override
-  SignalingType get type => SignalingType.friendsSync;
-
-  /// List of friends to sync.
-  final List<FriendsSyncEntry> friends;
-
-  FriendsSyncMessage({required this.friends});
-
-  @override
-  String toString() => 'FriendsSync(${friends.length} friends)';
-}
-
-/// A single friend entry in a FRIENDS_SYNC message.
-class FriendsSyncEntry {
-  final Uint8List pubkey;
-  final String nickname;
-
-  FriendsSyncEntry({required this.pubkey, required this.nickname});
-}
-
 // ===== Codec =====
 
 /// Binary encoder/decoder for signaling messages.
@@ -219,7 +195,6 @@ class SignalingCodec {
       PunchInitiateMessage() => _encodePunchInitiate(msg),
       PunchReadyMessage() => _encodePunchReady(msg),
       AddrReflectMessage() => _encodeAddrReflect(msg),
-      FriendsSyncMessage() => _encodeFriendsSync(msg),
     };
   }
 
@@ -299,7 +274,6 @@ class SignalingCodec {
       SignalingType.punchInitiate => _decodePunchInitiate(payload),
       SignalingType.punchReady => _decodePunchReady(payload),
       SignalingType.addrReflect => _decodeAddrReflect(payload),
-      SignalingType.friendsSync => _decodeFriendsSync(payload),
     };
   }
 
@@ -382,47 +356,6 @@ class SignalingCodec {
     offset += ipLen;
     final port = _readUint16(data, offset);
     return AddrReflectMessage(ip: ip, port: port);
-  }
-
-  Uint8List _encodeFriendsSync(FriendsSyncMessage msg) {
-    final buffer = BytesBuilder();
-    buffer.addByte(SignalingType.friendsSync.value);
-    _writeUint16(buffer, msg.friends.length);
-    for (final friend in msg.friends) {
-      buffer.add(friend.pubkey);
-      final nickBytes = Uint8List.fromList(friend.nickname.codeUnits);
-      buffer.addByte(nickBytes.length);
-      buffer.add(nickBytes);
-    }
-    return buffer.toBytes();
-  }
-
-  FriendsSyncMessage _decodeFriendsSync(Uint8List data) {
-    if (data.length < 2) {
-      throw const FormatException('FriendsSync payload too short');
-    }
-    var offset = 0;
-    final count = _readUint16(data, offset);
-    offset += 2;
-
-    final friends = <FriendsSyncEntry>[];
-    for (var i = 0; i < count; i++) {
-      if (offset + 33 > data.length) {
-        throw FormatException('FriendsSync truncated at entry $i');
-      }
-      final pubkey = Uint8List.fromList(data.sublist(offset, offset + 32));
-      offset += 32;
-      final nickLen = data[offset];
-      offset += 1;
-      if (offset + nickLen > data.length) {
-        throw FormatException('FriendsSync nickname truncated at entry $i');
-      }
-      final nickname =
-          String.fromCharCodes(data.sublist(offset, offset + nickLen));
-      offset += nickLen;
-      friends.add(FriendsSyncEntry(pubkey: pubkey, nickname: nickname));
-    }
-    return FriendsSyncMessage(friends: friends);
   }
 
   // ===== Helpers =====

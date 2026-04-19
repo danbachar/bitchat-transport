@@ -238,7 +238,7 @@ void main() {
         );
       });
 
-      test('drops unsupported IPv4 udpAddress from ANNOUNCE payload', () async {
+      test('preserves IPv4 udpAddress from ANNOUNCE payload', () async {
         final payload = buildAnnouncePayload(
           pubkey: otherPubkey,
           address: '203.0.113.5:4001',
@@ -256,7 +256,7 @@ void main() {
 
         final peer = store.state.peers.getPeerByPubkey(otherPubkey);
         expect(peer, isNotNull);
-        expect(peer!.udpAddress, isNull);
+        expect(peer!.udpAddress, equals('203.0.113.5:4001'));
       });
 
       test('fires onPeerAnnounced callback', () async {

@@ -1,4 +1,3 @@
-import 'dart:io';
 import 'package:redux/redux.dart';
 import '../mesh/bloom_filter.dart';
 import '../models/identity.dart';
@@ -315,18 +314,8 @@ class MessageRouter {
   String? _normalizeUdpAddress(String? udpAddress) {
     if (udpAddress == null || udpAddress.isEmpty) return null;
 
-    final parsed = parseIpv6AddressString(udpAddress);
-    if (parsed != null) {
-      return parsed.toAddressString();
-    }
-
-    final legacyParsed = parseAddressString(udpAddress);
-    if (legacyParsed != null &&
-        legacyParsed.ip.type != InternetAddressType.IPv6) {
-      debugPrint('Ignoring unsupported IPv4 UDP address from ANNOUNCE: '
-          '$udpAddress. UDP transport requires IPv6.');
-      return null;
-    }
+    final parsed = parseAddressString(udpAddress);
+    if (parsed != null) return parsed.toAddressString();
 
     debugPrint('Ignoring malformed UDP address from ANNOUNCE: $udpAddress');
     return null;

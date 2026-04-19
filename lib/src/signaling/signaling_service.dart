@@ -33,12 +33,12 @@ class _PendingAddressQuery {
   _PendingAddressQuery(this.pendingResponderHexes);
 }
 
-/// Orchestrates signaling between peers via well-connected friends.
+/// Orchestrates signaling between peers via trusted facilitators.
 ///
 /// ## Two roles
 ///
 /// 1. **As a regular agent** (behind NAT):
-///    - Queries friends for other peers' addresses (ADDR_QUERY).
+///    - Queries trusted facilitators for other peers' addresses (ADDR_QUERY).
 ///    - Requests hole-punch coordination (PUNCH_REQUEST).
 ///    - Can directly ask a reachable friend to start punching toward us.
 ///    - Responds to PUNCH_INITIATE by starting the punch.
@@ -112,9 +112,9 @@ class SignalingService {
 
   // ===== Outgoing API (called by coordinator) =====
 
-  /// Query well-connected friends for a peer's address.
+  /// Query trusted facilitators for a peer's address.
   ///
-  /// Sends ADDR_QUERY to all well-connected friends in parallel.
+  /// Sends ADDR_QUERY to all trusted facilitators in parallel.
   /// Returns the first response, or null after [timeout].
   Future<AddressEntry?> queryPeerAddress(
     Uint8List targetPubkey, {
@@ -126,7 +126,7 @@ class SignalingService {
     return query?.firstMatch.future ?? Future.value(null);
   }
 
-  /// Query well-connected friends and collect every facilitator that can
+  /// Query trusted facilitators and collect every facilitator that can
   /// currently resolve the target's address.
   Future<List<AddressQueryCandidate>> queryPeerAddressCandidates(
     Uint8List targetPubkey, {
@@ -138,42 +138,41 @@ class SignalingService {
     return query?.candidates.future ?? Future.value(const []);
   }
 
-  /// Request hole-punch coordination through a well-connected friend.
+  /// Request hole-punch coordination through a trusted facilitator.
   ///
-  /// Sends PUNCH_REQUEST to the first reachable well-connected friend.
-  /// The friend will send PUNCH_INITIATE to both us and the target.
+  /// Sends PUNCH_REQUEST to the first reachable facilitator.
+  /// The facilitator will send PUNCH_INITIATE to both us and the target.
   Future<void> requestHolePunch(Uint8List targetPubkey) async {
     final targetHex = _pubkeyToHex(targetPubkey);
 
-    // Exclude the target from the friends list — can't ask a peer to
-    // coordinate a hole-punch to itself.
-    final friends = store.state.peers.wellConnectedFriends
-        .where((f) => _pubkeyToHex(f.publicKey) != targetHex)
-        .toList();
-    if (friends.isEmpty) {
-      debugPrint(
-          'No well-connected friends to coordinate hole-punch (excluding target)');
+    final facilitators =
+        _trustedFacilitatorPubkeys(excludePubkeyHex: targetHex);
+    if (facilitators.isEmpty) {
+      debugPrint('No trusted facilitators available to coordinate '
+          'hole-punch (excluding target)');
       return;
     }
-    debugPrint(
-        'Requesting hole-punch to ${targetHex.substring(0, 8)}... via well-connected friend');
+    debugPrint('Requesting hole-punch to ${targetHex.substring(0, 8)}... via '
+        '${facilitators.length} trusted facilitator(s)');
 
     store.dispatch(HolePunchStartedAction(targetHex));
 
-    // Try each friend until one accepts.
-    for (final friend in friends) {
+    // Try each facilitator until one accepts.
+    for (final facilitator in facilitators) {
       final sent = await requestHolePunchViaFriend(
         targetPubkey,
-        friend.publicKey,
+        facilitator,
       );
       if (sent == true) {
-        debugPrint('Punch request sent via ${friend.displayName}');
+        debugPrint('Punch request sent via '
+            '${_pubkeyToHex(facilitator).substring(0, 8)}...');
         return;
       }
     }
 
-    debugPrint('Failed to send punch request to any well-connected friend');
-    store.dispatch(HolePunchFailedAction(targetHex, 'No reachable friend'));
+    debugPrint('Failed to send punch request to any trusted facilitator');
+    store
+        .dispatch(HolePunchFailedAction(targetHex, 'No reachable facilitator'));
   }
 
   /// Ask a specific well-connected friend to coordinate a hole-punch.
@@ -234,33 +233,6 @@ class SignalingService {
     return await sendSignaling?.call(recipientPubkey, payload) ?? false;
   }
 
-  /// Send the full friend list to the anchor server.
-  ///
-  /// Called on first connection to the anchor and whenever the friend list
-  /// changes. The anchor replaces its entire friend list with this data.
-  Future<bool> sendFriendsSync(Uint8List anchorPubkey) async {
-    final friends = store.state.friendships.friends;
-    final entries = <FriendsSyncEntry>[];
-    for (final f in friends) {
-      final pubkeyBytes = _hexToBytes(f.peerPubkeyHex);
-      entries.add(FriendsSyncEntry(
-        pubkey: pubkeyBytes,
-        nickname: f.nickname ?? f.peerPubkeyHex.substring(0, 8),
-      ));
-    }
-
-    final msg = FriendsSyncMessage(friends: entries);
-    final payload = codec.encode(msg);
-    final sent = await sendSignaling?.call(anchorPubkey, payload) ?? false;
-
-    if (sent) {
-      debugPrint('Sent friends sync to anchor: ${entries.length} friends');
-    } else {
-      debugPrint('Failed to send friends sync to anchor');
-    }
-    return sent;
-  }
-
   static Uint8List _hexToBytes(String hex) {
     final bytes = <int>[];
     for (var i = 0; i < hex.length; i += 2) {
@@ -279,12 +251,11 @@ class SignalingService {
     Uint8List senderPubkey,
     Uint8List payload,
   ) {
-    // Only process signaling from friends — drop signaling from strangers.
     final senderHex = _pubkeyToHex(senderPubkey);
     final senderPeer = store.state.peers.getPeerByPubkeyHex(senderHex);
-    if (senderPeer == null || !senderPeer.isFriend) {
-      debugPrint(
-          'Dropping signaling from non-friend ${senderHex.substring(0, 8)}...');
+    if (!_isTrustedSignalingSender(senderHex)) {
+      debugPrint('Dropping signaling from untrusted sender '
+          '${senderHex.substring(0, 8)}...');
       return;
     }
 
@@ -296,7 +267,9 @@ class SignalingService {
       return;
     }
 
-    debugPrint('Received signaling from ${senderPeer.displayName}: $msg');
+    final senderLabel = senderPeer?.displayName ??
+        'facilitator ${senderHex.substring(0, 8)}...';
+    debugPrint('Received signaling from $senderLabel: $msg');
 
     switch (msg) {
       case AddrQueryMessage():
@@ -311,9 +284,6 @@ class SignalingService {
         _handlePunchReady(senderPubkey, msg);
       case AddrReflectMessage():
         _handleAddrReflect(msg);
-      case FriendsSyncMessage():
-        // Client doesn't process FRIENDS_SYNC — only the anchor server does.
-        debugPrint('Ignoring FriendsSync (client-side)');
     }
   }
 
@@ -368,11 +338,9 @@ class SignalingService {
       }
     }
 
-    if (InternetAddress.tryParse(effectiveIp)?.type !=
-        InternetAddressType.IPv6) {
-      debugPrint('Ignoring unsupported non-IPv6 friend address for '
-          '${senderHex.substring(0, 8)}...: $effectiveIp:$effectivePort. '
-          'UDP transport requires IPv6.');
+    if (InternetAddress.tryParse(effectiveIp) == null) {
+      debugPrint('Ignoring malformed friend address for '
+          '${senderHex.substring(0, 8)}...: $effectiveIp:$effectivePort');
     } else {
       debugPrint(
           'Address registered via ANNOUNCE: ${senderHex.substring(0, 8)}... → $effectiveIp:$effectivePort');
@@ -455,10 +423,10 @@ class SignalingService {
     query.pendingResponderHexes.remove(senderHex);
 
     if (msg.found) {
-      if (InternetAddress.tryParse(msg.ip!)?.type != InternetAddressType.IPv6) {
-        debugPrint('Ignoring non-IPv6 addr response for '
+      if (InternetAddress.tryParse(msg.ip!) == null) {
+        debugPrint('Ignoring malformed addr response for '
             '${targetHex.substring(0, 8)}...: ${msg.ip}:${msg.port}. '
-            'UDP transport requires IPv6.');
+            'The IP could not be parsed.');
       } else {
         final entry = AddressEntry(
           ip: msg.ip!,
@@ -627,9 +595,8 @@ class SignalingService {
   AddressEntry? _lookupReachableFriendAddress(String pubkeyHex) {
     final tableEntry = addressTable.lookup(pubkeyHex);
     if (tableEntry != null) {
-      if (InternetAddress.tryParse(tableEntry.ip)?.type !=
-          InternetAddressType.IPv6) {
-        debugPrint('Ignoring unsupported non-IPv6 address table entry for '
+      if (InternetAddress.tryParse(tableEntry.ip) == null) {
+        debugPrint('Ignoring malformed address table entry for '
             '${pubkeyHex.substring(0, 8)}...: ${tableEntry.ip}:${tableEntry.port}');
         return null;
       }
@@ -642,7 +609,7 @@ class SignalingService {
     final udpAddress = peer.udpAddress;
     if (udpAddress == null || udpAddress.isEmpty) return null;
 
-    final parsed = parseIpv6AddressString(udpAddress);
+    final parsed = parseAddressString(udpAddress);
     if (parsed == null) return null;
 
     debugPrint('Address table miss for ${pubkeyHex.substring(0, 8)}...; '
@@ -663,26 +630,32 @@ class SignalingService {
     final existing = _pendingQueries[targetHex];
     if (existing != null) return existing;
 
-    final friends = store.state.peers.wellConnectedFriends
-        .where((f) => _pubkeyToHex(f.publicKey) != targetHex)
-        .toList();
-    if (friends.isEmpty) {
-      debugPrint('No well-connected friends to query (excluding target)');
+    final facilitators =
+        _trustedFacilitatorPubkeys(excludePubkeyHex: targetHex);
+    if (facilitators.isEmpty) {
+      debugPrint('No trusted facilitators to query (excluding target)');
       return null;
     }
 
     final query = _PendingAddressQuery(
-      friends.map((f) => _pubkeyToHex(f.publicKey)).toSet(),
+      facilitators.map(_pubkeyToHex).toSet(),
     );
     _pendingQueries[targetHex] = query;
 
     debugPrint(
-        'Querying ${friends.length} friends for address of ${targetHex.substring(0, 8)}...');
+        'Querying ${facilitators.length} trusted facilitator(s) for address '
+        'of ${targetHex.substring(0, 8)}...');
 
     final msg = AddrQueryMessage(targetPubkey: targetPubkey);
     final payload = codec.encode(msg);
-    for (final friend in friends) {
-      sendSignaling?.call(friend.publicKey, payload);
+    for (final facilitator in facilitators) {
+      final facilitatorHex = _pubkeyToHex(facilitator);
+      unawaited(_sendAddressQueryToFacilitator(
+        targetHex: targetHex,
+        facilitatorPubkey: facilitator,
+        facilitatorHex: facilitatorHex,
+        payload: payload,
+      ));
     }
 
     query.timeoutTimer = Timer(timeout, () {
@@ -694,6 +667,36 @@ class SignalingService {
     });
 
     return query;
+  }
+
+  Future<void> _sendAddressQueryToFacilitator({
+    required String targetHex,
+    required Uint8List facilitatorPubkey,
+    required String facilitatorHex,
+    required Uint8List payload,
+  }) async {
+    bool sent = false;
+    try {
+      sent = await sendSignaling?.call(facilitatorPubkey, payload) ?? false;
+    } catch (e) {
+      debugPrint('Address query send failed via '
+          '${facilitatorHex.substring(0, 8)}...: $e');
+    }
+
+    if (sent) return;
+
+    final query = _pendingQueries[targetHex];
+    if (query == null) return;
+    if (!query.respondedHexes.add(facilitatorHex)) return;
+
+    query.pendingResponderHexes.remove(facilitatorHex);
+    debugPrint('Address query could not reach facilitator '
+        '${facilitatorHex.substring(0, 8)}... for '
+        '${targetHex.substring(0, 8)}...');
+
+    if (query.pendingResponderHexes.isEmpty) {
+      _completePendingAddressQuery(targetHex);
+    }
   }
 
   void _completePendingAddressQuery(String targetHex) {
@@ -711,5 +714,51 @@ class SignalingService {
         List<AddressQueryCandidate>.unmodifiable(query.positiveResponses),
       );
     }
+  }
+
+  bool _isTrustedSignalingSender(String senderHex) {
+    final senderPeer = store.state.peers.getPeerByPubkeyHex(senderHex);
+    if (senderPeer != null && senderPeer.isFriend) {
+      return true;
+    }
+
+    for (final server in store.state.settings.configuredRendezvousServers) {
+      if (server.pubkeyHex.isNotEmpty &&
+          server.pubkeyHex.toLowerCase() == senderHex) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  List<Uint8List> _trustedFacilitatorPubkeys({
+    String? excludePubkeyHex,
+  }) {
+    final facilitators = <String, Uint8List>{};
+
+    for (final friend in store.state.peers.wellConnectedFriends) {
+      final friendHex = _pubkeyToHex(friend.publicKey);
+      if (friendHex == excludePubkeyHex) continue;
+      facilitators[friendHex] = friend.publicKey;
+    }
+
+    for (final server in store.state.settings.configuredRendezvousServers) {
+      final normalizedHex = server.pubkeyHex.toLowerCase();
+      if (normalizedHex.isEmpty || normalizedHex == excludePubkeyHex) {
+        continue;
+      }
+
+      try {
+        facilitators.putIfAbsent(
+          normalizedHex,
+          () => _hexToBytes(normalizedHex),
+        );
+      } catch (e) {
+        debugPrint('Ignoring invalid rendezvous pubkey in settings: $e');
+      }
+    }
+
+    return facilitators.values.toList(growable: false);
   }
 }

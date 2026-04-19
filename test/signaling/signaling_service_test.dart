@@ -22,11 +22,15 @@ String _pubkeyHex(Uint8List key) =>
     key.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
 /// Build a store with specific peers pre-loaded.
-Store<AppState> _storeWithPeers(Map<String, PeerState> peers) {
+Store<AppState> _storeWithPeers(
+  Map<String, PeerState> peers, {
+  SettingsState settings = const SettingsState(),
+}) {
   return Store<AppState>(
     appReducer,
     initialState: AppState(
       peers: PeersState(peers: peers),
+      settings: settings,
     ),
   );
 }
@@ -71,12 +75,18 @@ void main() {
   final bobKey = _testPubkey(2);
   final friendKey = _testPubkey(3);
   final friend2Key = _testPubkey(4);
+  final anchorKey = _testPubkey(5);
+  final anchor2Key = _testPubkey(6);
   final aliceHex = _pubkeyHex(aliceKey);
   final bobHex = _pubkeyHex(bobKey);
   final friendHex = _pubkeyHex(friendKey);
   final friend2Hex = _pubkeyHex(friend2Key);
+  final anchorHex = _pubkeyHex(anchorKey);
+  final anchor2Hex = _pubkeyHex(anchor2Key);
   const aliceAdvertisedAddress = '[2001:db8:1::1]:5000';
   const bobAdvertisedAddress = '[2001:db8:2::1]:5000';
+  const anchorAddress = '[2001:db8:ffff::1]:9514';
+  const anchor2Address = '198.51.100.44:9514';
   const queriedBobIp = '2400::10';
   const queriedAliceIp = '2400::11';
   const reflectedIp = '2400::12';
@@ -166,6 +176,134 @@ void main() {
       expect(result, isNull);
 
       emptyService.dispose();
+    });
+
+    test('queries configured rendezvous when no friends are available',
+        () async {
+      final anchorMessages = <(Uint8List, Uint8List)>[];
+      final anchorService = SignalingService(
+        store: _storeWithPeers(
+          {},
+          settings: SettingsState(
+            anchorAddress: anchorAddress,
+            anchorPubkeyHex: anchorHex,
+          ),
+        ),
+      );
+      anchorService.sendSignaling = (recipient, payload) async {
+        anchorMessages.add((recipient, payload));
+        return true;
+      };
+
+      final future = anchorService.queryPeerAddress(
+        bobKey,
+        timeout: const Duration(seconds: 1),
+      );
+
+      expect(anchorMessages.length, 1);
+      expect(anchorMessages[0].$1, anchorKey);
+
+      final decoded = codec.decode(anchorMessages[0].$2);
+      expect(decoded, isA<AddrQueryMessage>());
+      expect((decoded as AddrQueryMessage).targetPubkey, bobKey);
+
+      anchorService.processSignaling(
+        anchorKey,
+        codec.encode(AddrResponseMessage(
+          targetPubkey: bobKey,
+          ip: queriedBobIp,
+          port: 7000,
+        )),
+      );
+
+      final result = await future;
+      expect(result, isNotNull);
+      expect(result!.ip, queriedBobIp);
+      expect(result.port, 7000);
+
+      anchorService.dispose();
+    });
+
+    test('does not wait for timeout when rendezvous signaling send fails',
+        () async {
+      final anchorService = SignalingService(
+        store: _storeWithPeers(
+          {},
+          settings: SettingsState(
+            anchorAddress: anchorAddress,
+            anchorPubkeyHex: anchorHex,
+          ),
+        ),
+      );
+      anchorService.sendSignaling = (_, __) async => false;
+
+      final result = await anchorService
+          .queryPeerAddress(
+            bobKey,
+            timeout: const Duration(seconds: 5),
+          )
+          .timeout(
+            const Duration(milliseconds: 250),
+            onTimeout: () => fail(
+              'queryPeerAddress should complete once the rendezvous send fails',
+            ),
+          );
+
+      expect(result, isNull);
+
+      anchorService.dispose();
+    });
+
+    test('queries all configured rendezvous servers', () async {
+      final anchorMessages = <(Uint8List, Uint8List)>[];
+      final anchorService = SignalingService(
+        store: _storeWithPeers(
+          {},
+          settings: SettingsState(
+            rendezvousServers: [
+              RendezvousServerSettings(
+                address: anchorAddress,
+                pubkeyHex: anchorHex,
+              ),
+              RendezvousServerSettings(
+                address: anchor2Address,
+                pubkeyHex: anchor2Hex,
+              ),
+            ],
+          ),
+        ),
+      );
+      anchorService.sendSignaling = (recipient, payload) async {
+        anchorMessages.add((recipient, payload));
+        return true;
+      };
+
+      final future = anchorService.queryPeerAddressCandidates(
+        bobKey,
+        timeout: const Duration(seconds: 1),
+      );
+
+      expect(
+          anchorMessages.map((message) => _pubkeyHex(message.$1)),
+          containsAll(<String>[
+            anchorHex,
+            anchor2Hex,
+          ]));
+
+      anchorService.processSignaling(
+        anchor2Key,
+        codec.encode(AddrResponseMessage(
+          targetPubkey: bobKey,
+          ip: queriedBobIp,
+          port: 7001,
+        )),
+      );
+
+      final result = await future;
+      expect(result, hasLength(1));
+      expect(_pubkeyHex(result.single.responderPubkey), equals(anchor2Hex));
+
+      anchorService.dispose();
     });
 
     test('deduplicates concurrent queries for the same peer', () async {
@@ -287,6 +425,33 @@ void main() {
       expect(emptyService.store.state.signaling.holePunchAttempts, isEmpty);
 
       emptyService.dispose();
+    });
+
+    test('uses configured rendezvous when no friends are available', () async {
+      final anchorService = SignalingService(
+        store: _storeWithPeers(
+          {},
+          settings: SettingsState(
+            anchorAddress: anchorAddress,
+            anchorPubkeyHex: anchorHex,
+          ),
+        ),
+      );
+      anchorService.sendSignaling = (recipient, payload) async {
+        sentMessages.add((recipient, payload));
+        return true;
+      };
+
+      await anchorService.requestHolePunch(bobKey);
+
+      expect(sentMessages.length, 1);
+      expect(sentMessages[0].$1, anchorKey);
+
+      final decoded = codec.decode(sentMessages[0].$2);
+      expect(decoded, isA<PunchRequestMessage>());
+      expect((decoded as PunchRequestMessage).targetPubkey, bobKey);
+
+      anchorService.dispose();
     });
   });
 
@@ -739,6 +904,74 @@ void main() {
 
       expect(reflectedAddress, reflectedIp);
       expect(reflectedPort, 12345);
+    });
+
+    test('accepts reflection from the configured rendezvous server', () {
+      final anchorService = SignalingService(
+        store: _storeWithPeers(
+          {},
+          settings: SettingsState(
+            anchorAddress: anchorAddress,
+            anchorPubkeyHex: anchorHex,
+          ),
+        ),
+      );
+
+      String? reflectedAddress;
+      int? reflectedPort;
+
+      anchorService.onAddrReflected = (ip, port) {
+        reflectedAddress = ip;
+        reflectedPort = port;
+      };
+
+      anchorService.processSignaling(
+        anchorKey,
+        codec.encode(AddrReflectMessage(ip: reflectedIp, port: 54321)),
+      );
+
+      expect(reflectedAddress, reflectedIp);
+      expect(reflectedPort, 54321);
+
+      anchorService.dispose();
+    });
+
+    test('accepts reflection from any configured rendezvous server', () {
+      final anchorService = SignalingService(
+        store: _storeWithPeers(
+          {},
+          settings: SettingsState(
+            rendezvousServers: [
+              RendezvousServerSettings(
+                address: anchorAddress,
+                pubkeyHex: anchorHex,
+              ),
+              RendezvousServerSettings(
+                address: anchor2Address,
+                pubkeyHex: anchor2Hex,
+              ),
+            ],
+          ),
+        ),
+      );
+
+      String? reflectedAddress;
+      int? reflectedPort;
+
+      anchorService.onAddrReflected = (ip, port) {
+        reflectedAddress = ip;
+        reflectedPort = port;
+      };
+
+      anchorService.processSignaling(
+        anchor2Key,
+        codec.encode(AddrReflectMessage(ip: reflectedIp, port: 54322)),
+      );
+
+      expect(reflectedAddress, reflectedIp);
+      expect(reflectedPort, 54322);
+
+      anchorService.dispose();
     });
   });
 

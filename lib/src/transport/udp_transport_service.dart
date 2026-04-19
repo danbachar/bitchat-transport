@@ -11,6 +11,12 @@ import '../models/identity.dart';
 import '../protocol/protocol_handler.dart';
 import '../store/store.dart';
 
+enum UdpConnectFailureKind {
+  networkUnreachable,
+  handshakeTimeout,
+  other,
+}
+
 /// Display info for UDP transport
 const _defaultUdpDisplayInfo = TransportDisplayInfo(
   icon: Icons.public,
@@ -48,6 +54,8 @@ const _defaultUdpDisplayInfo = TransportDisplayInfo(
 ///
 /// Messages to unreachable peers fail immediately. No caching, no relaying.
 class UdpTransportService extends TransportService {
+  static const Duration _defaultHandshakeTimeout = Duration(seconds: 10);
+
   /// Our Bitchat identity (Ed25519 keypair)
   final BitchatIdentity identity;
 
@@ -74,6 +82,7 @@ class UdpTransportService extends TransportService {
 
   /// Our bound local port (available after [initialize])
   int? _localPort;
+  InternetAddressType? _activeAddressType;
 
   // --- Peer connections ---
 
@@ -104,10 +113,18 @@ class UdpTransportService extends TransportService {
   /// The coordinator deserializes as BitchatPacket and routes via MessageRouter.
   void Function(String pubkeyHex, Uint8List data)? onUdpDataReceived;
 
+  /// Timeout for UDX handshake completion.
+  final Duration connectHandshakeTimeout;
+  final InternetAddressType? preferredAddressType;
+
+  UdpConnectFailureKind? _lastConnectFailureKind;
+
   UdpTransportService({
     required this.identity,
     required this.store,
     required this.protocolHandler,
+    this.connectHandshakeTimeout = _defaultHandshakeTimeout,
+    this.preferredAddressType,
   });
 
   // ===== Public Getters =====
@@ -119,6 +136,9 @@ class UdpTransportService extends TransportService {
   /// Our bound port (available after [initialize])
   int? get localPort => _localPort;
 
+  /// The active IP family for the bound UDP socket.
+  InternetAddressType? get activeAddressType => _activeAddressType;
+
   /// Our local address as ip:port string, or null if not bound.
   String? get localAddress {
     if (_rawSocket == null) return null;
@@ -127,6 +147,12 @@ class UdpTransportService extends TransportService {
 
   /// Cached local LAN address (ip:port). Resolved once at initialization.
   String? _localAddress;
+
+  /// Whether we currently have a usable local route for the active family.
+  bool get hasUsableRoute => _localAddress != null;
+
+  /// Classification of the most recent outbound connect failure, if any.
+  UdpConnectFailureKind? get lastConnectFailureKind => _lastConnectFailureKind;
 
   /// Whether the UDX multiplexer is active (accepting streams)
   bool get isMultiplexerActive => _multiplexer != null;
@@ -173,18 +199,62 @@ class UdpTransportService extends TransportService {
     debugPrint('Initializing UDP transport');
 
     try {
-      // Bind to all IPv6 interfaces, random port.
-      // Bitchat only advertises and dials IPv6 UDP addresses.
-      _rawSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv6, 0);
-      _localPort = _rawSocket!.port;
+      final candidates = preferredAddressType != null
+          ? <InternetAddressType>[preferredAddressType!]
+          : const <InternetAddressType>[
+              InternetAddressType.IPv6,
+              InternetAddressType.IPv4,
+            ];
+
+      RawDatagramSocket? boundSocket;
+      InternetAddressType? boundFamily;
+      String? resolvedLocalAddress;
+
+      for (final family in candidates) {
+        final bindAddress = family == InternetAddressType.IPv6
+            ? InternetAddress.anyIPv6
+            : InternetAddress.anyIPv4;
+
+        try {
+          final socket = await RawDatagramSocket.bind(bindAddress, 0);
+          final localPort = socket.port;
+          final localAddress = await _resolveLocalAddress(localPort, family);
+
+          final shouldFallback = preferredAddressType == null &&
+              family == InternetAddressType.IPv6 &&
+              localAddress == null;
+          if (shouldFallback) {
+            debugPrint('No usable IPv6 route detected, falling back to IPv4 '
+                'UDP bind');
+            socket.close();
+            continue;
+          }
+
+          boundSocket = socket;
+          _localPort = localPort;
+          boundFamily = family;
+          resolvedLocalAddress = localAddress;
+          break;
+        } catch (e) {
+          debugPrint('Failed to bind '
+              '${family == InternetAddressType.IPv6 ? "IPv6" : "IPv4"} '
+              'UDP socket: $e');
+        }
+      }
+
+      if (boundSocket == null || boundFamily == null || _localPort == null) {
+        throw StateError('Failed to bind a usable UDP socket');
+      }
+
+      _rawSocket = boundSocket;
+      _activeAddressType = boundFamily;
+      _localAddress = resolvedLocalAddress;
       _udx = UDX();
 
-      // Resolve actual LAN IP so we share a routable address, not [::].
-      _localAddress = await _resolveLocalAddress(_localPort!);
-
       _setState(TransportState.ready);
-      debugPrint(
-          'UDP transport bound on port $_localPort (local: $_localAddress)');
+      debugPrint('UDP transport bound on port $_localPort '
+          '(${_activeAddressType == InternetAddressType.IPv6 ? "IPv6" : "IPv4"}, '
+          'local: $_localAddress)');
       return true;
     } catch (e) {
       debugPrint('Failed to bind UDP socket: $e');
@@ -284,6 +354,7 @@ class UdpTransportService extends TransportService {
     _udx = null;
     _localPort = null;
     _localAddress = null;
+    _activeAddressType = null;
 
     _state = TransportState.disposed;
 
@@ -300,11 +371,10 @@ class UdpTransportService extends TransportService {
   /// The first message sent MUST be an ANNOUNCE packet (caller's responsibility).
   ///
   /// Returns true if the connection was established.
-  /// Timeout for UDX handshake completion.
-  static const Duration _handshakeTimeout = Duration(seconds: 10);
-
   Future<bool> connectToPeer(
       String pubkeyHex, InternetAddress addr, int port) async {
+    _lastConnectFailureKind = null;
+
     if (_multiplexer == null) {
       debugPrint(
           'Cannot connect: multiplexer not started. Call startMultiplexer() first.');
@@ -316,7 +386,18 @@ class UdpTransportService extends TransportService {
       return true;
     }
 
+    if (!canDialAddress(addr)) {
+      _lastConnectFailureKind = UdpConnectFailureKind.networkUnreachable;
+      debugPrint('Cannot connect to $pubkeyHex: no usable '
+          '${addr.type == InternetAddressType.IPv6 ? "IPv6" : "IPv4"} '
+          'route for ${addr.address}:$port');
+      return false;
+    }
+
     UDPSocket? udpSocket;
+    StreamSubscription? socketErrorsSub;
+    Object? lastSocketError;
+    final connectCompleter = Completer<UDXStream>();
     try {
       final remoteHost = addr.address;
 
@@ -326,30 +407,61 @@ class UdpTransportService extends TransportService {
 
       // Create UDX connection to the peer
       udpSocket = _multiplexer!.createSocket(_udx!, remoteHost, port);
+      final socket = udpSocket;
+      socketErrorsSub = udpSocket.on('error').listen((event) {
+        final data = event.data;
+        if (data is Map && data['error'] != null) {
+          lastSocketError = data['error'];
+          if (!connectCompleter.isCompleted) {
+            connectCompleter.completeError(data['error']);
+          }
+        }
+      });
 
-      // Create outgoing stream. Stream IDs are scoped per UDPSocket (connection),
-      // so we always use ID 1. Remote peer also uses ID 1 for their stream.
-      final stream = await UDXStream.createOutgoing(
-        _udx!,
-        udpSocket,
-        _outgoingStreamId,
-        _expectedIncomingStreamId,
-        remoteHost,
-        port,
-      );
-
-      // Wait for UDX handshake to complete, with timeout.
-      // Without this timeout, the await hangs forever if the remote is
-      // unreachable (firewall, wrong address), leaking UDX sockets and
-      // preventing the auto-connect from ever succeeding.
-      await udpSocket.handshakeComplete.timeout(
-        _handshakeTimeout,
-        onTimeout: () {
-          throw TimeoutException(
-            'UDX handshake timed out after ${_handshakeTimeout.inSeconds}s',
+      // Create the outgoing stream and wait for handshake inside a guarded
+      // zone so low-level async socket send failures are captured as a normal
+      // connect failure instead of escaping to Flutter's top-level handler.
+      runZonedGuarded(() async {
+        try {
+          final stream = await UDXStream.createOutgoing(
+            _udx!,
+            socket,
+            _outgoingStreamId,
+            _expectedIncomingStreamId,
+            remoteHost,
+            port,
           );
-        },
-      );
+
+          // Wait for UDX handshake to complete, with timeout.
+          // Without this timeout, the await hangs forever if the remote is
+          // unreachable (firewall, wrong address), leaking UDX sockets and
+          // preventing the auto-connect from ever succeeding.
+          await socket.handshakeComplete.timeout(
+            connectHandshakeTimeout,
+            onTimeout: () {
+              throw TimeoutException(
+                'UDX handshake timed out after '
+                '${connectHandshakeTimeout.inSeconds}s',
+              );
+            },
+          );
+          if (!connectCompleter.isCompleted) {
+            connectCompleter.complete(stream);
+          }
+        } catch (error, stackTrace) {
+          lastSocketError ??= error;
+          if (!connectCompleter.isCompleted) {
+            connectCompleter.completeError(error, stackTrace);
+          }
+        }
+      }, (error, stackTrace) {
+        lastSocketError ??= error;
+        if (!connectCompleter.isCompleted) {
+          connectCompleter.completeError(error, stackTrace);
+        }
+      });
+
+      final stream = await connectCompleter.future;
 
       // Store the connection
       _peerConnections[pubkeyHex] = _PeerConnection(
@@ -384,8 +496,10 @@ class UdpTransportService extends TransportService {
         connected: true,
       ));
 
+      _lastConnectFailureKind = null;
       return true;
     } catch (e) {
+      _lastConnectFailureKind = _classifyConnectFailure(lastSocketError ?? e);
       debugPrint('Failed to connect to peer $pubkeyHex: $e');
 
       // Clean up the UDX socket on failure to prevent resource leaks.
@@ -400,6 +514,8 @@ class UdpTransportService extends TransportService {
       _addressToPubkey.remove('${addr.address}:$port');
 
       return false;
+    } finally {
+      await socketErrorsSub?.cancel();
     }
   }
 
@@ -770,35 +886,73 @@ class UdpTransportService extends TransportService {
     }
   }
 
+  bool canDialAddress(InternetAddress address) {
+    final activeFamily = _activeAddressType;
+    if (activeFamily == null) return false;
+    if (address.type != activeFamily) return false;
+    if (address.isLoopback) return true;
+    return hasUsableRoute;
+  }
+
   /// Resolve the device's actual LAN IP address for the given port.
   ///
-  /// Enumerates network interfaces to find a usable non-link-local IPv6
-  /// address. Returns null if no suitable IPv6 interface is found.
-  Future<String?> _resolveLocalAddress(int port) async {
+  /// Enumerates network interfaces to find a usable address for the requested
+  /// family. IPv6 excludes link-local addresses because they are not suitable
+  /// for general internet transport.
+  Future<String?> _resolveLocalAddress(
+    int port,
+    InternetAddressType family,
+  ) async {
     try {
       final interfaces = await NetworkInterface.list(
-        type: InternetAddressType.IPv6,
+        type: family,
         includeLoopback: false,
       );
 
-      InternetAddress? bestV6;
+      InternetAddress? bestAddress;
       for (final iface in interfaces) {
         for (final addr in iface.addresses) {
           if (addr.isLoopback) continue;
-          if (addr.type == InternetAddressType.IPv6 && !addr.isLinkLocal) {
-            bestV6 ??= addr;
+          if (addr.type != family) continue;
+          if (family == InternetAddressType.IPv6 && addr.isLinkLocal) {
+            continue;
           }
+          bestAddress ??= addr;
         }
       }
-      if (bestV6 == null) {
-        debugPrint('No usable IPv6 network interface found for local address');
+      if (bestAddress == null) {
+        debugPrint('No usable '
+            '${family == InternetAddressType.IPv6 ? "IPv6" : "IPv4"} '
+            'network interface found for local address');
         return null;
       }
-      return AddressInfo(bestV6, port).toAddressString();
+      return AddressInfo(bestAddress, port).toAddressString();
     } catch (e) {
       debugPrint('Failed to enumerate network interfaces: $e');
       return null;
     }
+  }
+
+  UdpConnectFailureKind _classifyConnectFailure(Object error) {
+    if (error is TimeoutException) {
+      return UdpConnectFailureKind.handshakeTimeout;
+    }
+
+    if (error is SocketException) {
+      final code = error.osError?.errorCode;
+      final details =
+          '${error.message} ${error.osError?.message ?? ""}'.toLowerCase();
+      if (code == 101 ||
+          code == 113 ||
+          code == 65 ||
+          details.contains('network is unreachable') ||
+          details.contains('no route to host') ||
+          details.contains('unreachable')) {
+        return UdpConnectFailureKind.networkUnreachable;
+      }
+    }
+
+    return UdpConnectFailureKind.other;
   }
 }
 
