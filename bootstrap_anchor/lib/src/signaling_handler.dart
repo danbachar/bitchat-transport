@@ -250,21 +250,18 @@ class SignalingHandler {
 
   void _handlePunchReady(Uint8List senderPubkey, PunchReadyMessage msg) {
     final senderHex = _pubkeyToHex(senderPubkey);
-    final readyHex = _pubkeyToHex(msg.peerPubkey);
 
-    if (senderHex == readyHex) {
-      final counterpart = _pendingPunchCounterparts.remove(senderHex);
-      if (counterpart != null) {
-        final counterpartHex = _pubkeyToHex(counterpart);
-        _log('Forwarding punch ready from ${readyHex.substring(0, 8)}... '
-            'to ${counterpartHex.substring(0, 8)}...');
-        sendSignaling?.call(counterpart, codec.encode(msg));
-        return;
-      }
+    final counterpart = _pendingPunchCounterparts.remove(senderHex);
+    if (counterpart != null) {
+      final counterpartHex = _pubkeyToHex(counterpart);
+      _log('Forwarding punch ready from ${senderHex.substring(0, 8)}... '
+          'to ${counterpartHex.substring(0, 8)}...');
+      sendSignaling?.call(counterpart, codec.encode(msg));
+      return;
     }
 
     _log('Unmatched punch ready from ${senderHex.substring(0, 8)}... '
-        'for ${readyHex.substring(0, 8)}...');
+        'for ${_pubkeyToHex(msg.peerPubkey).substring(0, 8)}...');
   }
 
   // ===== Helpers =====

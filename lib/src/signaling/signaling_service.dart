@@ -531,15 +531,15 @@ class SignalingService {
     final senderHex = _pubkeyToHex(senderPubkey);
     final readyHex = _pubkeyToHex(msg.peerPubkey);
 
-    if (senderHex == readyHex) {
-      final counterpart = _pendingPunchCounterparts.remove(senderHex);
-      if (counterpart != null) {
-        final counterpartHex = _pubkeyToHex(counterpart);
-        debugPrint('Forwarding punch ready from ${readyHex.substring(0, 8)}... '
-            'to ${counterpartHex.substring(0, 8)}...');
-        unawaited(sendSignaling?.call(counterpart, codec.encode(msg)));
-        return;
-      }
+    // If we coordinated a punch between two peers (as a well-connected friend),
+    // forward the readiness notification to the counterpart.
+    final counterpart = _pendingPunchCounterparts.remove(senderHex);
+    if (counterpart != null) {
+      final counterpartHex = _pubkeyToHex(counterpart);
+      debugPrint('Forwarding punch ready from ${senderHex.substring(0, 8)}... '
+          'to ${counterpartHex.substring(0, 8)}...');
+      unawaited(sendSignaling?.call(counterpart, codec.encode(msg)));
+      return;
     }
 
     debugPrint('Punch ready from ${readyHex.substring(0, 8)}...');
