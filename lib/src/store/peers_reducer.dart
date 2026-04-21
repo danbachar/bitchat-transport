@@ -235,6 +235,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
         bleCentralDeviceId: action.bleCentralDeviceId,
         blePeripheralDeviceId: action.blePeripheralDeviceId,
         lastBleSeen: isBle ? now : null,
+        lastUdpSeen: action.transport == PeerTransport.udp ? now : null,
         udpAddress: action.udpAddress,
         linkLocalAddress: action.linkLocalAddress,
         isWellConnected: wellConnected,
@@ -272,6 +273,8 @@ PeersState peersReducer(PeersState state, dynamic action) {
         blePeripheralDeviceId:
             action.blePeripheralDeviceId ?? existing.blePeripheralDeviceId,
         lastBleSeen: isBle ? now : existing.lastBleSeen,
+        lastUdpSeen:
+            action.transport == PeerTransport.udp ? now : existing.lastUdpSeen,
         udpAddress: action.udpAddress ?? existing.udpAddress,
         linkLocalAddress: action.linkLocalAddress ?? existing.linkLocalAddress,
         isFriend: existing.isFriend,
@@ -333,6 +336,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
         bleCentralDeviceId: newCentralId,
         blePeripheralDeviceId: newPeripheralId,
         lastBleSeen: hasAnyBle ? existing.lastBleSeen : null,
+        lastUdpSeen: existing.lastUdpSeen,
         udpAddress: existing.udpAddress,
         linkLocalAddress: existing.linkLocalAddress,
         isFriend: existing.isFriend,
@@ -354,6 +358,22 @@ PeersState peersReducer(PeersState state, dynamic action) {
       );
       return state.copyWith(
         peers: Map.from(state.peers)..[action.pubkeyHex] = updated,
+      );
+    }
+    return state;
+  }
+
+  if (action is PeerUdpSeenAction) {
+    final pubkeyHex = _pubkeyToHex(action.publicKey);
+    final existing = state.peers[pubkeyHex];
+    if (existing != null) {
+      final now = DateTime.now();
+      final updated = existing.copyWith(
+        lastSeen: now,
+        lastUdpSeen: now,
+      );
+      return state.copyWith(
+        peers: Map.from(state.peers)..[pubkeyHex] = updated,
       );
     }
     return state;
@@ -381,6 +401,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
         bleCentralDeviceId: existing.bleCentralDeviceId,
         blePeripheralDeviceId: existing.blePeripheralDeviceId,
         lastBleSeen: existing.lastBleSeen,
+        lastUdpSeen: existing.lastUdpSeen,
         udpAddress: existing.udpAddress, // Preserve for reconnection
         linkLocalAddress: existing.linkLocalAddress,
         isFriend: existing.isFriend,
@@ -435,6 +456,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
             bleCentralDeviceId: null,
             blePeripheralDeviceId: null,
             lastBleSeen: null,
+            lastUdpSeen: peer.lastUdpSeen,
             udpAddress: peer.udpAddress,
             linkLocalAddress: peer.linkLocalAddress,
             isFriend: peer.isFriend,
@@ -447,11 +469,6 @@ PeersState peersReducer(PeersState state, dynamic action) {
 
       if (peer.connectionState != PeerConnectionState.connected) return;
       if (peer.lastSeen == null) return;
-
-      // Never mark a peer as stale if we have a live UDP connection to them.
-      // The ANNOUNCE may have stopped arriving over BLE (e.g. BLE disabled),
-      // but the UDP connection is still active and keeping the peer alive.
-      if (action.liveUdpPeers.contains(key)) return;
 
       final timeSinceLastSeen = now.difference(peer.lastSeen!);
       if (timeSinceLastSeen > action.staleThreshold) {
@@ -472,6 +489,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
             bleCentralDeviceId: null,
             blePeripheralDeviceId: null,
             lastBleSeen: null,
+            lastUdpSeen: peer.lastUdpSeen,
             udpAddress: peer.udpAddress, // Preserve for reconnection
             linkLocalAddress: peer.linkLocalAddress,
             isFriend: true,
@@ -576,6 +594,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
         bleCentralDeviceId: existing.bleCentralDeviceId,
         blePeripheralDeviceId: existing.blePeripheralDeviceId,
         lastBleSeen: existing.lastBleSeen,
+        lastUdpSeen: existing.lastUdpSeen,
         // Clear all UDP/friend fields
         isFriend: false,
         udpAddress: null,

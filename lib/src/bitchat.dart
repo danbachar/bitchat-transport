@@ -94,6 +94,29 @@ bool shouldAcceptRendezvousReply(
   return false;
 }
 
+@visibleForTesting
+Set<String> computeStaleUdpPeerPubkeys({
+  required Iterable<PeerState> peers,
+  required Set<String> connectedUdpPubkeys,
+  required Duration staleThreshold,
+  DateTime? now,
+}) {
+  final evaluationTime = now ?? DateTime.now();
+  final stale = <String>{};
+
+  for (final peer in peers) {
+    if (!connectedUdpPubkeys.contains(peer.pubkeyHex)) continue;
+    final lastUdpSeen = peer.lastUdpSeen;
+    if (lastUdpSeen == null) continue;
+
+    if (evaluationTime.difference(lastUdpSeen) > staleThreshold) {
+      stale.add(peer.pubkeyHex);
+    }
+  }
+
+  return stale;
+}
+
 /// Main Bitchat transport API.
 ///
 /// This is the entry point for GSG to use Bitchat as a transport layer.
@@ -2660,6 +2683,7 @@ class Bitchat {
     _udpService!.connectionStream.listen((event) {
       if (event.connected) {
         debugPrint('UDP peer connected: ${event.peerId}');
+        store.dispatch(PeerUdpSeenAction(_hexToBytes(event.peerId)));
 
         final wasPunching = _holePunchTargets.containsKey(event.peerId) ||
             _holePunchLocalReady.contains(event.peerId) ||
@@ -2972,26 +2996,42 @@ class Bitchat {
 
   /// Remove peers that haven't sent an ANNOUNCE within the interval.
   ///
-  /// Peers with live UDP connections are excluded — the stale check is based
-  /// on ANNOUNCE timing, but a live UDX connection means the peer is reachable
-  /// even if BLE ANNOUNCEs stopped (e.g. BLE was disabled).
+  /// BLE/general staleness uses [PeerState.lastSeen]. UDP liveness is tracked
+  /// independently via [PeerState.lastUdpSeen] so a nearby BLE friend can age
+  /// out of "Friends Online" without disappearing from "Nearby".
   void _removeStalePeers() {
     final staleThreshold = config.announceInterval * 2; // Give 2x grace period
 
-    // Collect pubkey hexes of peers with live UDX connections
-    final liveUdpPeers = <String>{};
+    // Tear down quiet UDP sessions that have missed 2 announce cycles.
+    final connectedUdpPubkeys = <String>{};
     if (_udpService != null) {
       for (final peer in _peersState.peersList) {
         if (_udpService!.getPeerIdForPubkey(peer.publicKey) != null) {
-          liveUdpPeers.add(peer.pubkeyHex);
+          connectedUdpPubkeys.add(peer.pubkeyHex);
         }
+      }
+    }
+
+    final staleUdpPeers = computeStaleUdpPeerPubkeys(
+      peers: _peersState.peersList,
+      connectedUdpPubkeys: connectedUdpPubkeys,
+      staleThreshold: staleThreshold,
+    );
+    if (_udpService != null) {
+      for (final pubkeyHex in staleUdpPeers) {
+        final peer = _peersState.getPeerByPubkeyHex(pubkeyHex);
+        if (peer == null) continue;
+
+        debugPrint('[udp-stale] No UDP traffic from ${peer.displayName} for '
+            '${staleThreshold.inSeconds}s; disconnecting stale session');
+        store.dispatch(PeerUdpDisconnectedAction(peer.publicKey));
+        unawaited(_udpService!.disconnectFromPeer(pubkeyHex));
       }
     }
 
     // Dispatch action to remove stale peers via Redux
     store.dispatch(StaleDiscoveredBlePeersRemovedAction(staleThreshold));
-    store.dispatch(
-        StalePeersRemovedAction(staleThreshold, liveUdpPeers: liveUdpPeers));
+    store.dispatch(StalePeersRemovedAction(staleThreshold));
   }
 
   // ===== BLE Fragmentation Helpers =====

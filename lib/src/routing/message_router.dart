@@ -101,6 +101,12 @@ class MessageRouter {
       effectiveUdpPeerId = _pubkeyToHex(packet.senderPubkey);
     }
 
+    // Any verified non-ANNOUNCE packet over UDP counts as liveness traffic
+    // for that peer, even if it is an ACK, read receipt, or retransmission.
+    if (transport == PeerTransport.udp && packet.type != PacketType.announce) {
+      store.dispatch(PeerUdpSeenAction(packet.senderPubkey));
+    }
+
     // ANNOUNCE always processed (peer may have updated info)
     if (packet.type == PacketType.announce) {
       _handleAnnounce(

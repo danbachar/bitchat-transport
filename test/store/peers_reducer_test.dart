@@ -663,6 +663,53 @@ void main() {
       expect(peer.blePeripheralDeviceId, 'peripheral-id');
       expect(peer.udpAddress, '[2001:db8::1]:4001');
     });
+
+    test('UDP ANNOUNCE records lastUdpSeen', () {
+      final pubkey = _testPubkey(3);
+      final action = PeerAnnounceReceivedAction(
+        publicKey: pubkey,
+        nickname: 'Carol',
+        protocolVersion: 1,
+        rssi: -42,
+        transport: PeerTransport.udp,
+        udpAddress: '[2001:db8::3]:4003',
+      );
+
+      final result = peersReducer(PeersState.initial, action);
+
+      final peer = result.peers[_pubkeyHex(pubkey)]!;
+      expect(peer.lastUdpSeen, isNotNull);
+    });
+
+    test('BLE ANNOUNCE preserves existing lastUdpSeen', () {
+      final pubkey = _testPubkey(4);
+      final hex = _pubkeyHex(pubkey);
+      final udpSeenAt = DateTime.now().subtract(const Duration(minutes: 1));
+      final initial = PeersState(
+        peers: {
+          hex: PeerState(
+            publicKey: pubkey,
+            nickname: 'Dana',
+            connectionState: PeerConnectionState.connected,
+            lastSeen: udpSeenAt,
+            lastUdpSeen: udpSeenAt,
+            udpAddress: '[2001:db8::4]:4004',
+          ),
+        },
+      );
+      final action = PeerAnnounceReceivedAction(
+        publicKey: pubkey,
+        nickname: 'Dana',
+        protocolVersion: 1,
+        rssi: -55,
+        transport: PeerTransport.bleDirect,
+        bleCentralDeviceId: 'central-4',
+      );
+
+      final result = peersReducer(initial, action);
+
+      expect(result.peers[hex]!.lastUdpSeen, equals(udpSeenAt));
+    });
   });
 
   // =========================================================================
@@ -902,6 +949,45 @@ void main() {
       // UDP address must never be cleared on disconnect — it's
       // the last known location and the only way to attempt reconnection.
       expect(result.peers[hex]!.udpAddress, '[2001:db8::1]:4001');
+    });
+  });
+
+  // =========================================================================
+  // PeerUdpSeenAction
+  // =========================================================================
+
+  group('PeerUdpSeenAction', () {
+    test('updates lastSeen and lastUdpSeen for existing peer', () {
+      final pubkey = _testPubkey(5);
+      final hex = _pubkeyHex(pubkey);
+      final initialSeenAt = DateTime.now().subtract(const Duration(minutes: 5));
+      final initial = PeersState(
+        peers: {
+          hex: PeerState(
+            publicKey: pubkey,
+            nickname: 'Eve',
+            connectionState: PeerConnectionState.connected,
+            lastSeen: initialSeenAt,
+            lastUdpSeen: initialSeenAt,
+          ),
+        },
+      );
+
+      final result = peersReducer(initial, PeerUdpSeenAction(pubkey));
+
+      final peer = result.peers[hex]!;
+      expect(peer.lastSeen, isNotNull);
+      expect(peer.lastUdpSeen, isNotNull);
+      expect(peer.lastSeen!.isAfter(initialSeenAt), isTrue);
+      expect(peer.lastUdpSeen!.isAfter(initialSeenAt), isTrue);
+    });
+
+    test('is a no-op for unknown peer', () {
+      const state = PeersState.initial;
+
+      final result = peersReducer(state, PeerUdpSeenAction(_testPubkey(42)));
+
+      expect(result, same(state));
     });
   });
 

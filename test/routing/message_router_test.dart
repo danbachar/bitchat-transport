@@ -696,6 +696,27 @@ void main() {
         expect(receivedPayload, equals(msgPayload));
       });
 
+      test('marks existing peer as seen over UDP', () async {
+        store.dispatch(FriendEstablishedAction(publicKey: otherPubkey));
+
+        final p = await signedPacket(
+          type: PacketType.message,
+          recipientPubkey: identity.publicKey,
+          payload: Uint8List.fromList([9, 8, 7]),
+        );
+
+        await router.processPacket(
+          p,
+          transport: PeerTransport.udp,
+          udpPeerId: 'peer-seen-test',
+        );
+
+        final peer = store.state.peers.getPeerByPubkey(otherPubkey);
+        expect(peer, isNotNull);
+        expect(peer!.lastUdpSeen, isNotNull);
+        expect(peer.lastSeen, isNotNull);
+      });
+
       test('triggers onAckRequested with canonical UDP peer id', () async {
         PeerTransport? ackTransport;
         String? ackPeerId;

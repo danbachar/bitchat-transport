@@ -1,4 +1,3 @@
-import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import '../models/peer.dart';
 
@@ -160,6 +159,10 @@ class PeerState {
   /// Used to detect stale BLE IDs (peer left BLE range but still on UDP).
   final DateTime? lastBleSeen;
 
+  /// When the last verified UDP packet was received from this peer.
+  /// Used to age out stale UDX sessions independently of BLE freshness.
+  final DateTime? lastUdpSeen;
+
   /// UDP address if connected via UDP (ip:port format)
   final String? udpAddress;
 
@@ -190,6 +193,7 @@ class PeerState {
     this.bleCentralDeviceId,
     this.blePeripheralDeviceId,
     this.lastBleSeen,
+    this.lastUdpSeen,
     this.udpAddress,
     this.linkLocalAddress,
     this.isFriend = false,
@@ -248,6 +252,7 @@ class PeerState {
     String? bleCentralDeviceId,
     String? blePeripheralDeviceId,
     DateTime? lastBleSeen,
+    DateTime? lastUdpSeen,
     String? udpAddress,
     String? linkLocalAddress,
     bool? isFriend,
@@ -265,6 +270,7 @@ class PeerState {
       bleCentralDeviceId: bleCentralDeviceId ?? this.bleCentralDeviceId,
       blePeripheralDeviceId: blePeripheralDeviceId ?? this.blePeripheralDeviceId,
       lastBleSeen: lastBleSeen ?? this.lastBleSeen,
+      lastUdpSeen: lastUdpSeen ?? this.lastUdpSeen,
       udpAddress: udpAddress ?? this.udpAddress,
       linkLocalAddress: linkLocalAddress ?? this.linkLocalAddress,
       isFriend: isFriend ?? this.isFriend,

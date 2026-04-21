@@ -166,6 +166,16 @@ class PeerUdpConnectionChangedAction extends PeerAction {
   });
 }
 
+/// A verified UDP packet was received from a peer.
+///
+/// Updates UDP-specific freshness so stale UDX sessions can be aged out even
+/// when the peer is still nearby over BLE.
+class PeerUdpSeenAction extends PeerAction {
+  final Uint8List publicKey;
+
+  PeerUdpSeenAction(this.publicKey);
+}
+
 /// Mark peer as disconnected from UDP
 class PeerUdpDisconnectedAction extends PeerAction {
   final Uint8List publicKey;
@@ -191,12 +201,7 @@ class PeerRemovedAction extends PeerAction {
 class StalePeersRemovedAction extends PeerAction {
   final Duration staleThreshold;
 
-  /// Pubkey hexes of peers with live UDP connections that should NOT be
-  /// marked stale. The coordinator populates this from the UDP service
-  /// since the reducer has no access to transport-layer state.
-  final Set<String> liveUdpPeers;
-
-  StalePeersRemovedAction(this.staleThreshold, {this.liveUdpPeers = const {}});
+  StalePeersRemovedAction(this.staleThreshold);
 }
 
 /// Clear all peers
