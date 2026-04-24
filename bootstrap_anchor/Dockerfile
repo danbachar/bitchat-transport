@@ -40,4 +40,4 @@ EXPOSE 9514/udp
 EXPOSE 9516/udp
 
 ENTRYPOINT ["/app/rendezvous_server"]
-CMD ["--identity", "/app/data/identity.json", "--family", "dual", "--ipv4-port", "9514", "--ipv6-port", "9516"]
+CMD ["--identity", "/app/data/identity.json", "--ipv6-port", "9516"]

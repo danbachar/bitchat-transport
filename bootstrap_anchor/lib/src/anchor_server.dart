@@ -25,20 +25,14 @@ import 'signaling_handler.dart';
 ///
 /// The architecture is federated: anyone can run a rendezvous server,
 /// and agents may use multiple servers for redundancy.
-enum AnchorBindMode {
-  auto,
-  dual,
-  ipv6,
-  ipv4,
-}
-
+///
+/// The anchor is IPv6-only. Clients on IPv4-only networks are treated as
+/// having no Internet reachability.
 class AnchorServer {
   final int ipv6Port;
-  final int ipv4Port;
   final String nickname;
   final String identityPath;
   final int announceIntervalSeconds;
-  final AnchorBindMode bindMode;
 
   late AnchorIdentity _identity;
   late Protocol _protocol;
@@ -47,7 +41,7 @@ class AnchorServer {
   late SignalingHandler _signalingHandler;
   late SignalingCodec _codec;
 
-  final Map<InternetAddressType, _AnchorListener> _listeners = {};
+  _AnchorListener? _listener;
 
   /// Active UDX connections per peer, keyed by pubkey hex.
   final Map<String, _PeerConnection> _peerConnections = {};
@@ -69,9 +63,7 @@ class AnchorServer {
     required this.nickname,
     required this.identityPath,
     this.announceIntervalSeconds = 30,
-    this.bindMode = AnchorBindMode.dual,
     this.ipv6Port = 9516,
-    this.ipv4Port = 9514,
   });
 
   Future<void> start() async {
@@ -97,18 +89,16 @@ class AnchorServer {
     );
     _signalingHandler.sendSignaling = _sendSignaling;
 
-    await _bindListenersAndDiscoverAddresses();
-    for (final listener in _listeners.values) {
-      listener.multiplexer = UDXMultiplexer(listener.rawSocket);
-      listener.multiplexer!.onRawPacket = (data, address, port) =>
-          _handleRawPacket(listener, data, address, port);
-      listener.connectionsSub = listener.multiplexer!.connections.listen(
-        (socket) => _handleIncomingConnection(listener, socket),
-      );
-      _log('UDP socket bound on port ${listener.port} '
-          '(${listener.family == InternetAddressType.IPv6 ? "IPv6" : "IPv4"})');
-      _log('UDX multiplexer started on port ${listener.port}');
-    }
+    _listener = await _bindIpv6Listener();
+    final listener = _listener!;
+    listener.multiplexer = UDXMultiplexer(listener.rawSocket);
+    listener.multiplexer!.onRawPacket = (data, address, port) =>
+        _handleRawPacket(listener, data, address, port);
+    listener.connectionsSub = listener.multiplexer!.connections.listen(
+      (socket) => _handleIncomingConnection(listener, socket),
+    );
+    _log('UDP socket bound on port ${listener.port} (IPv6)');
+    _log('UDX multiplexer started on port ${listener.port}');
 
     // Periodic ANNOUNCE to all connected peers
     _announceTimer = Timer.periodic(
@@ -120,7 +110,10 @@ class AnchorServer {
     _staleCleanupTimer = Timer.periodic(
       const Duration(seconds: 60),
       (_) {
-        _addressTable.removeStale(const Duration(minutes: 5));
+        _addressTable.removeStale(
+          const Duration(minutes: 5),
+          protectedPubkeys: _peerConnections.keys.toSet(),
+        );
         _peerTable.removeStale(const Duration(minutes: 30));
       },
     );
@@ -132,10 +125,7 @@ class AnchorServer {
     );
 
     _log('Rendezvous server ready');
-    for (final listener in _listeners.values) {
-      _log('  ${listener.family == InternetAddressType.IPv6 ? "IPv6" : "IPv4"} '
-          'address: ${listener.publicAddress}');
-    }
+    _log('  IPv6 address: ${listener.publicAddress}');
     _log('  Pubkey:   ${_identity.pubkeyHex}');
     _log('Waiting for connections...');
   }
@@ -144,9 +134,8 @@ class AnchorServer {
     _announceTimer?.cancel();
     _staleCleanupTimer?.cancel();
     _statsTimer?.cancel();
-    for (final listener in _listeners.values) {
-      await listener.connectionsSub?.cancel();
-    }
+    final listener = _listener;
+    await listener?.connectionsSub?.cancel();
 
     for (final conn in _peerConnections.values) {
       try {
@@ -155,142 +144,59 @@ class AnchorServer {
     }
     _peerConnections.clear();
 
-    for (final listener in _listeners.values) {
+    if (listener != null) {
       listener.rawSocket.close();
       listener.multiplexer = null;
     }
-    _listeners.clear();
+    _listener = null;
     _log('Rendezvous server stopped');
   }
 
   // ===== Public Address Discovery =====
 
-  Future<void> _bindListenersAndDiscoverAddresses() async {
-    final specs = _listenerSpecs();
-    if (bindMode == AnchorBindMode.dual &&
-        specs.length > 1 &&
-        specs[0].port == specs[1].port) {
-      throw ArgumentError(
-        'Dual-stack mode requires distinct IPv4 and IPv6 ports',
-      );
-    }
-
-    for (final spec in specs) {
-      final listener = await _tryBindListener(
-        spec.family,
-        spec.port,
-        requireDiscoverablePublicAddress: bindMode == AnchorBindMode.auto &&
-            spec.family == InternetAddressType.IPv6,
-      );
-      if (listener != null) {
-        _listeners[spec.family] = listener;
-        if (bindMode == AnchorBindMode.auto) break;
-      }
-    }
-
-    if (_listeners.isEmpty) {
-      throw StateError('Failed to bind a usable UDP socket');
-    }
-  }
-
-  List<_ListenerSpec> _listenerSpecs() {
-    switch (bindMode) {
-      case AnchorBindMode.auto:
-        return <_ListenerSpec>[
-          _ListenerSpec(InternetAddressType.IPv6, ipv6Port),
-          _ListenerSpec(InternetAddressType.IPv4, ipv4Port),
-        ];
-      case AnchorBindMode.dual:
-        return <_ListenerSpec>[
-          _ListenerSpec(InternetAddressType.IPv6, ipv6Port),
-          _ListenerSpec(InternetAddressType.IPv4, ipv4Port),
-        ];
-      case AnchorBindMode.ipv6:
-        return <_ListenerSpec>[
-          _ListenerSpec(InternetAddressType.IPv6, ipv6Port),
-        ];
-      case AnchorBindMode.ipv4:
-        return <_ListenerSpec>[
-          _ListenerSpec(InternetAddressType.IPv4, ipv4Port),
-        ];
-    }
-  }
-
-  Future<_AnchorListener?> _tryBindListener(
-    InternetAddressType family,
-    int listenerPort, {
-    bool requireDiscoverablePublicAddress = false,
-  }) async {
-    final bindAddress = family == InternetAddressType.IPv6
-        ? InternetAddress.anyIPv6
-        : InternetAddress.anyIPv4;
-
+  Future<_AnchorListener> _bindIpv6Listener() async {
+    final RawDatagramSocket socket;
     try {
-      final socket = await RawDatagramSocket.bind(bindAddress, listenerPort);
-      final publicAddress =
-          await _discoverPublicAddressForFamily(family, listenerPort);
-
-      if (requireDiscoverablePublicAddress && publicAddress == null) {
-        _log('No usable public IPv6 address detected, falling back to IPv4');
-        socket.close();
-        return null;
-      }
-
-      return _AnchorListener(
-        family: family,
-        port: listenerPort,
-        rawSocket: socket,
-        publicAddress:
-            publicAddress ?? _defaultBindAddressForFamily(family, listenerPort),
-      );
+      socket = await RawDatagramSocket.bind(InternetAddress.anyIPv6, ipv6Port);
     } catch (e) {
-      _log('Failed to bind '
-          '${family == InternetAddressType.IPv6 ? "IPv6" : "IPv4"} '
-          'socket on port $listenerPort: $e');
-      return null;
+      throw StateError('Failed to bind IPv6 UDP socket on port $ipv6Port: $e');
     }
+    final publicAddress = await _discoverPublicIpv6Address(ipv6Port);
+    return _AnchorListener(
+      family: InternetAddressType.IPv6,
+      port: ipv6Port,
+      rawSocket: socket,
+      publicAddress: publicAddress ?? '[::]:$ipv6Port',
+    );
   }
 
-  Future<String?> _discoverPublicAddressForFamily(
-    InternetAddressType family,
-    int listenerPort,
-  ) async {
-    final label = family == InternetAddressType.IPv6 ? 'IPv6' : 'IPv4';
-
-    // IPv6: GCE assigns global addresses directly to the interface, so
-    // NetworkInterface.list() works. For IPv4, GCE uses 1:1 NAT — the
-    // interface only sees the RFC1918 internal address (e.g. 10.20.0.2),
-    // so we must query an external source.
-    if (family == InternetAddressType.IPv6) {
-      try {
-        final interfaces = await NetworkInterface.list(
-          type: family,
-          includeLoopback: false,
-        );
-        for (final iface in interfaces) {
-          for (final addr in iface.addresses) {
-            if (addr.isLoopback || addr.isLinkLocal) continue;
-            final discovered = _formatAddress(addr.address, listenerPort);
-            _log('Discovered public $label address: $discovered');
-            return discovered;
-          }
+  Future<String?> _discoverPublicIpv6Address(int listenerPort) async {
+    // GCE assigns global IPv6 addresses directly to the interface, so
+    // NetworkInterface.list() works.
+    try {
+      final interfaces = await NetworkInterface.list(
+        type: InternetAddressType.IPv6,
+        includeLoopback: false,
+      );
+      for (final iface in interfaces) {
+        for (final addr in iface.addresses) {
+          if (addr.isLoopback || addr.isLinkLocal) continue;
+          final discovered = '[${addr.address}]:$listenerPort';
+          _log('Discovered public IPv6 address: $discovered');
+          return discovered;
         }
-      } catch (e) {
-        _log('Failed to enumerate $label interfaces: $e');
       }
+    } catch (e) {
+      _log('Failed to enumerate IPv6 interfaces: $e');
     }
 
-    // GCE metadata server — fast, no external dependency, works for both
-    // families. IPv4 metadata returns the external NAT IP; IPv6 returns
-    // the /96 prefix (we strip the trailing /96 if present).
-    final metadataPath = family == InternetAddressType.IPv4
-        ? 'network-interfaces/0/access-configs/0/external-ip'
-        : 'network-interfaces/0/ipv6s';
+    // GCE metadata server — IPv6 /96 prefix (we strip the trailing /96).
     try {
       final client = HttpClient();
       try {
         final request = await client.getUrl(Uri.parse(
-          'http://metadata.google.internal/computeMetadata/v1/instance/$metadataPath',
+          'http://metadata.google.internal/computeMetadata/v1/instance/'
+          'network-interfaces/0/ipv6s',
         ));
         request.headers.set('Metadata-Flavor', 'Google');
         final response = await request.close();
@@ -298,13 +204,12 @@ class AnchorServer {
           final body =
               await response.transform(const SystemEncoding().decoder).join();
           var ip = body.trim();
-          // IPv6 metadata may return "addr/96" — strip the prefix length.
           if (ip.contains('/')) ip = ip.split('/').first;
           final parsed = InternetAddress.tryParse(ip);
-          if (parsed != null && parsed.type == family) {
-            final discovered = _formatAddress(parsed.address, listenerPort);
-            _log('Discovered public $label address via GCE metadata: '
-                '$discovered');
+          if (parsed != null && parsed.type == InternetAddressType.IPv6) {
+            final discovered = '[${parsed.address}]:$listenerPort';
+            _log(
+                'Discovered public IPv6 address via GCE metadata: $discovered');
             return discovered;
           }
         }
@@ -312,47 +217,34 @@ class AnchorServer {
         client.close();
       }
     } catch (e) {
-      _log('GCE metadata unavailable for $label: $e');
+      _log('GCE metadata unavailable for IPv6: $e');
     }
 
     // Fallback: external service.
-    final url = family == InternetAddressType.IPv6
-        ? 'https://ipv6.seeip.org'
-        : 'https://api.seeip.org';
     try {
       final client = HttpClient();
       try {
-        final request = await client.getUrl(Uri.parse(url));
+        final request =
+            await client.getUrl(Uri.parse('https://ipv6.seeip.org'));
         final response = await request.close();
         final body =
             await response.transform(const SystemEncoding().decoder).join();
         final ip = body.trim();
         final parsed = InternetAddress.tryParse(ip);
-        if (parsed != null && parsed.type == family) {
-          final discovered = _formatAddress(parsed.address, listenerPort);
-          _log('Discovered public $label address via seeip.org: $discovered');
+        if (parsed != null && parsed.type == InternetAddressType.IPv6) {
+          final discovered = '[${parsed.address}]:$listenerPort';
+          _log('Discovered public IPv6 address via seeip.org: $discovered');
           return discovered;
         }
       } finally {
         client.close();
       }
     } catch (e) {
-      _log('Failed to discover public $label address via seeip: $e');
+      _log('Failed to discover public IPv6 address via seeip: $e');
     }
 
     return null;
   }
-
-  String _defaultBindAddressForFamily(
-    InternetAddressType family,
-    int listenerPort,
-  ) =>
-      family == InternetAddressType.IPv6
-          ? '[::]:$listenerPort'
-          : '0.0.0.0:$listenerPort';
-
-  String _formatAddress(String ip, int listenerPort) =>
-      ip.contains(':') ? '[$ip]:$listenerPort' : '$ip:$listenerPort';
 
   // ===== Connection Handling =====
 
@@ -429,10 +321,7 @@ class AnchorServer {
         if (pubkeyHex != null) {
           final existing = _peerConnections[pubkeyHex];
           if (existing?.stream == stream) {
-            _peerConnections.remove(pubkeyHex);
-            _addressToPubkey
-                .remove('${socket.remoteAddress.address}:${socket.remotePort}');
-            _log('Peer disconnected: ${pubkeyHex.substring(0, 8)}...');
+            _forgetPeerConnection(pubkeyHex, existing!);
           }
         }
         _pendingIncoming.remove(tempKey);
@@ -458,8 +347,7 @@ class AnchorServer {
         _log('UDX stream closed from ${pubkeyHex.substring(0, 8)}...');
         final existing = _peerConnections[pubkeyHex];
         if (existing?.stream == stream) {
-          _peerConnections.remove(pubkeyHex);
-          _addressToPubkey.remove('${existing!.addr.address}:${existing.port}');
+          _forgetPeerConnection(pubkeyHex, existing!);
         }
       },
     );
@@ -516,8 +404,11 @@ class AnchorServer {
 
     final senderHex = _pubkeyToHex(packet.senderPubkey);
 
-    // Map incoming connection to pubkey
-    if (peerId.contains(':') && !_peerConnections.containsKey(senderHex)) {
+    // Map incoming connection to pubkey. Always rebind a freshly-arrived
+    // tempKey so that a reconnecting peer (new NAT-mapped source port)
+    // replaces its stale `_peerConnections` entry. `_trackPeerConnection`
+    // handles closing the prior stream when addr/port differ.
+    if (peerId.contains(':') && _pendingIncoming.containsKey(peerId)) {
       _tempKeyToPubkey[peerId] = senderHex;
       _mapIncomingConnectionToPubkey(peerId, senderHex);
     }
@@ -558,6 +449,12 @@ class AnchorServer {
     final data = _protocol.decodeAnnounce(packet.payload);
     final senderHex = data.pubkeyHex;
 
+    _refreshTrackedAddressFromAnnounce(
+      senderHex,
+      observedIp: observedIp,
+      observedPort: observedPort,
+    );
+
     _signalingHandler.processAnnounce(
       data,
       observedIp: observedIp,
@@ -570,6 +467,26 @@ class AnchorServer {
       packet.senderPubkey,
       address: localPublicAddress,
     );
+  }
+
+  void _refreshTrackedAddressFromAnnounce(
+    String pubkeyHex, {
+    String? observedIp,
+    int? observedPort,
+  }) {
+    final connection = _peerConnections[pubkeyHex];
+    if (connection == null || observedIp == null || observedPort == null) {
+      return;
+    }
+
+    // Only refresh the address-table timestamp when the observed endpoint still
+    // matches the currently-tracked live UDX session.
+    if (connection.addr.address != observedIp ||
+        connection.port != observedPort) {
+      return;
+    }
+
+    _addressTable.register(pubkeyHex, observedIp, observedPort);
   }
 
   void _mapIncomingConnectionToPubkey(String tempKey, String pubkeyHex) {
@@ -595,12 +512,28 @@ class AnchorServer {
 
   Future<bool> _sendSignaling(
       Uint8List recipientPubkey, Uint8List signalingPayload) async {
+    final senderHex = _identity.pubkeyHex;
+    final recipientHex = _pubkeyToHex(recipientPubkey);
+    final signalingSummary = _describeSignalingPayload(signalingPayload);
+    _log('Preparing signaling reply $signalingSummary from '
+        '${senderHex.substring(0, 8)}... to ${recipientHex.substring(0, 8)}... '
+        '(payload=${signalingPayload.length}B)');
+
     final packet = _protocol.createSignalingPacket(
       recipientPubkey: recipientPubkey,
       signalingPayload: signalingPayload,
     );
     await _protocol.signPacket(packet);
-    return _sendPacket(_pubkeyToHex(recipientPubkey), packet);
+    final serializedLength = packet.serialize().length;
+    _log('Signed signaling reply $signalingSummary from '
+        '${senderHex.substring(0, 8)}... to ${recipientHex.substring(0, 8)}... '
+        '(wire=$serializedLength B)');
+
+    final sent = _sendPacket(recipientHex, packet);
+    _log('Signaling send path for ${recipientHex.substring(0, 8)}... '
+        '${sent ? "accepted" : "rejected"} '
+        '($signalingSummary)');
+    return sent;
   }
 
   Future<void> _sendAnnounceTo(
@@ -630,17 +563,67 @@ class AnchorServer {
 
   bool _sendPacket(String pubkeyHex, BitchatPacket packet) {
     final conn = _peerConnections[pubkeyHex];
-    if (conn == null || conn.stream == null) {
-      _log('Cannot send to ${pubkeyHex.substring(0, 8)}...: not connected');
+    final packetLabel = packet.type.name;
+    final isSignaling = packet.type == PacketType.signaling;
+    final signalingSummary =
+        isSignaling ? _describeSignalingPayload(packet.payload) : null;
+
+    if (conn == null) {
+      if (isSignaling) {
+        _log('Cannot send $packetLabel to ${pubkeyHex.substring(0, 8)}...: '
+            'no peer connection entry ($signalingSummary)');
+      } else {
+        _log('Cannot send to ${pubkeyHex.substring(0, 8)}...: not connected');
+      }
+      return false;
+    }
+
+    if (conn.stream == null) {
+      if (isSignaling) {
+        _log('Cannot send $packetLabel to ${pubkeyHex.substring(0, 8)}...: '
+            'connection has no UDX stream '
+            '(remote=${conn.addr.address}:${conn.port}, '
+            'listener=${_familyLabel(conn.listenerFamily)}, '
+            '$signalingSummary)');
+      } else {
+        _log('Cannot send to ${pubkeyHex.substring(0, 8)}...: not connected');
+      }
       return false;
     }
 
     try {
       final data = packet.serialize();
-      conn.stream!.add(data);
+      if (isSignaling) {
+        _log('Sending $packetLabel to ${pubkeyHex.substring(0, 8)}... via '
+            '${conn.addr.address}:${conn.port} '
+            '(listener=${_familyLabel(conn.listenerFamily)}, '
+            'streamId=${conn.stream!.id}, bytes=${data.length}, '
+            '$signalingSummary)');
+      }
+
+      final addFuture = conn.stream!.add(data);
+      if (isSignaling) {
+        _log('stream.add returned cleanly for ${pubkeyHex.substring(0, 8)}... '
+            '($packetLabel, future=${addFuture.runtimeType})');
+        unawaited(
+          addFuture.then((_) {
+            _log('stream.add completed for ${pubkeyHex.substring(0, 8)}... '
+                '($packetLabel, bytes=${data.length}, $signalingSummary)');
+          }).catchError((Object e, StackTrace _) {
+            _log('stream.add failed asynchronously for '
+                '${pubkeyHex.substring(0, 8)}... '
+                '($packetLabel, $signalingSummary): $e');
+          }),
+        );
+      }
       return true;
     } catch (e) {
-      _log('Failed to send to ${pubkeyHex.substring(0, 8)}...: $e');
+      if (isSignaling) {
+        _log('Failed to send $packetLabel to ${pubkeyHex.substring(0, 8)}... '
+            '($signalingSummary): $e');
+      } else {
+        _log('Failed to send to ${pubkeyHex.substring(0, 8)}...: $e');
+      }
       return false;
     }
   }
@@ -661,6 +644,36 @@ class AnchorServer {
     _peerConnections[pubkeyHex] = connection;
     _addressToPubkey['${connection.addr.address}:${connection.port}'] =
         pubkeyHex;
+
+    // The address table mirrors the live session. Drop any entries from a
+    // prior session (possibly a different family) and register the current
+    // one — so queries and punches can only ever return the address we're
+    // actually exchanging packets with right now.
+    _addressTable.remove(pubkeyHex);
+    _addressTable.register(
+      pubkeyHex,
+      connection.addr.address,
+      connection.port,
+    );
+    final nickname = _peerTable.lookupVerified(pubkeyHex)?.nickname ??
+        pubkeyHex.substring(0, 8);
+    _log('Address registered: $nickname (${pubkeyHex.substring(0, 8)}...) → '
+        '${connection.addr.address}:${connection.port} '
+        '(${_familyLabel(connection.listenerFamily)})');
+  }
+
+  /// Remove the peer's live-session tracking. Called when a UDX stream ends
+  /// and no replacement has taken over. Keeps the address table aligned with
+  /// the live connection set — once there's no live session, the address
+  /// stops being reachable, so we stop advertising it.
+  void _forgetPeerConnection(String pubkeyHex, _PeerConnection released) {
+    final current = _peerConnections[pubkeyHex];
+    if (current?.stream != released.stream) return;
+    _peerConnections.remove(pubkeyHex);
+    _addressToPubkey.remove('${released.addr.address}:${released.port}');
+    _addressTable.remove(pubkeyHex);
+    _log('Peer disconnected: ${pubkeyHex.substring(0, 8)}... '
+        '(address table entry cleared)');
   }
 
   // ===== Stats =====
@@ -681,6 +694,36 @@ class AnchorServer {
   }
 
   // ===== Helpers =====
+
+  String _describeSignalingPayload(Uint8List signalingPayload) {
+    try {
+      final message = _codec.decode(signalingPayload);
+      return switch (message) {
+        AddrQueryMessage() =>
+          'addrQuery target=${_shortHex(_pubkeyToHex(message.targetPubkey))}',
+        AddrResponseMessage() =>
+          'addrResponse target=${_shortHex(_pubkeyToHex(message.targetPubkey))} '
+              '${message.found ? "addr=${message.ip}:${message.port}" : "not-found"}',
+        PunchRequestMessage() =>
+          'punchRequest target=${_shortHex(_pubkeyToHex(message.targetPubkey))}',
+        PunchInitiateMessage() =>
+          'punchInitiate peer=${_shortHex(_pubkeyToHex(message.peerPubkey))} '
+              'addr=${message.ip}:${message.port}',
+        PunchReadyMessage() =>
+          'punchReady peer=${_shortHex(_pubkeyToHex(message.peerPubkey))}',
+        AddrReflectMessage() =>
+          'addrReflect addr=${message.ip}:${message.port}',
+      };
+    } catch (e) {
+      return 'signaling-decode-failed payload=${signalingPayload.length}B error=$e';
+    }
+  }
+
+  static String _shortHex(String hex) =>
+      hex.length <= 8 ? hex : '${hex.substring(0, 8)}...';
+
+  static String _familyLabel(InternetAddressType family) =>
+      family == InternetAddressType.IPv6 ? 'IPv6' : 'IPv4';
 
   static String _pubkeyToHex(Uint8List pubkey) =>
       pubkey.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
@@ -725,11 +768,4 @@ class _AnchorListener {
     required this.rawSocket,
     required this.publicAddress,
   });
-}
-
-class _ListenerSpec {
-  final InternetAddressType family;
-  final int port;
-
-  const _ListenerSpec(this.family, this.port);
 }

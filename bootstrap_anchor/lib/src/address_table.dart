@@ -42,9 +42,15 @@ class AddressTable {
 
   void remove(String pubkeyHex) => _entries.remove(pubkeyHex);
 
-  void removeStale(Duration maxAge) {
+  void removeStale(
+    Duration maxAge, {
+    Set<String> protectedPubkeys = const {},
+  }) {
     final cutoff = DateTime.now().subtract(maxAge);
-    _entries.removeWhere((_, familyEntries) {
+    _entries.removeWhere((pubkeyHex, familyEntries) {
+      if (protectedPubkeys.contains(pubkeyHex)) {
+        return false;
+      }
       familyEntries.removeWhere(
         (_, entry) => entry.registeredAt.isBefore(cutoff),
       );

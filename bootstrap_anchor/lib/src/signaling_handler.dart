@@ -26,7 +26,7 @@ import 'signaling_codec.dart';
 /// deployment but must be tightened before federation.
 ///
 /// Responsibilities:
-/// - Maintains an address table from peer ANNOUNCE packets.
+/// - Maintains peer-table state from peer ANNOUNCE packets.
 /// - Responds to ADDR_QUERY from registered peers.
 /// - Coordinates hole-punches between registered peers on PUNCH_REQUEST.
 /// - Reflects observed addresses back via ADDR_REFLECT.
@@ -39,6 +39,18 @@ class SignalingHandler {
 
   /// When coordinating a punch, remember the counterpart for PUNCH_READY forwarding.
   final Map<String, Uint8List> _pendingPunchCounterparts = {};
+
+  /// Recently-coordinated punch sessions, keyed by canonical (sorted) pubkey
+  /// pair. Lets us drop duplicate PUNCH_REQUEST messages that arrive when
+  /// both peers initiate simultaneously — the first request already told both
+  /// sides to punch, so re-sending PUNCH_INITIATE just causes redundant punch
+  /// rounds and "Unmatched punch ready" noise.
+  final Map<String, DateTime> _recentPunchCoordinations = {};
+
+  /// Window during which a repeated coordination request for the same
+  /// unordered pair is dropped. Short enough to recover from a real retry
+  /// after genuine failure, long enough to absorb a simultaneous initiate.
+  static const _punchCoordinationCooldown = Duration(seconds: 15);
 
   /// Callback to send a signed signaling packet to a peer.
   Future<bool> Function(Uint8List recipientPubkey, Uint8List signalingPayload)?
@@ -53,9 +65,11 @@ class SignalingHandler {
 
   /// Process an ANNOUNCE received over UDP from a peer.
   ///
-  /// Any peer that sends a valid (signature-verified) ANNOUNCE is registered
-  /// in the address table. This is the rendezvous agent's equivalent of
-  /// peer_address/2 — it observes the connecting agent's public address.
+  /// Records the peer as verified and reflects its observed address back.
+  /// Address-table entries are not touched here — they are owned by the
+  /// anchor's live-connection tracking (`_trackPeerConnection` /
+  /// peer-disconnect handlers) so they always match the actual live session
+  /// and never flip-flop to stale observations (raw packets, zombie sockets).
   void processAnnounce(
     AnnounceData data, {
     String? observedIp,
@@ -73,34 +87,6 @@ class SignalingHandler {
       pubkeyHex: senderHex,
       udpAddress: data.udpAddress,
     );
-
-    // Determine effective address (prefer observed over claimed)
-    String? effectiveIp;
-    int? effectivePort;
-
-    if (observedIp != null && observedPort != null) {
-      effectiveIp = observedIp;
-      effectivePort = observedPort;
-    } else if (data.udpAddress != null) {
-      final parsed = _parseAddress(data.udpAddress!);
-      if (parsed != null) {
-        effectiveIp = parsed.ip;
-        effectivePort = parsed.port;
-      }
-    }
-
-    if (effectiveIp != null && effectivePort != null) {
-      final family = InternetAddress.tryParse(effectiveIp)?.type;
-      if (family != null) {
-        addressTable.register(senderHex, effectiveIp, effectivePort);
-        _log('Address registered: ${data.nickname} '
-            '(${senderHex.substring(0, 8)}...) → $effectiveIp:$effectivePort '
-            '(${_familyLabel(family)})');
-      } else {
-        _log('Ignoring invalid address for ${data.nickname}: '
-            '$effectiveIp:$effectivePort');
-      }
-    }
 
     // Reflect observed address back to the peer
     if (observedIp != null && observedPort != null) {
@@ -162,6 +148,7 @@ class SignalingHandler {
     AddrQueryMessage msg, {
     InternetAddressType? requesterFamily,
   }) {
+    final requesterHex = _pubkeyToHex(senderPubkey);
     final targetHex = _pubkeyToHex(msg.targetPubkey);
 
     // TODO: Verify friendship proof — for now, any registered peer can query.
@@ -174,11 +161,14 @@ class SignalingHandler {
       ip: entry?.ip,
       port: entry?.port,
     );
-    sendSignaling?.call(senderPubkey, codec.encode(response));
+    final responsePayload = codec.encode(response);
+    sendSignaling?.call(senderPubkey, responsePayload);
 
-    _log('Addr query for ${targetHex.substring(0, 8)}...: '
+    _log('Addr query for ${targetHex.substring(0, 8)}... from '
+        '${requesterHex.substring(0, 8)}...: '
         '${entry != null ? "${entry.ip}:${entry.port}" : "not found"}'
-        '${requesterFamily != null ? " for ${_familyLabel(requesterFamily)} requester" : ""}');
+        '${requesterFamily != null ? " for ${_familyLabel(requesterFamily)} requester" : ""} '
+        '(reply payload=${responsePayload.length}B)');
   }
 
   void _handlePunchRequest(
@@ -191,6 +181,20 @@ class SignalingHandler {
 
     // TODO: Verify friendship proof — for now, any registered peer can
     // request a punch to any other registered peer.
+
+    // Deduplicate coordination: if we've already coordinated a punch between
+    // this unordered pair in the last few seconds, the other side already got
+    // its PUNCH_INITIATE — re-sending just causes redundant punch rounds.
+    final sessionKey = _punchSessionKey(requesterHex, targetHex);
+    final lastCoordinated = _recentPunchCoordinations[sessionKey];
+    final now = DateTime.now();
+    if (lastCoordinated != null &&
+        now.difference(lastCoordinated) < _punchCoordinationCooldown) {
+      _log('Dropping duplicate punch request ${requesterHex.substring(0, 8)}...'
+          ' ↔ ${targetHex.substring(0, 8)}... — already coordinated '
+          '${now.difference(lastCoordinated).inMilliseconds}ms ago');
+      return;
+    }
 
     final requesterAddr =
         addressTable.lookup(requesterHex, family: requesterFamily) ??
@@ -226,6 +230,9 @@ class SignalingHandler {
     _log('Coordinating hole-punch: '
         '$requesterName(${requesterAddr.ip}:${requesterAddr.port}) <-> '
         '$targetName(${targetAddr.ip}:${targetAddr.port})');
+
+    _recentPunchCoordinations[sessionKey] = now;
+    _pruneRecentPunchCoordinations(now);
 
     // Remember counterparts for PUNCH_READY forwarding
     _pendingPunchCounterparts[requesterHex] = msg.targetPubkey;
@@ -266,6 +273,17 @@ class SignalingHandler {
 
   // ===== Helpers =====
 
+  /// Canonical (order-independent) key for a punch session between two peers.
+  /// A request from A for B and a request from B for A produce the same key.
+  static String _punchSessionKey(String a, String b) =>
+      a.compareTo(b) <= 0 ? '$a|$b' : '$b|$a';
+
+  void _pruneRecentPunchCoordinations(DateTime now) {
+    _recentPunchCoordinations.removeWhere(
+      (_, ts) => now.difference(ts) >= _punchCoordinationCooldown,
+    );
+  }
+
   static String _pubkeyToHex(Uint8List pubkey) =>
       pubkey.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
@@ -274,27 +292,6 @@ class SignalingHandler {
 
   static String _familyLabel(InternetAddressType family) =>
       family == InternetAddressType.IPv6 ? 'IPv6' : 'IPv4';
-
-  static ({String ip, int port})? _parseAddress(String addr) {
-    if (addr.startsWith('[')) {
-      final closeBracket = addr.indexOf(']');
-      if (closeBracket < 0) return null;
-      final ipStr = addr.substring(1, closeBracket);
-      final afterBracket = addr.substring(closeBracket + 1);
-      if (!afterBracket.startsWith(':')) return null;
-      final port = int.tryParse(afterBracket.substring(1));
-      if (port == null) return null;
-      return (ip: ipStr, port: port);
-    } else {
-      final lastColon = addr.lastIndexOf(':');
-      if (lastColon < 0) return null;
-      final ipStr = addr.substring(0, lastColon);
-      final port = int.tryParse(addr.substring(lastColon + 1));
-      if (port == null) return null;
-      if (ipStr.contains(':')) return null;
-      return (ip: ipStr, port: port);
-    }
-  }
 
   void _log(String message) {
     final ts = DateTime.now().toIso8601String().substring(11, 23);

@@ -10,6 +10,9 @@
 # Usage:
 #   ./deploy.sh [PROJECT_ID] [REGION] [ZONE]
 #
+# The server is IPv6-only. Clients on IPv4-only networks are considered
+# to have no Internet for Bitchat's purposes.
+#
 # The server generates its own Ed25519 identity on first run.
 # The identity file is persisted via a volume mount so it survives
 # container restarts. Share the server's public key with agents that
@@ -23,11 +26,8 @@ ZONE="${3:-us-central1-a}"
 IMAGE_NAME="rendezvous-server"
 VM_NAME="glp-rendezvous"
 REPO_NAME="bitchat"
-FAMILY="dual"
-IPV4_PORT=9514
 IPV6_PORT=9516
 NETWORK="glp-vpc"
-FIREWALL_RULE_IPV4="${NETWORK}-allow-bitchat-udp-ipv4"
 FIREWALL_RULE_IPV6="${NETWORK}-allow-bitchat-udp-ipv6"
 SUBNET="glp-subnet-${REGION}"
 # Region-specific non-overlapping CIDR so multiple regions can coexist in the VPC.
@@ -53,7 +53,8 @@ gcloud artifacts repositories create "$REPO_NAME" \
   --project="$PROJECT_ID" \
   --quiet 2>/dev/null || echo "Repo already exists"
 
-# 1b. Create custom-mode VPC with dual-stack subnet (for IPv6 support).
+# 1b. Create custom-mode VPC with dual-stack subnet (GCE needs IPv4 for
+# internal plumbing even though we only expose the server over IPv6).
 # Auto-mode networks don't support IPv6 subnets, so we need a custom VPC.
 echo "--- Ensuring custom VPC and dual-stack subnet ---"
 gcloud compute networks create "$NETWORK" \
@@ -61,8 +62,6 @@ gcloud compute networks create "$NETWORK" \
   --project="$PROJECT_ID" \
   --quiet 2>/dev/null || echo "Network already exists"
 
-# Don't suppress stderr here — we need to see real subnet errors (CIDR
-# collisions, IPv6 policy issues, etc.). Only skip if it already exists.
 if gcloud compute networks subnets describe "$SUBNET" \
     --region="$REGION" --project="$PROJECT_ID" >/dev/null 2>&1; then
   echo "Subnet already exists"
@@ -103,33 +102,13 @@ echo "--- Pushing image ---"
 gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
 docker push "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:latest"
 
-# 4. Create firewall rules for UDP (GCP requires separate IPv4/IPv6 rules)
-echo "--- Creating firewall rules ---"
-if gcloud compute firewall-rules describe "$FIREWALL_RULE_IPV4" \
-    --project="$PROJECT_ID" >/dev/null 2>&1; then
-  gcloud compute firewall-rules update "$FIREWALL_RULE_IPV4" \
-    --project="$PROJECT_ID" \
-    --allow="udp:${IPV4_PORT},udp:${IPV6_PORT}" \
-    --source-ranges=0.0.0.0/0 \
-    --target-tags=glp-rendezvous \
-    --quiet
-else
-  gcloud compute firewall-rules create "$FIREWALL_RULE_IPV4" \
-    --network="$NETWORK" \
-    --project="$PROJECT_ID" \
-    --direction=INGRESS \
-    --action=ALLOW \
-    --rules=udp:${IPV4_PORT},udp:${IPV6_PORT} \
-    --source-ranges=0.0.0.0/0 \
-    --target-tags=glp-rendezvous \
-    --quiet
-fi
-
+# 4. Create firewall rule for IPv6 UDP.
+echo "--- Creating firewall rule ---"
 if gcloud compute firewall-rules describe "$FIREWALL_RULE_IPV6" \
     --project="$PROJECT_ID" >/dev/null 2>&1; then
   gcloud compute firewall-rules update "$FIREWALL_RULE_IPV6" \
     --project="$PROJECT_ID" \
-    --allow="udp:${IPV4_PORT},udp:${IPV6_PORT}" \
+    --allow="udp:${IPV6_PORT}" \
     --source-ranges=::/0 \
     --target-tags=glp-rendezvous \
     --quiet
@@ -139,7 +118,7 @@ else
     --project="$PROJECT_ID" \
     --direction=INGRESS \
     --action=ALLOW \
-    --rules=udp:${IPV4_PORT},udp:${IPV6_PORT} \
+    --rules=udp:${IPV6_PORT} \
     --source-ranges=::/0 \
     --target-tags=glp-rendezvous \
     --quiet
@@ -168,12 +147,10 @@ echo "--- Creating VM ---"
 DATA_DISK="${VM_NAME}-data"
 
 # COS ip6tables blocks inbound IPv6 by default even when GCE firewall rules
-# allow the traffic. This startup script opens our ports on every boot.
+# allow the traffic. This startup script opens our port on every boot.
 STARTUP_SCRIPT='#!/bin/bash
 ip6tables -C INPUT -p udp --dport '"$IPV6_PORT"' -j ACCEPT 2>/dev/null || ip6tables -I INPUT 1 -p udp --dport '"$IPV6_PORT"' -j ACCEPT
 ip6tables -C INPUT -p tcp --dport '"$IPV6_PORT"' -j ACCEPT 2>/dev/null || ip6tables -I INPUT 1 -p tcp --dport '"$IPV6_PORT"' -j ACCEPT
-ip6tables -C INPUT -p udp --dport '"$IPV4_PORT"' -j ACCEPT 2>/dev/null || ip6tables -I INPUT 1 -p udp --dport '"$IPV4_PORT"' -j ACCEPT
-ip6tables -C INPUT -p tcp --dport '"$IPV4_PORT"' -j ACCEPT 2>/dev/null || ip6tables -I INPUT 1 -p tcp --dport '"$IPV4_PORT"' -j ACCEPT
 '
 
 if gcloud compute instances describe "$VM_NAME" \
@@ -184,8 +161,6 @@ if gcloud compute instances describe "$VM_NAME" \
     --zone="$ZONE" \
     --container-image="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:latest" \
     --container-arg="--identity" --container-arg="/app/data/identity.json" \
-    --container-arg="--family" --container-arg="$FAMILY" \
-    --container-arg="--ipv4-port" --container-arg="$IPV4_PORT" \
     --container-arg="--ipv6-port" --container-arg="$IPV6_PORT" \
     --quiet
 else
@@ -204,8 +179,6 @@ else
     --network-interface="network=${NETWORK},subnet=${SUBNET},stack-type=IPV4_IPV6" \
     --container-image="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:latest" \
     --container-arg="--identity" --container-arg="/app/data/identity.json" \
-    --container-arg="--family" --container-arg="$FAMILY" \
-    --container-arg="--ipv4-port" --container-arg="$IPV4_PORT" \
     --container-arg="--ipv6-port" --container-arg="$IPV6_PORT" \
     --create-disk="name=${DATA_DISK},size=1GB,type=pd-standard,auto-delete=no,device-name=${DATA_DISK}" \
     --container-mount-disk="mount-path=/app/data,name=${DATA_DISK}" \
@@ -233,18 +206,10 @@ fi
 echo ""
 echo "--- Deployment complete ---"
 echo ""
-IPV4=$(gcloud compute instances describe "$VM_NAME" \
-  --project="$PROJECT_ID" --zone="$ZONE" \
-  --format='get(networkInterfaces[0].accessConfigs[0].natIP)' 2>/dev/null)
 IPV6=$(gcloud compute instances describe "$VM_NAME" \
   --project="$PROJECT_ID" --zone="$ZONE" \
   --format='get(networkInterfaces[0].ipv6AccessConfigs[0].externalIpv6)' 2>/dev/null)
 
-if [ -n "${IPV4:-}" ]; then
-  echo "Rendezvous IPv4 address (for clients): ${IPV4}:${IPV4_PORT}"
-else
-  echo "WARNING: no external IPv4 attached to $VM_NAME" >&2
-fi
 if [ -n "${IPV6:-}" ]; then
   echo "Rendezvous IPv6 address (for clients): [${IPV6}]:${IPV6_PORT}"
 else
@@ -256,4 +221,4 @@ echo "  1. SSH into the VM and check the logs for the server's public key"
 echo "     gcloud compute ssh $VM_NAME --zone=$ZONE -- docker logs \$(docker ps -q)"
 echo "  2. Share the public key and address with agents"
 echo "  3. On each phone, go to Settings → Rendezvous Server"
-echo "  4. Enter the IPv4 or IPv6 server address plus the server public key"
+echo "  4. Enter the IPv6 server address plus the server public key"

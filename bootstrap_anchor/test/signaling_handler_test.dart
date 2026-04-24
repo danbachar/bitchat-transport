@@ -53,6 +53,24 @@ void main() {
       expect(ipv4Entry.port, equals(9001));
       expect(table.length, equals(2));
     });
+
+    test('removeStale preserves protected pubkeys', () {
+      final table = AddressTable();
+      final livePubkeyHex = _hex(_pubkey(1));
+      final stalePubkeyHex = _hex(_pubkey(2));
+
+      table.register(livePubkeyHex, '2001:db8::20', 9000);
+      table.register(stalePubkeyHex, '2001:db8::21', 9001);
+
+      table.removeStale(
+        Duration.zero,
+        protectedPubkeys: {livePubkeyHex},
+      );
+
+      expect(table.lookup(livePubkeyHex), isNotNull);
+      expect(table.lookup(stalePubkeyHex), isNull);
+      expect(table.length, equals(1));
+    });
   });
 
   group('SignalingHandler', () {
@@ -86,32 +104,34 @@ void main() {
       peerTable.addVerified(_hex(targetPubkey), nickname: 'target');
     });
 
-    test('processAnnounce registers IPv4 addresses and reflects them', () {
+    test('processAnnounce reflects the observed address back', () {
+      // The signaling handler no longer writes address-table entries itself —
+      // those are owned by the anchor server's live-connection tracking.
+      // processAnnounce is now only responsible for peer-table bookkeeping
+      // and sending an AddrReflect to the peer.
       final announce = AnnounceData(
         publicKey: requesterPubkey,
         nickname: 'requester',
         protocolVersion: 1,
-        udpAddress: '203.0.113.99:7000',
+        udpAddress: '[2001:db8::99]:7000',
       );
 
       handler.processAnnounce(
         announce,
-        observedIp: '198.51.100.10',
+        observedIp: '2001:db8::10',
         observedPort: 7001,
       );
 
-      final entry = addressTable.lookup(
-        _hex(requesterPubkey),
-        family: InternetAddressType.IPv4,
+      expect(
+        addressTable.lookup(_hex(requesterPubkey)),
+        isNull,
+        reason: 'processAnnounce must not touch the address table',
       );
-      expect(entry, isNotNull);
-      expect(entry!.ip, equals('198.51.100.10'));
-      expect(entry.port, equals(7001));
 
       expect(sentSignals, hasLength(1));
       expect(sentSignals.single.recipient, equals(requesterPubkey));
       final reflect = sentSignals.single.message as AddrReflectMessage;
-      expect(reflect.ip, equals('198.51.100.10'));
+      expect(reflect.ip, equals('2001:db8::10'));
       expect(reflect.port, equals(7001));
     });
 
