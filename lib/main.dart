@@ -1631,8 +1631,8 @@ class _BitchatHomeState extends State<BitchatHome>
             ],
           ),
           subtitle: Text(
-            peer.lastSeen != null
-                ? 'Last seen: ${_formatSecondsAgo(peer.lastSeen!)}'
+            peer.lastBleSeen != null
+                ? 'Last seen: ${_formatSecondsAgo(peer.lastBleSeen!)}'
                 : 'Connecting...',
           ),
           trailing: Row(
