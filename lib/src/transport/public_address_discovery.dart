@@ -8,89 +8,46 @@ import 'address_utils.dart';
 /// Discovers our public-facing UDP address and combines it with the local
 /// UDP port to form the address we advertise to friends.
 ///
-/// The transport operates on one IP family at a time. IPv6 is preferred when
-/// available; otherwise we fall back to IPv4. The discovered address is
-/// included in ANNOUNCE messages so peers and rendezvous servers know where to
-/// reach us.
+/// The transport is IPv6-only: if the device has no public IPv6, we treat
+/// it as "no Internet" for our purposes. The discovered address is included
+/// in ANNOUNCE messages so peers and rendezvous servers know where to reach
+/// us.
 class PublicAddressDiscovery {
-  /// Cached public IP (refreshed periodically)
+  /// Cached public IPv6 (refreshed periodically).
   InternetAddress? _cachedPublicIp;
-  InternetAddressType? _cachedPublicIpFamily;
 
-  /// When the cache was last refreshed
+  /// When the cache was last refreshed.
   DateTime? _cacheTime;
 
-  /// Cache duration (public IP doesn't change often)
+  /// Cache duration (public IP doesn't change often).
   static const Duration cacheDuration = Duration(minutes: 5);
 
-  /// The best public IP we know of (IPv6 preferred over IPv4).
-  /// Set even when the address isn't globally routable for UDP — useful
-  /// for display purposes on NAT'd devices.
-  InternetAddress? _bestPublicIp;
+  /// The best public IPv6 we know of — also exposed for UI purposes on
+  /// devices that can't actually use UDP to the open Internet.
+  InternetAddress? get bestPublicIp => _cachedPublicIp;
 
-  /// The best public IP discovered so far (IPv6 > IPv4).
-  /// Available even when the device is behind NAT and has no open port.
-  InternetAddress? get bestPublicIp => _bestPublicIp;
-
-  /// Discover our public IP for the requested address family.
+  /// Discover our public IPv6 address.
   ///
-  /// Returns a public address of the requested family, or null if unavailable.
-  ///
-  /// Result is cached for [cacheDuration] to avoid excessive lookups.
-  Future<InternetAddress?> discoverPublicIp({
-    InternetAddressType preferredFamily = InternetAddressType.IPv6,
-  }) async {
-    // Return cached value if fresh
+  /// Returns null if the device has no IPv6 route at all — IPv4 is
+  /// intentionally not queried. Result is cached for [cacheDuration] to
+  /// avoid excessive lookups.
+  Future<InternetAddress?> discoverPublicIp() async {
     if (_cachedPublicIp != null &&
-        _cachedPublicIpFamily == preferredFamily &&
         _cacheTime != null &&
         DateTime.now().difference(_cacheTime!) < cacheDuration) {
       return _cachedPublicIp;
     }
 
-    Future<InternetAddress?> discoverFamily(InternetAddressType family) async {
-      final url = family == InternetAddressType.IPv6
-          ? 'https://ipv6.seeip.org'
-          : 'https://api.seeip.org';
-      final discovered = await _fetchPublicIp(url);
-      if (discovered == null || discovered.type != family) {
-        return null;
-      }
-      return discovered;
+    final discovered = await _fetchPublicIp('https://ipv6.seeip.org');
+    if (discovered == null || discovered.type != InternetAddressType.IPv6) {
+      debugPrint('No public IPv6 address available for UDP transport');
+      return null;
     }
 
-    final preferred = await discoverFamily(preferredFamily);
-    if (preferred != null) {
-      _cachedPublicIp = preferred;
-      _cachedPublicIpFamily = preferredFamily;
-      _cacheTime = DateTime.now();
-      if (_bestPublicIp == null ||
-          preferred.type == InternetAddressType.IPv6 ||
-          _bestPublicIp!.type != InternetAddressType.IPv6) {
-        _bestPublicIp = preferred;
-      }
-      debugPrint(
-          'Discovered public ${preferredFamily == InternetAddressType.IPv6 ? "IPv6" : "IPv4"}: '
-          '${preferred.address}');
-      return preferred;
-    }
-
-    final alternateFamily = preferredFamily == InternetAddressType.IPv6
-        ? InternetAddressType.IPv4
-        : InternetAddressType.IPv6;
-    final alternate = await discoverFamily(alternateFamily);
-    if (alternate != null &&
-        (_bestPublicIp == null ||
-            alternate.type == InternetAddressType.IPv6 ||
-            _bestPublicIp!.type != InternetAddressType.IPv6)) {
-      _bestPublicIp = alternate;
-    }
-
-    debugPrint(
-      'No public ${preferredFamily == InternetAddressType.IPv6 ? "IPv6" : "IPv4"} '
-      'address available for UDP transport',
-    );
-    return null;
+    _cachedPublicIp = discovered;
+    _cacheTime = DateTime.now();
+    debugPrint('Discovered public IPv6: ${discovered.address}');
+    return discovered;
   }
 
   /// Fetch our public IP from the given URL.
@@ -125,15 +82,11 @@ class PublicAddressDiscovery {
     }
   }
 
-  /// Get our public address string (public_ip:local_port).
+  /// Get our public address string `[ipv6]:port`.
   ///
-  /// Combines the discovered public IP for the requested family with the given
-  /// local port. Returns null if no matching public IP is available.
-  Future<String?> getPublicAddress(
-    int localPort, {
-    required InternetAddressType family,
-  }) async {
-    final ip = await discoverPublicIp(preferredFamily: family);
+  /// Returns null if no public IPv6 is available.
+  Future<String?> getPublicAddress(int localPort) async {
+    final ip = await discoverPublicIp();
     if (ip == null) return null;
     return AddressInfo(ip, localPort).toAddressString();
   }
@@ -154,8 +107,6 @@ class PublicAddressDiscovery {
       for (final iface in interfaces) {
         for (final addr in iface.addresses) {
           if (addr.isLinkLocal) {
-            // Link-local addresses need a scope/zone ID for socket ops.
-            // Dart's InternetAddress.address includes it (e.g. fe80::1%wlan0).
             final llAddr = AddressInfo(addr, localPort).toAddressString();
             debugPrint(
                 'Discovered link-local IPv6: ${addr.address} on ${iface.name}');
@@ -172,8 +123,6 @@ class PublicAddressDiscovery {
   /// Invalidate the cached public IP (e.g. on network change).
   void invalidateCache() {
     _cachedPublicIp = null;
-    _cachedPublicIpFamily = null;
     _cacheTime = null;
-    _bestPublicIp = null;
   }
 }

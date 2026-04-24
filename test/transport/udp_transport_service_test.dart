@@ -59,7 +59,6 @@ void main() {
         expect(service.state, equals(TransportState.uninitialized));
         expect(service.rawSocket, isNull);
         expect(service.localPort, isNull);
-        expect(service.localAddress, isNull);
         expect(service.isMultiplexerActive, isFalse);
       });
 
@@ -83,20 +82,19 @@ void main() {
         await service.dispose();
       });
 
-      test('initialize can prefer IPv4 when requested', () async {
+      test('initialize rejects IPv4 addresses even on loopback', () async {
+        // The transport is IPv6-only. IPv4 addresses must never be dialable,
+        // regardless of whether they are loopback.
         final service = UdpTransportService(
           identity: identity,
           store: store,
           protocolHandler: protocolHandler,
-          preferredAddressType: InternetAddressType.IPv4,
         );
+        await service.initialize();
 
-        final result = await service.initialize();
-
-        expect(result, isTrue);
-        expect(service.activeAddressType, equals(InternetAddressType.IPv4));
-        expect(service.canDialAddress(InternetAddress.loopbackIPv4), isTrue);
-        expect(service.canDialAddress(InternetAddress.loopbackIPv6), isFalse);
+        expect(service.activeAddressType, equals(InternetAddressType.IPv6));
+        expect(service.canDialAddress(InternetAddress.loopbackIPv4), isFalse);
+        expect(service.canDialAddress(InternetAddress.loopbackIPv6), isTrue);
 
         await service.dispose();
       });
@@ -268,20 +266,20 @@ void main() {
         await service.dispose();
       });
 
-      test('connectToPeer returns false for unsupported address families',
-          () async {
+      test('connectToPeer returns false for IPv4 addresses', () async {
+        // The transport is IPv6-only. An IPv4 target means the peer is
+        // unreachable from our perspective, regardless of the target.
         final service = UdpTransportService(
           identity: identity,
           store: store,
           protocolHandler: protocolHandler,
-          preferredAddressType: InternetAddressType.IPv4,
         );
         await service.initialize();
         service.startMultiplexer();
 
         final result = await service.connectToPeer(
           'deadbeef' * 8,
-          InternetAddress('2001:db8::1234'),
+          InternetAddress('203.0.113.1'),
           65535,
         );
 

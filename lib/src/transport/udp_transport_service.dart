@@ -115,7 +115,6 @@ class UdpTransportService extends TransportService {
 
   /// Timeout for UDX handshake completion.
   final Duration connectHandshakeTimeout;
-  final InternetAddressType? preferredAddressType;
 
   UdpConnectFailureKind? _lastConnectFailureKind;
 
@@ -124,7 +123,6 @@ class UdpTransportService extends TransportService {
     required this.store,
     required this.protocolHandler,
     this.connectHandshakeTimeout = _defaultHandshakeTimeout,
-    this.preferredAddressType,
   });
 
   // ===== Public Getters =====
@@ -139,17 +137,15 @@ class UdpTransportService extends TransportService {
   /// The active IP family for the bound UDP socket.
   InternetAddressType? get activeAddressType => _activeAddressType;
 
-  /// Our local address as ip:port string, or null if not bound.
-  String? get localAddress {
-    if (_rawSocket == null) return null;
-    return _localAddress;
-  }
-
-  /// Cached local LAN address (ip:port). Resolved once at initialization.
-  String? _localAddress;
-
   /// Whether we currently have a usable local route for the active family.
-  bool get hasUsableRoute => _localAddress != null;
+  ///
+  /// True once we've bound an IPv6 UDP socket. We don't enumerate interfaces
+  /// to "verify" IPv6 reachability — that was unreliable on multi-homed
+  /// devices (e.g. the first non-link-local address from NetworkInterface.list
+  /// wasn't always the one the kernel actually uses for outbound traffic).
+  /// The canonical "can we be reached" answer comes from the reflected
+  /// public address, which is updated asynchronously via signaling.
+  bool get hasUsableRoute => _activeAddressType != null;
 
   /// Classification of the most recent outbound connect failure, if any.
   UdpConnectFailureKind? get lastConnectFailureKind => _lastConnectFailureKind;
@@ -199,65 +195,22 @@ class UdpTransportService extends TransportService {
     debugPrint('Initializing UDP transport');
 
     try {
-      final candidates = preferredAddressType != null
-          ? <InternetAddressType>[preferredAddressType!]
-          : const <InternetAddressType>[
-              InternetAddressType.IPv6,
-              InternetAddressType.IPv4,
-            ];
-
-      RawDatagramSocket? boundSocket;
-      InternetAddressType? boundFamily;
-      String? resolvedLocalAddress;
-
-      for (final family in candidates) {
-        final bindAddress = family == InternetAddressType.IPv6
-            ? InternetAddress.anyIPv6
-            : InternetAddress.anyIPv4;
-
-        try {
-          final socket = await RawDatagramSocket.bind(bindAddress, 0);
-          final localPort = socket.port;
-          final localAddress = await _resolveLocalAddress(localPort, family);
-
-          final shouldFallback = preferredAddressType == null &&
-              family == InternetAddressType.IPv6 &&
-              localAddress == null;
-          if (shouldFallback) {
-            debugPrint('No usable IPv6 route detected, falling back to IPv4 '
-                'UDP bind');
-            socket.close();
-            continue;
-          }
-
-          boundSocket = socket;
-          _localPort = localPort;
-          boundFamily = family;
-          resolvedLocalAddress = localAddress;
-          break;
-        } catch (e) {
-          debugPrint('Failed to bind '
-              '${family == InternetAddressType.IPv6 ? "IPv6" : "IPv4"} '
-              'UDP socket: $e');
-        }
-      }
-
-      if (boundSocket == null || boundFamily == null || _localPort == null) {
-        throw StateError('Failed to bind a usable UDP socket');
-      }
-
-      _rawSocket = boundSocket;
-      _activeAddressType = boundFamily;
-      _localAddress = resolvedLocalAddress;
+      // IPv6-only transport. We bind to `::` and trust that if the kernel
+      // lets us bind, the device is IPv6-capable. The authoritative answer
+      // to "what address can peers reach us at" comes from public address
+      // reflection over signaling — not from enumerating local interfaces.
+      final socket =
+          await RawDatagramSocket.bind(InternetAddress.anyIPv6, 0);
+      _rawSocket = socket;
+      _localPort = socket.port;
+      _activeAddressType = InternetAddressType.IPv6;
       _udx = UDX();
 
       _setState(TransportState.ready);
-      debugPrint('UDP transport bound on port $_localPort '
-          '(${_activeAddressType == InternetAddressType.IPv6 ? "IPv6" : "IPv4"}, '
-          'local: $_localAddress)');
+      debugPrint('UDP transport bound on port $_localPort (IPv6)');
       return true;
     } catch (e) {
-      debugPrint('Failed to bind UDP socket: $e');
+      debugPrint('Failed to bind IPv6 UDP socket: $e');
       _setState(TransportState.error);
       return false;
     }
@@ -353,7 +306,6 @@ class UdpTransportService extends TransportService {
     _rawSocket = null;
     _udx = null;
     _localPort = null;
-    _localAddress = null;
     _activeAddressType = null;
 
     _state = TransportState.disposed;
@@ -887,50 +839,12 @@ class UdpTransportService extends TransportService {
   }
 
   bool canDialAddress(InternetAddress address) {
-    final activeFamily = _activeAddressType;
-    if (activeFamily == null) return false;
-    if (address.type != activeFamily) return false;
+    if (_activeAddressType == null) return false;
+    // IPv6-only transport. An IPv4 address means the peer has no Internet
+    // reachability from our perspective.
+    if (address.type != InternetAddressType.IPv6) return false;
     if (address.isLoopback) return true;
     return hasUsableRoute;
-  }
-
-  /// Resolve the device's actual LAN IP address for the given port.
-  ///
-  /// Enumerates network interfaces to find a usable address for the requested
-  /// family. IPv6 excludes link-local addresses because they are not suitable
-  /// for general internet transport.
-  Future<String?> _resolveLocalAddress(
-    int port,
-    InternetAddressType family,
-  ) async {
-    try {
-      final interfaces = await NetworkInterface.list(
-        type: family,
-        includeLoopback: false,
-      );
-
-      InternetAddress? bestAddress;
-      for (final iface in interfaces) {
-        for (final addr in iface.addresses) {
-          if (addr.isLoopback) continue;
-          if (addr.type != family) continue;
-          if (family == InternetAddressType.IPv6 && addr.isLinkLocal) {
-            continue;
-          }
-          bestAddress ??= addr;
-        }
-      }
-      if (bestAddress == null) {
-        debugPrint('No usable '
-            '${family == InternetAddressType.IPv6 ? "IPv6" : "IPv4"} '
-            'network interface found for local address');
-        return null;
-      }
-      return AddressInfo(bestAddress, port).toAddressString();
-    } catch (e) {
-      debugPrint('Failed to enumerate network interfaces: $e');
-      return null;
-    }
   }
 
   UdpConnectFailureKind _classifyConnectFailure(Object error) {

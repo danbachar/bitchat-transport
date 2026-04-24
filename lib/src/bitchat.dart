@@ -234,12 +234,29 @@ class Bitchat {
   /// Prevent duplicate connect attempts while a punch is in flight.
   final Set<String> _holePunchConnectionInProgress = {};
 
+  /// Keep punch traffic flowing while the initiator transitions from
+  /// coordination into the actual UDX connect attempt.
+  final Set<String> _holePunchKeepAliveInProgress = {};
+
+  /// Deduplicate in-flight UDX connection attempts across all callers.
+  final Map<String, Future<bool>> _udpConnectInFlight = {};
+
+  /// Deduplicate proactive auto-UDP workflows kicked off by repeated ANNOUNCEs.
+  final Map<String, Future<void>> _autoUdpConnectInFlight = {};
+  final Map<String, String> _autoUdpLastAddress = {};
+  final Map<String, DateTime> _autoUdpRetryAfter = {};
+
   /// Tracks when we last attempted discovery for each unreachable friend.
   /// Prevents hammering discovery every announce tick (10s) for the same peer.
   final Map<String, DateTime> _lastDiscoveryAttempt = {};
 
   /// Minimum interval between discovery attempts for the same peer.
   static const _discoveryRetryInterval = Duration(seconds: 60);
+
+  /// Back off briefly after a failed proactive UDP attempt so repeated BLE
+  /// ANNOUNCEs don't start a fresh UDX handshake every few seconds.
+  static const _autoUdpRetryBackoff = Duration(seconds: 15);
+  static const _holePunchKeepAliveDuration = Duration(seconds: 3);
 
   /// BLE device IDs that have already received a directed friend ANNOUNCE on
   /// the current connection. Cleared on disconnect so reconnects get a fresh
@@ -262,8 +279,12 @@ class Bitchat {
 
   /// Called when an application message is received.
   /// Parameters: messageId, senderPubkey, payload (raw GSG block data), transport
-  void Function(String messageId, Uint8List senderPubkey, Uint8List payload,
-      MessageTransport transport)? onMessageReceived;
+  void Function(
+    String messageId,
+    Uint8List senderPubkey,
+    Uint8List payload,
+    MessageTransport transport,
+  )? onMessageReceived;
 
   /// Called when a new peer connects and exchanges ANNOUNCE
   void Function(Peer peer)? onPeerConnected;
@@ -381,12 +402,14 @@ class Bitchat {
     final responded = await _verifyRendezvousServerResponds(config);
     if (!responded) return false;
 
-    store.dispatch(AddRendezvousServerAction(
-      RendezvousServerSettings(
-        address: config.address,
-        pubkeyHex: config.pubkeyHex,
+    store.dispatch(
+      AddRendezvousServerAction(
+        RendezvousServerSettings(
+          address: config.address,
+          pubkeyHex: config.pubkeyHex,
+        ),
       ),
-    ));
+    );
     return true;
   }
 
@@ -394,9 +417,11 @@ class Bitchat {
     required String address,
     required String pubkeyHex,
   }) async {
-    store.dispatch(RemoveRendezvousServerAction(
-      RendezvousServerSettings(address: address, pubkeyHex: pubkeyHex),
-    ));
+    store.dispatch(
+      RemoveRendezvousServerAction(
+        RendezvousServerSettings(address: address, pubkeyHex: pubkeyHex),
+      ),
+    );
   }
 
   /// Explicitly disconnect from a BLE peer
@@ -463,7 +488,8 @@ class Bitchat {
       }
 
       debugPrint(
-          'Bitchat transport initialized (BLE: $_bleAvailable, UDP: $_udpAvailable)');
+        'Bitchat transport initialized (BLE: $_bleAvailable, UDP: $_udpAvailable)',
+      );
 
       // Auto-start if configured
       if (config.autoStart) {
@@ -484,7 +510,8 @@ class Bitchat {
 
       // Reset Redux state so the service sees uninitialized
       store.dispatch(
-          BleTransportStateChangedAction(TransportState.uninitialized));
+        BleTransportStateChangedAction(TransportState.uninitialized),
+      );
 
       // Request BLE permissions
       final permResult = await _permissions.requestPermissions();
@@ -532,7 +559,8 @@ class Bitchat {
 
       // Reset Redux state so the service sees uninitialized
       store.dispatch(
-          UdpTransportStateChangedAction(TransportState.uninitialized));
+        UdpTransportStateChangedAction(TransportState.uninitialized),
+      );
 
       // Create UDP transport service
       _udpService = UdpTransportService(
@@ -752,10 +780,7 @@ class Bitchat {
     return false;
   }
 
-  bool _isRendezvousPubkeyHex(
-    String pubkeyHex, {
-    SettingsState? settings,
-  }) {
+  bool _isRendezvousPubkeyHex(String pubkeyHex, {SettingsState? settings}) {
     return shouldAcceptRendezvousReply(
       pubkeyHex,
       settings: settings ?? store.state.settings,
@@ -784,19 +809,13 @@ class Bitchat {
     _lastRendezvousSuppressionLogKey.remove(configKey);
   }
 
-  void _logRendezvousSuppression(
-    String configKey,
-    String key,
-    String message,
-  ) {
+  void _logRendezvousSuppression(String configKey, String key, String message) {
     if (_lastRendezvousSuppressionLogKey[configKey] == key) return;
     _lastRendezvousSuppressionLogKey[configKey] = key;
     debugPrint(message);
   }
 
-  Duration? _rendezvousBackoffForFailure(
-    UdpConnectFailureKind? failureKind,
-  ) {
+  Duration? _rendezvousBackoffForFailure(UdpConnectFailureKind? failureKind) {
     switch (failureKind) {
       case UdpConnectFailureKind.networkUnreachable:
         return _rendezvousNetworkUnreachableBackoff;
@@ -808,9 +827,7 @@ class Bitchat {
     }
   }
 
-  String _describeRendezvousFailure(
-    UdpConnectFailureKind? failureKind,
-  ) {
+  String _describeRendezvousFailure(UdpConnectFailureKind? failureKind) {
     switch (failureKind) {
       case UdpConnectFailureKind.networkUnreachable:
         return 'no usable UDP route';
@@ -822,10 +839,7 @@ class Bitchat {
     }
   }
 
-  bool _isRendezvousBackoffActive(
-    _RendezvousConfig rendezvous,
-    String reason,
-  ) {
+  bool _isRendezvousBackoffActive(_RendezvousConfig rendezvous, String reason) {
     final configKey = _rendezvousConfigKey(rendezvous);
     final retryAfter = _rendezvousRetryAfter[configKey];
     if (retryAfter == null) return false;
@@ -849,8 +863,9 @@ class Bitchat {
 
   Future<bool> _enqueueRendezvousTask(Future<bool> Function() task) {
     final completer = Completer<bool>();
-    _rendezvousTaskQueue =
-        _rendezvousTaskQueue.catchError((_) {}).then((_) async {
+    _rendezvousTaskQueue = _rendezvousTaskQueue.catchError((_) {}).then((
+      _,
+    ) async {
       try {
         completer.complete(await task());
       } catch (e) {
@@ -906,8 +921,10 @@ class Bitchat {
       await waiter.future.timeout(timeout);
       return true;
     } on TimeoutException {
-      debugPrint('[rendezvous] Timed out waiting for server response '
-          '(${config.pubkeyHex.substring(0, 8)}...)');
+      debugPrint(
+        '[rendezvous] Timed out waiting for server response '
+        '(${config.pubkeyHex.substring(0, 8)}...)',
+      );
       return false;
     } finally {
       _removeRendezvousResponseWaiter(config.pubkeyHex, waiter);
@@ -970,8 +987,10 @@ class Bitchat {
         final announce = await _createSignedAnnounce(address: udpAddress);
         if (await _udpService!.sendToPeer(rendezvous.pubkeyHex, announce)) {
           _resetRendezvousBackoff(configKey);
-          debugPrint('[rendezvous] Re-announced via existing session '
-              '(${rendezvous.pubkeyHex.substring(0, 8)}..., $reason)');
+          debugPrint(
+            '[rendezvous] Re-announced via existing session '
+            '(${rendezvous.pubkeyHex.substring(0, 8)}..., $reason)',
+          );
           return true;
         }
 
@@ -983,8 +1002,10 @@ class Bitchat {
         );
         if (success) {
           _resetRendezvousBackoff(configKey);
-          debugPrint('[rendezvous] Connected and announced '
-              '(${rendezvous.pubkeyHex.substring(0, 8)}..., $reason)');
+          debugPrint(
+            '[rendezvous] Connected and announced '
+            '(${rendezvous.pubkeyHex.substring(0, 8)}..., $reason)',
+          );
           return true;
         }
 
@@ -993,13 +1014,17 @@ class Bitchat {
         final backoff = _rendezvousBackoffForFailure(failureKind);
         if (backoff != null) {
           _rendezvousRetryAfter[configKey] = DateTime.now().add(backoff);
-          debugPrint('[rendezvous] Failed to connect '
-              '(${rendezvous.pubkeyHex.substring(0, 8)}..., $reason): '
-              '${_describeRendezvousFailure(failureKind)}; '
-              'backing off for ${backoff.inSeconds}s');
+          debugPrint(
+            '[rendezvous] Failed to connect '
+            '(${rendezvous.pubkeyHex.substring(0, 8)}..., $reason): '
+            '${_describeRendezvousFailure(failureKind)}; '
+            'backing off for ${backoff.inSeconds}s',
+          );
         } else {
-          debugPrint('[rendezvous] Failed to connect '
-              '(${rendezvous.pubkeyHex.substring(0, 8)}..., $reason)');
+          debugPrint(
+            '[rendezvous] Failed to connect '
+            '(${rendezvous.pubkeyHex.substring(0, 8)}..., $reason)',
+          );
         }
         return false;
       }).whenComplete(() {
@@ -1029,17 +1054,21 @@ class Bitchat {
 
     final results = <bool>[];
     for (final rendezvous in targets) {
-      results.add(await _enqueueRendezvousTask(() async {
-        if (_udpService == null) return false;
-        if (_udpService!.getPeerIdForPubkey(rendezvous.pubkey) == null) {
-          return false;
-        }
+      results.add(
+        await _enqueueRendezvousTask(() async {
+          if (_udpService == null) return false;
+          if (_udpService!.getPeerIdForPubkey(rendezvous.pubkey) == null) {
+            return false;
+          }
 
-        debugPrint('[rendezvous] Closing UDP session '
-            '(${rendezvous.pubkeyHex.substring(0, 8)}..., $reason)');
-        await _udpService!.disconnectFromPeer(rendezvous.pubkeyHex);
-        return true;
-      }));
+          debugPrint(
+            '[rendezvous] Closing UDP session '
+            '(${rendezvous.pubkeyHex.substring(0, 8)}..., $reason)',
+          );
+          await _udpService!.disconnectFromPeer(rendezvous.pubkeyHex);
+          return true;
+        }),
+      );
     }
 
     return results.any((result) => result);
@@ -1089,10 +1118,7 @@ class Bitchat {
     }
 
     if (added.isNotEmpty && _udpService != null && _udpAvailable) {
-      await _syncConfiguredRendezvous(
-        configs: added,
-        reason: 'settings-saved',
-      );
+      await _syncConfiguredRendezvous(configs: added, reason: 'settings-saved');
     }
   }
 
@@ -1102,9 +1128,11 @@ class Bitchat {
         final results = await Connectivity().checkConnectivity();
         final ipResults = _normalizeConnectivityResults(results);
         _lastConnectivityResults ??= ipResults;
-        store.dispatch(NetworkConnectionTypeUpdatedAction(
-          _connectionTypeFromResults(ipResults),
-        ));
+        store.dispatch(
+          NetworkConnectionTypeUpdatedAction(
+            _connectionTypeFromResults(ipResults),
+          ),
+        );
       } catch (e) {
         debugPrint('Failed to read initial connectivity state: $e');
       }
@@ -1169,9 +1197,9 @@ class Bitchat {
     // which just indicate a BLE device connected/disconnected, not an IP network change.
     // If we don't filter this, every BLE connection change tears down the UDP transport!
     final ipResults = _normalizeConnectivityResults(results);
-    store.dispatch(NetworkConnectionTypeUpdatedAction(
-      _connectionTypeFromResults(ipResults),
-    ));
+    store.dispatch(
+      NetworkConnectionTypeUpdatedAction(_connectionTypeFromResults(ipResults)),
+    );
 
     // Ignore the first notification (initial state, not a change)
     if (_lastConnectivityResults == null) {
@@ -1191,18 +1219,22 @@ class Bitchat {
     }
 
     if (!_isUdpEnabledInSettings) {
-      debugPrint('Network changed while UDP is disabled — cleared cached '
-          'public connectivity and will rediscover on re-enable');
+      debugPrint(
+        'Network changed while UDP is disabled — cleared cached '
+        'public connectivity and will rediscover on re-enable',
+      );
       return;
     }
 
     debugPrint(
-        'Network changed: $ipResults (raw: $results) — restarting UDP transport');
+      'Network changed: $ipResults (raw: $results) — restarting UDP transport',
+    );
 
     // Serialize with other transport updates to prevent overlapping init/dispose
     final previous = _transportUpdateLock ?? Future.value();
-    _transportUpdateLock =
-        previous.then((_) => _restartUdpAfterNetworkChange());
+    _transportUpdateLock = previous.then(
+      (_) => _restartUdpAfterNetworkChange(),
+    );
   }
 
   /// Restart UDP transport after a network change.
@@ -1212,7 +1244,9 @@ class Bitchat {
 
     // Remember friends with UDP addresses so we can re-establish UDP sessions.
     final udpFriends = _peersState.friends
-        .where((peer) => peer.udpAddress != null && peer.udpAddress!.isNotEmpty)
+        .where(
+          (peer) => peer.udpAddress != null && peer.udpAddress!.isNotEmpty,
+        )
         .toList()
       ..sort((a, b) {
         if (a.isWellConnected == b.isWellConnected) return 0;
@@ -1240,8 +1274,9 @@ class Bitchat {
     }
 
     _clearDiscoveredPublicConnectivity();
-    store
-        .dispatch(UdpTransportStateChangedAction(TransportState.uninitialized));
+    store.dispatch(
+      UdpTransportStateChangedAction(TransportState.uninitialized),
+    );
 
     // Mark UDP peers as disconnected (connections are dead)
     for (final peer in _peersState.peersList) {
@@ -1264,7 +1299,8 @@ class Bitchat {
     await _waitForPublicUdpAddress();
 
     debugPrint(
-        'UDP restarted after network change, re-connecting to ${udpFriends.length} friends');
+      'UDP restarted after network change, re-connecting to ${udpFriends.length} friends',
+    );
 
     for (final friend in udpFriends) {
       final friendAddress = friend.udpAddress;
@@ -1320,7 +1356,8 @@ class Bitchat {
 
       // Reset Redux state so _bleAvailable returns false
       store.dispatch(
-          BleTransportStateChangedAction(TransportState.uninitialized));
+        BleTransportStateChangedAction(TransportState.uninitialized),
+      );
 
       // Clear all discovered BLE peers from Redux
       store.dispatch(ClearDiscoveredBlePeersAction());
@@ -1358,7 +1395,8 @@ class Bitchat {
 
       // Reset Redux state so _udpAvailable returns false
       store.dispatch(
-          UdpTransportStateChangedAction(TransportState.uninitialized));
+        UdpTransportStateChangedAction(TransportState.uninitialized),
+      );
 
       // Disconnect all peers that were connected via UDP
       for (final peer in _peersState.peersList) {
@@ -1405,8 +1443,11 @@ class Bitchat {
   /// Transport selection: tries BLE first (preferred for nearby peers),
   /// falls back to UDP, then attempts discovery via well-connected friends.
   /// Delivery is confirmed by an application-level ACK, not the transport write.
-  Future<String?> send(Uint8List recipientPubkey, Uint8List payload,
-      {String? messageId}) async {
+  Future<String?> send(
+    Uint8List recipientPubkey,
+    Uint8List payload, {
+    String? messageId,
+  }) async {
     final peer = _peersState.getPeerByPubkey(recipientPubkey);
     if (peer == null) {
       debugPrint('Cannot send: peer not found');
@@ -1417,12 +1458,14 @@ class Bitchat {
     messageId ??= _uuid.v4().substring(0, 8);
 
     // Dispatch sending action (clock icon)
-    store.dispatch(MessageSendingAction(
-      messageId: messageId,
-      transport: MessageTransport.ble, // Tentative — updated on actual send
-      recipientPubkey: recipientPubkey,
-      payloadSize: payload.length,
-    ));
+    store.dispatch(
+      MessageSendingAction(
+        messageId: messageId,
+        transport: MessageTransport.ble, // Tentative — updated on actual send
+        recipientPubkey: recipientPubkey,
+        payloadSize: payload.length,
+      ),
+    );
 
     // Create the message packet and sign it once
     final packet = _protocolHandler.createMessagePacket(
@@ -1436,37 +1479,37 @@ class Bitchat {
     final bytes = packet.serialize();
 
     // --- Try BLE first (preferred for nearby peers) ---
+    final bleDeviceId = _connectedBleDeviceIdForPeer(peer);
     if (_isBleEnabledInSettings &&
         _bleAvailable &&
         _bleService != null &&
-        peer.hasBleConnection) {
-      final bleDeviceId = peer.bleDeviceId;
-      if (bleDeviceId != null) {
-        debugPrint('Sending via BLE to ${peer.displayName}');
+        bleDeviceId != null) {
+      debugPrint('Sending via BLE to ${peer.displayName}');
 
-        bool success;
-        if (_fragmentHandler.needsFragmentation(payload)) {
-          success = await _sendFragmentedViaBle(
-            payload: payload,
-            recipientPubkey: recipientPubkey,
-            bleDeviceId: bleDeviceId,
-          );
-        } else {
-          success = await _bleService!.sendToPeer(bleDeviceId, bytes);
-        }
+      bool success;
+      if (_fragmentHandler.needsFragmentation(payload)) {
+        success = await _sendFragmentedViaBle(
+          payload: payload,
+          recipientPubkey: recipientPubkey,
+          bleDeviceId: bleDeviceId,
+        );
+      } else {
+        success = await _bleService!.sendToPeer(bleDeviceId, bytes);
+      }
 
-        if (success) {
-          store.dispatch(MessageSentAction(
+      if (success) {
+        store.dispatch(
+          MessageSentAction(
             messageId: messageId,
             transport: MessageTransport.ble,
             recipientPubkey: recipientPubkey,
             payloadSize: payload.length,
-          ));
-          // Delivery confirmed by ACK, not BLE write success.
-          return messageId;
-        }
-        debugPrint('BLE send failed, falling back to UDP...');
+          ),
+        );
+        // Delivery confirmed by ACK, not BLE write success.
+        return messageId;
       }
+      debugPrint('BLE send failed, falling back to UDP...');
     }
 
     // --- Try UDP (direct connection or connect-on-demand) ---
@@ -1477,13 +1520,16 @@ class Bitchat {
       // Try existing UDX connection first
       if (await _udpService!.sendToPeer(resolvedPeer.pubkeyHex, bytes)) {
         debugPrint(
-            'Sent via existing UDP connection to ${resolvedPeer.displayName}');
-        store.dispatch(MessageSentAction(
-          messageId: messageId,
-          transport: MessageTransport.udp,
-          recipientPubkey: recipientPubkey,
-          payloadSize: payload.length,
-        ));
+          'Sent via existing UDP connection to ${resolvedPeer.displayName}',
+        );
+        store.dispatch(
+          MessageSentAction(
+            messageId: messageId,
+            transport: MessageTransport.udp,
+            recipientPubkey: recipientPubkey,
+            payloadSize: payload.length,
+          ),
+        );
         return messageId;
       }
 
@@ -1491,22 +1537,27 @@ class Bitchat {
       final udpAddr = resolvedPeer.udpAddress;
       if (udpAddr != null && udpAddr.isNotEmpty) {
         debugPrint(
-            'Sending via UDP to ${resolvedPeer.displayName} at $udpAddr');
+          'Sending via UDP to ${resolvedPeer.displayName} at $udpAddr',
+        );
         if (await _sendViaUdp(resolvedPeer.pubkeyHex, udpAddr, bytes)) {
-          store.dispatch(MessageSentAction(
-            messageId: messageId,
-            transport: MessageTransport.udp,
-            recipientPubkey: recipientPubkey,
-            payloadSize: payload.length,
-          ));
+          store.dispatch(
+            MessageSentAction(
+              messageId: messageId,
+              transport: MessageTransport.udp,
+              recipientPubkey: recipientPubkey,
+              payloadSize: payload.length,
+            ),
+          );
           return messageId;
         }
       }
 
       // No address — try discovery via well-connected friends
       if (resolvedPeer.isFriend) {
-        debugPrint('[send] No direct path to ${resolvedPeer.displayName}, '
-            'attempting discovery via well-connected friends...');
+        debugPrint(
+          '[send] No direct path to ${resolvedPeer.displayName}, '
+          'attempting discovery via well-connected friends...',
+        );
         final discovered = await _discoverPeerViaFriends(resolvedPeer);
         if (discovered) {
           // Re-read peer — discovery updated the address
@@ -1515,12 +1566,14 @@ class Bitchat {
           if (freshAddr != null && freshAddr.isNotEmpty) {
             debugPrint('[send] Discovery succeeded, sending via UDP');
             if (await _sendViaUdp(freshPeer!.pubkeyHex, freshAddr, bytes)) {
-              store.dispatch(MessageSentAction(
-                messageId: messageId,
-                transport: MessageTransport.udp,
-                recipientPubkey: recipientPubkey,
-                payloadSize: payload.length,
-              ));
+              store.dispatch(
+                MessageSentAction(
+                  messageId: messageId,
+                  transport: MessageTransport.udp,
+                  recipientPubkey: recipientPubkey,
+                  payloadSize: payload.length,
+                ),
+              );
               return messageId;
             }
           }
@@ -1554,7 +1607,7 @@ class Bitchat {
 
     // Try BLE first
     if (_isBleEnabledInSettings && _bleAvailable && _bleService != null) {
-      final bleDeviceId = peer?.bleDeviceId;
+      final bleDeviceId = _connectedBleDeviceIdForPeer(peer);
       if (peer != null && bleDeviceId != null) {
         if (await _bleService!.sendToPeer(bleDeviceId, bytes)) return true;
       }
@@ -1609,13 +1662,11 @@ class Bitchat {
     final udpService = _udpService;
     final discoveryGeneration = _publicAddressDiscoveryGeneration;
     final localPort = udpService?.localPort;
-    final activeFamily = udpService?.activeAddressType;
-    if (localPort == null || activeFamily == null) return;
+    if (localPort == null || udpService?.activeAddressType == null) return;
     final previousAddress = _publicAddress;
 
     final publicAddr = await _publicAddressDiscovery.getPublicAddress(
       localPort,
-      family: activeFamily,
     );
     if (_publicAddressDiscoveryGeneration != discoveryGeneration ||
         _udpService != udpService ||
@@ -1628,14 +1679,13 @@ class Bitchat {
       debugPrint('Public UDP address: $_publicAddress');
       if (publicAddr != previousAddress) {
         _resetRendezvousBackoff();
-        unawaited(_syncConfiguredRendezvous(
-          reason: 'public-address-updated',
-        ));
+        unawaited(_syncConfiguredRendezvous(reason: 'public-address-updated'));
       }
     } else {
-      debugPrint('Could not discover public '
-          '${activeFamily == InternetAddressType.IPv6 ? "IPv6" : "IPv4"} '
-          'address. No UDP address will be advertised.');
+      debugPrint(
+        'Could not discover public IPv6 address. '
+        'No UDP address will be advertised.',
+      );
     }
 
     // Always update the display IP (even if no full address/port available).
@@ -1644,22 +1694,16 @@ class Bitchat {
       store.dispatch(PublicIpUpdatedAction(bestIp.address));
     }
 
-    if (activeFamily == InternetAddressType.IPv6) {
-      // Discover link-local IPv6 for same-LAN fallback.
-      final llAddr = await _publicAddressDiscovery.getLinkLocalAddress(
-        localPort,
-      );
-      if (_publicAddressDiscoveryGeneration != discoveryGeneration ||
-          _udpService != udpService ||
-          !_isUdpEnabledInSettings) {
-        return;
-      }
-      if (llAddr != null) {
-        _linkLocalAddress = llAddr;
-        debugPrint('Link-local UDP address: $_linkLocalAddress');
-      }
-    } else {
-      _linkLocalAddress = null;
+    // Discover link-local IPv6 for same-LAN fallback.
+    final llAddr = await _publicAddressDiscovery.getLinkLocalAddress(localPort);
+    if (_publicAddressDiscoveryGeneration != discoveryGeneration ||
+        _udpService != udpService ||
+        !_isUdpEnabledInSettings) {
+      return;
+    }
+    if (llAddr != null) {
+      _linkLocalAddress = llAddr;
+      debugPrint('Link-local UDP address: $_linkLocalAddress');
     }
   }
 
@@ -1690,10 +1734,7 @@ class Bitchat {
     required String context,
   }) {
     if (udpAddress == null || udpAddress.isEmpty) return null;
-    final parsed = _parseSupportedUdpAddress(
-      udpAddress,
-      context: context,
-    );
+    final parsed = _parseSupportedUdpAddress(udpAddress, context: context);
     return parsed?.toAddressString();
   }
 
@@ -1706,42 +1747,126 @@ class Bitchat {
     final parsed = parseIpv6AddressString(udpAddress);
     if (parsed == null) {
       debugPrint(
-          '[$context] Ignoring non-link-local IPv6 address in link-local '
-          'ANNOUNCE field: $udpAddress');
+        '[$context] Ignoring non-link-local IPv6 address in link-local '
+        'ANNOUNCE field: $udpAddress',
+      );
       return null;
     }
 
     if (!parsed.ip.isLinkLocal) {
-      debugPrint('[$context] Ignoring non-link-local address in link-local '
-          'ANNOUNCE field: $udpAddress');
+      debugPrint(
+        '[$context] Ignoring non-link-local address in link-local '
+        'ANNOUNCE field: $udpAddress',
+      );
       return null;
     }
 
     return parsed.toAddressString();
   }
 
-  void _beginHolePunchAttempt(
-    String peerHex, {
-    bool dispatchStarted = true,
-  }) {
+  String? _connectedBleDeviceIdForPeer(PeerState? peer) {
+    if (peer == null || _bleService == null || !_bleAvailable) {
+      return null;
+    }
+
+    final centralId = peer.bleCentralDeviceId;
+    if (centralId != null && _bleService!.isDeviceConnected(centralId)) {
+      return centralId;
+    }
+
+    final peripheralId = peer.blePeripheralDeviceId;
+    if (peripheralId != null && _bleService!.isDeviceConnected(peripheralId)) {
+      return peripheralId;
+    }
+
+    return null;
+  }
+
+  bool _hasLiveBlePath(PeerState? peer) =>
+      _connectedBleDeviceIdForPeer(peer) != null;
+
+  Future<Uint8List> _createSignedSignalingPacket(
+    Uint8List recipientPubkey,
+    Uint8List signalingPayload,
+  ) async {
+    final packet = BitchatPacket(
+      type: PacketType.signaling,
+      senderPubkey: identity.publicKey,
+      recipientPubkey: recipientPubkey,
+      payload: signalingPayload,
+      signature: Uint8List(64),
+    );
+    await _protocolHandler.signPacket(packet);
+    return packet.serialize();
+  }
+
+  Future<bool> _sendDirectSignalingOverLiveBle(
+    Uint8List recipientPubkey,
+    Uint8List signalingPayload,
+  ) async {
+    if (_bleService == null || !_bleAvailable) {
+      return false;
+    }
+
+    final pubkeyHex =
+        recipientPubkey.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    final peer = store.state.peers.getPeerByPubkeyHex(pubkeyHex);
+    final deviceId = _connectedBleDeviceIdForPeer(peer);
+    if (deviceId == null) {
+      return false;
+    }
+
+    final bytes = await _createSignedSignalingPacket(
+      recipientPubkey,
+      signalingPayload,
+    );
+    return _bleService!.sendToPeer(deviceId, bytes);
+  }
+
+  Future<void> _sustainHolePunchTraffic(
+    String peerHex,
+    AddressInfo target, {
+    required String phase,
+  }) async {
+    if (_holePunchService == null ||
+        _holePunchKeepAliveInProgress.contains(peerHex)) {
+      return;
+    }
+
+    _holePunchKeepAliveInProgress.add(peerHex);
+    debugPrint(
+      '[hole-punch] Sustaining punch traffic toward '
+      '${target.toAddressString()} during $phase...',
+    );
+    try {
+      await _holePunchService!.punch(
+        target.ip,
+        target.port,
+        duration: _holePunchKeepAliveDuration,
+      );
+    } finally {
+      _holePunchKeepAliveInProgress.remove(peerHex);
+    }
+  }
+
+  void _beginHolePunchAttempt(String peerHex, {bool dispatchStarted = true}) {
     _holePunchTargets.remove(peerHex);
     _holePunchLocalReady.remove(peerHex);
     _holePunchRemoteReady.remove(peerHex);
     _holePunchConnectionInProgress.remove(peerHex);
+    _holePunchKeepAliveInProgress.remove(peerHex);
     _holePunchCompleters.putIfAbsent(peerHex, () => Completer<bool>());
     if (dispatchStarted) {
       store.dispatch(HolePunchStartedAction(peerHex));
     }
   }
 
-  void _clearHolePunchState(
-    String peerHex, {
-    bool clearCompleter = false,
-  }) {
+  void _clearHolePunchState(String peerHex, {bool clearCompleter = false}) {
     _holePunchTargets.remove(peerHex);
     _holePunchLocalReady.remove(peerHex);
     _holePunchRemoteReady.remove(peerHex);
     _holePunchConnectionInProgress.remove(peerHex);
+    _holePunchKeepAliveInProgress.remove(peerHex);
     if (clearCompleter) {
       _holePunchCompleters.remove(peerHex);
     }
@@ -1765,20 +1890,27 @@ class Bitchat {
       return;
     }
 
+    final target = _holePunchTargets[peerHex];
+    if (target == null) {
+      debugPrint(
+        '[hole-punch] Both sides are ready for $peerHex but no target '
+        'address is cached yet.',
+      );
+      return;
+    }
+
     final myPubkeyHex = identity.publicKey
         .map((b) => b.toRadixString(16).padLeft(2, '0'))
         .join();
     final iAmInitiator = myPubkeyHex.compareTo(peerHex) < 0;
     if (!iAmInitiator) {
-      debugPrint('[hole-punch] Both sides are ready; waiting for initiator '
-          '$peerHex to connect.');
-      return;
-    }
-
-    final target = _holePunchTargets[peerHex];
-    if (target == null) {
-      debugPrint('[hole-punch] Both sides are ready for $peerHex but no target '
-          'address is cached yet.');
+      unawaited(
+        _sustainHolePunchTraffic(peerHex, target, phase: 'responder-wait'),
+      );
+      debugPrint(
+        '[hole-punch] Both sides are ready; waiting for initiator '
+        '$peerHex to connect.',
+      );
       return;
     }
     if (_udpService == null) {
@@ -1790,10 +1922,22 @@ class Bitchat {
     }
 
     _holePunchConnectionInProgress.add(peerHex);
-    debugPrint('[hole-punch] Both sides ready; initiator connecting to '
-        '${target.toAddressString()}...');
-    final connected =
-        await _udpService!.connectToPeer(peerHex, target.ip, target.port);
+    debugPrint(
+      '[hole-punch] Both sides ready; initiator connecting to '
+      '${target.toAddressString()}...',
+    );
+    unawaited(
+      _sustainHolePunchTraffic(peerHex, target, phase: 'initiator-connect'),
+    );
+
+    final announce = await _createSignedAnnounce(address: udpAddress);
+    final connected = await _sendViaUdp(
+      peerHex,
+      target.toAddressString(),
+      announce,
+      allowBleAssistedFallback: false,
+      performPreConnectPunch: false,
+    );
     _holePunchConnectionInProgress.remove(peerHex);
 
     if (!connected) {
@@ -1815,6 +1959,8 @@ class Bitchat {
     String udpAddress,
     Uint8List data, {
     bool isRendezvous = false,
+    bool allowBleAssistedFallback = true,
+    bool performPreConnectPunch = true,
   }) async {
     if (_udpService == null) return false;
     final peerShort = pubkeyHex.substring(0, 8);
@@ -1846,53 +1992,81 @@ class Bitchat {
       // We're not the initiator — the other side should connect to us.
       // Wait briefly for their incoming connection to arrive.
       debugPrint(
-          '[udp-send] Not initiator for $peerShort, waiting for incoming connection...');
+        '[udp-send] Not initiator for $peerShort, waiting for incoming connection...',
+      );
       for (var i = 0; i < 10; i++) {
         await Future.delayed(const Duration(milliseconds: 500));
         if (await _udpService!.sendToPeer(pubkeyHex, data)) {
           debugPrint(
-              '[udp-send] Incoming connection arrived, sent to $peerShort');
+            '[udp-send] Incoming connection arrived, sent to $peerShort',
+          );
           return true;
         }
       }
       // Timed out waiting — fall through and try connecting ourselves as last resort
       debugPrint(
-          '[udp-send] Timed out waiting for incoming connection from $peerShort, connecting ourselves...');
+        '[udp-send] Timed out waiting for incoming connection from $peerShort, connecting ourselves...',
+      );
     }
 
-    // Hole-punch to open NAT mappings before UDX connection attempt.
-    // Skip for well-connected peers — they have public addresses, no NAT.
     final peer = store.state.peers.getPeerByPubkeyHex(pubkeyHex);
-    if (!isRendezvous &&
-        _holePunchService != null &&
-        peer != null &&
-        !peer.isWellConnected) {
-      debugPrint(
-          '[udp-send] Hole-punching to $udpAddress before connecting...');
-      await _holePunchService!.punch(addr.ip, addr.port);
+    final inFlight = _udpConnectInFlight[pubkeyHex];
+    if (inFlight != null) {
+      debugPrint('[udp-send] Reusing in-flight UDX connect to $peerShort...');
+      final connected = await inFlight;
+      if (!connected) return false;
+      return _udpService!.sendToPeer(pubkeyHex, data);
     }
 
-    debugPrint('[udp-send] Connecting to $peerShort at $udpAddress...');
-    if (!await _udpService!.connectToPeer(pubkeyHex, addr.ip, addr.port)) {
-      debugPrint('[udp-send] UDX connect failed to $peerShort at $udpAddress');
-
-      if (!isRendezvous &&
+    late final Future<bool> udxConnectFuture;
+    udxConnectFuture = () async {
+      // Hole-punch to open NAT mappings before UDX connection attempt.
+      // Skip for well-connected peers — they have public addresses, no NAT.
+      if (performPreConnectPunch &&
+          !isRendezvous &&
+          _holePunchService != null &&
           peer != null &&
-          peer.isFriend &&
-          peer.hasBleConnection) {
+          !peer.isWellConnected) {
         debugPrint(
-            '[udp-send] Trying direct BLE-assisted hole-punch to $peerShort...');
-        if (await _attemptDirectPunchWithPeer(peer, addr)) {
-          return _udpService!.sendToPeer(pubkeyHex, data);
-        }
+          '[udp-send] Hole-punching to $udpAddress before connecting...',
+        );
+        await _holePunchService!.punch(addr.ip, addr.port);
       }
 
-      return false;
+      debugPrint('[udp-send] Connecting to $peerShort at $udpAddress...');
+      return _udpService!.connectToPeer(pubkeyHex, addr.ip, addr.port);
+    }();
+    _udpConnectInFlight[pubkeyHex] = udxConnectFuture;
+
+    bool connected = false;
+    try {
+      connected = await udxConnectFuture;
+    } finally {
+      if (identical(_udpConnectInFlight[pubkeyHex], udxConnectFuture)) {
+        _udpConnectInFlight.remove(pubkeyHex);
+      }
     }
 
-    debugPrint('[udp-send] Connected, sending data to $peerShort');
-    // Send the data — the periodic ANNOUNCE cycle handles identity exchange
-    return _udpService!.sendToPeer(pubkeyHex, data);
+    if (connected) {
+      debugPrint('[udp-send] Connected, sending data to $peerShort');
+      // Send the data — the periodic ANNOUNCE cycle handles identity exchange
+      return _udpService!.sendToPeer(pubkeyHex, data);
+    }
+
+    debugPrint('[udp-send] UDX connect failed to $peerShort at $udpAddress');
+
+    if (allowBleAssistedFallback &&
+        !isRendezvous &&
+        peer != null &&
+        peer.isFriend &&
+        _hasLiveBlePath(peer)) {
+      debugPrint(
+        '[udp-send] Trying direct BLE-assisted hole-punch to $peerShort...',
+      );
+      return _attemptDirectPunchWithPeer(peer, addr);
+    }
+
+    return false;
   }
 
   /// Proactively establish a UDP connection to a friend.
@@ -1904,61 +2078,133 @@ class Bitchat {
   /// Sends our own ANNOUNCE as the first message so the remote side learns
   /// our identity and address on the new UDP connection.
   Future<void> _connectToFriendViaUdp(
-      String pubkeyHex, String udpAddress) async {
-    try {
-      final announce = await _createSignedAnnounce(address: this.udpAddress);
+    String pubkeyHex,
+    String udpAddress,
+  ) async {
+    final normalizedAddress =
+        _normalizeAnnouncedUdpAddress(udpAddress, context: 'auto-udp') ??
+            udpAddress;
+    final peerShort = pubkeyHex.substring(0, 8);
 
-      // Try link-local first when peer is BLE-nearby (same LAN).
-      // Link-local avoids AP client isolation and NAT issues.
-      final peer = _peersState.getPeerByPubkeyHex(pubkeyHex);
-      final llAddr = peer?.linkLocalAddress;
-      if (llAddr != null && peer!.hasBleConnection) {
-        debugPrint('[auto-udp] Trying link-local $llAddr for '
-            '${pubkeyHex.substring(0, 8)}...');
-        final llSuccess = await _sendViaUdp(pubkeyHex, llAddr, announce);
-        if (llSuccess) {
-          debugPrint('[auto-udp] Connected via link-local to '
-              '${pubkeyHex.substring(0, 8)}');
-          return;
-        }
-        debugPrint('[auto-udp] Link-local failed, trying global address...');
-      }
+    final retryAfter = _autoUdpRetryAfter[pubkeyHex];
+    if (retryAfter != null &&
+        _autoUdpLastAddress[pubkeyHex] == normalizedAddress &&
+        DateTime.now().isBefore(retryAfter)) {
+      debugPrint(
+        '[auto-udp] Suppressing retry to $peerShort at '
+        '$normalizedAddress until ${retryAfter.toIso8601String()}',
+      );
+      return;
+    }
 
-      final success = await _sendViaUdp(pubkeyHex, udpAddress, announce);
-      if (success) {
-        debugPrint('[auto-udp] Proactive UDP connection to '
-            '${pubkeyHex.substring(0, 8)} established');
-      } else {
-        // Direct connection failed (likely NAT/firewall). Try coordinated
-        // hole-punch via a well-connected friend if one is reachable.
+    final inFlight = _autoUdpConnectInFlight[pubkeyHex];
+    if (inFlight != null) {
+      debugPrint(
+        '[auto-udp] Reusing in-flight proactive UDP attempt for '
+        '$peerShort',
+      );
+      await inFlight;
+      return;
+    }
+
+    _autoUdpLastAddress[pubkeyHex] = normalizedAddress;
+
+    late final Future<void> task;
+    task = () async {
+      try {
+        final announce = await _createSignedAnnounce(address: this.udpAddress);
+
+        // Try link-local first when peer is BLE-nearby (same LAN).
+        // Link-local avoids AP client isolation and NAT issues.
         final peer = _peersState.getPeerByPubkeyHex(pubkeyHex);
-        if (peer != null && peer.isFriend) {
-          if (peer.hasBleConnection) {
-            final addr = _parseSupportedUdpAddress(
-              udpAddress,
-              context: 'auto-udp',
-              peerLabel: peer.displayName,
+        final llAddr = peer?.linkLocalAddress;
+        if (llAddr != null && _hasLiveBlePath(peer)) {
+          debugPrint(
+            '[auto-udp] Trying link-local $llAddr for '
+            '${pubkeyHex.substring(0, 8)}...',
+          );
+          final llSuccess = await _sendViaUdp(pubkeyHex, llAddr, announce);
+          if (llSuccess) {
+            debugPrint(
+              '[auto-udp] Connected via link-local to '
+              '${pubkeyHex.substring(0, 8)}',
             );
-            if (addr != null) {
-              debugPrint('[auto-udp] Direct connect to '
-                  '${pubkeyHex.substring(0, 8)} failed, trying direct BLE-assisted hole-punch...');
-              if (await _attemptDirectPunchWithPeer(peer, addr)) {
-                return;
+            _autoUdpRetryAfter.remove(pubkeyHex);
+            return;
+          }
+          debugPrint('[auto-udp] Link-local failed, trying global address...');
+        }
+
+        final success = await _sendViaUdp(
+          pubkeyHex,
+          normalizedAddress,
+          announce,
+        );
+        if (success) {
+          debugPrint(
+            '[auto-udp] Proactive UDP connection to '
+            '${pubkeyHex.substring(0, 8)} established',
+          );
+          _autoUdpRetryAfter.remove(pubkeyHex);
+        } else {
+          // Direct connection failed (likely NAT/firewall). Try coordinated
+          // hole-punch via a well-connected friend if one is reachable.
+          final peer = _peersState.getPeerByPubkeyHex(pubkeyHex);
+          if (peer != null && peer.isFriend) {
+            if (_hasLiveBlePath(peer)) {
+              final addr = _parseSupportedUdpAddress(
+                normalizedAddress,
+                context: 'auto-udp',
+                peerLabel: peer.displayName,
+              );
+              if (addr != null) {
+                debugPrint(
+                  '[auto-udp] Direct connect to '
+                  '${pubkeyHex.substring(0, 8)} failed, trying direct BLE-assisted hole-punch...',
+                );
+                if (await _attemptDirectPunchWithPeer(peer, addr)) {
+                  _autoUdpRetryAfter.remove(pubkeyHex);
+                  return;
+                }
               }
             }
-          }
 
-          debugPrint('[auto-udp] Direct connect to '
-              '${pubkeyHex.substring(0, 8)} failed, trying hole-punch via friends...');
-          await _discoverPeerViaFriends(peer);
-        } else {
-          debugPrint('[auto-udp] Proactive UDP connection to '
-              '${pubkeyHex.substring(0, 8)} failed');
+            debugPrint(
+              '[auto-udp] Direct connect to '
+              '${pubkeyHex.substring(0, 8)} failed, trying hole-punch via friends...',
+            );
+            if (await _discoverPeerViaFriends(peer)) {
+              _autoUdpRetryAfter.remove(pubkeyHex);
+              return;
+            }
+          } else {
+            debugPrint(
+              '[auto-udp] Proactive UDP connection to '
+              '${pubkeyHex.substring(0, 8)} failed',
+            );
+          }
+          _autoUdpRetryAfter[pubkeyHex] = DateTime.now().add(
+            _autoUdpRetryBackoff,
+          );
         }
+      } catch (e) {
+        debugPrint(
+          '[auto-udp] Error connecting to '
+          '${pubkeyHex.substring(0, 8)}: $e',
+        );
+        _autoUdpRetryAfter[pubkeyHex] = DateTime.now().add(
+          _autoUdpRetryBackoff,
+        );
       }
-    } catch (e) {
-      debugPrint('[auto-udp] Error connecting to '
-          '${pubkeyHex.substring(0, 8)}: $e');
+    }();
+
+    _autoUdpConnectInFlight[pubkeyHex] = task;
+    try {
+      await task;
+    } finally {
+      if (identical(_autoUdpConnectInFlight[pubkeyHex], task)) {
+        _autoUdpConnectInFlight.remove(pubkeyHex);
+      }
     }
   }
 
@@ -1976,19 +2222,28 @@ class Bitchat {
 
     if (_udpService == null || !_udpAvailable) {
       debugPrint(
-          '[direct-punch] UDP unavailable, cannot coordinate with $peerName');
+        '[direct-punch] UDP unavailable, cannot coordinate with $peerName',
+      );
       return false;
     }
     if (_holePunchService == null) {
       debugPrint(
-          '[direct-punch] Hole-punch service unavailable, cannot coordinate with $peerName');
+        '[direct-punch] Hole-punch service unavailable, cannot coordinate with $peerName',
+      );
+      return false;
+    }
+    if (!_hasLiveBlePath(peer)) {
+      debugPrint(
+        '[direct-punch] No live BLE path to $peerName, skipping direct punch',
+      );
       return false;
     }
 
     final myAddress = udpAddress;
     if (myAddress == null || myAddress.isEmpty) {
       debugPrint(
-          '[direct-punch] No public UDP address available for $peerName');
+        '[direct-punch] No public UDP address available for $peerName',
+      );
       return false;
     }
 
@@ -2003,18 +2258,22 @@ class Bitchat {
 
     if (_holePunchCompleters.containsKey(peerHex)) {
       debugPrint(
-          '[direct-punch] Reusing in-flight hole-punch attempt for $peerName');
+        '[direct-punch] Reusing in-flight hole-punch attempt for $peerName',
+      );
     } else {
       _beginHolePunchAttempt(peerHex);
     }
 
-    debugPrint('[direct-punch] Asking $peerName to punch toward $myAddress '
-        'via direct friend signaling...');
+    debugPrint(
+      '[direct-punch] Asking $peerName to punch toward $myAddress '
+      'via direct friend signaling...',
+    );
     final sent = await _signalingService.requestDirectPunch(
       peer.publicKey,
       requesterPubkey: identity.publicKey,
       requesterIp: myAddr.ip.address,
       requesterPort: myAddr.port,
+      requireDirectTransport: true,
     );
     if (!sent) {
       _failHolePunchAttempt(peerHex, 'Could not signal target directly');
@@ -2035,7 +2294,8 @@ class Bitchat {
       const Duration(seconds: 15),
       onTimeout: () {
         debugPrint(
-            '[direct-punch] Timed out waiting for UDP connection to $peerName');
+          '[direct-punch] Timed out waiting for UDP connection to $peerName',
+        );
         _failHolePunchAttempt(
           peerHex,
           'Timed out waiting for direct punch connection',
@@ -2051,29 +2311,57 @@ class Bitchat {
   }
 
   /// Execute the local side of a PUNCH_INITIATE instruction.
-  Future<void> _executePunchInitiate(Uint8List peerPubkey, String ip, int port,
-      {Uint8List? readyRecipientPubkey}) async {
+  Future<void> _executePunchInitiate(
+    Uint8List peerPubkey,
+    String ip,
+    int port, {
+    Uint8List? readyRecipientPubkey,
+  }) async {
     final peerHex =
         peerPubkey.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
     final peerShort = peerHex.substring(0, 8);
     final hasPendingSend = _holePunchCompleters.containsKey(peerHex);
 
-    debugPrint('[hole-punch] PUNCH_INITIATE received: '
-        'target=$peerShort at $ip:$port, '
-        'pendingSend=$hasPendingSend');
+    // Idempotency: a duplicate PUNCH_INITIATE arrives whenever both peers
+    // independently requested punches for the same pair. If we're already
+    // handling a punch toward the same target, skip — another round would
+    // just produce redundant packets and duplicate PUNCH_READY messages.
+    final incomingIp = InternetAddress.tryParse(ip);
+    final existing = _holePunchTargets[peerHex];
+    if (existing != null &&
+        incomingIp != null &&
+        existing.ip.address == incomingIp.address &&
+        existing.port == port &&
+        (_holePunchLocalReady.contains(peerHex) ||
+            _holePunchConnectionInProgress.contains(peerHex))) {
+      debugPrint(
+        '[hole-punch] Ignoring duplicate PUNCH_INITIATE for '
+        '$peerShort at $ip:$port — punch already in progress '
+        '(pendingSend=$hasPendingSend)',
+      );
+      return;
+    }
+
+    debugPrint(
+      '[hole-punch] PUNCH_INITIATE received: '
+      'target=$peerShort at $ip:$port, '
+      'pendingSend=$hasPendingSend',
+    );
 
     store.dispatch(HolePunchPunchingAction(peerHex));
 
-    final targetIp = InternetAddress.tryParse(ip);
+    final targetIp = incomingIp;
     if (targetIp == null) {
       debugPrint('[hole-punch] Invalid address in punch initiate: $ip:$port');
       _failHolePunchAttempt(peerHex, 'Invalid punch target address');
       return;
     }
     if (_udpService == null || !_udpService!.canDialAddress(targetIp)) {
-      debugPrint('[hole-punch] Unsupported address family in punch initiate: '
-          '$ip:$port. Current UDP socket cannot use '
-          '${targetIp.type == InternetAddressType.IPv6 ? "IPv6" : "IPv4"}.');
+      debugPrint(
+        '[hole-punch] Unsupported address family in punch initiate: '
+        '$ip:$port. Current UDP socket cannot use '
+        '${targetIp.type == InternetAddressType.IPv6 ? "IPv6" : "IPv4"}.',
+      );
       _failHolePunchAttempt(peerHex, 'Unsupported address family');
       return;
     }
@@ -2094,11 +2382,17 @@ class Bitchat {
     _holePunchLocalReady.add(peerHex);
 
     if (readyRecipientPubkey != null) {
-      debugPrint('[hole-punch] Reporting local punch readiness for '
-          '$peerShort...');
+      final readyRecipientHex = readyRecipientPubkey
+          .map((b) => b.toRadixString(16).padLeft(2, '0'))
+          .join();
+      debugPrint(
+        '[hole-punch] Reporting local punch readiness for '
+        '$peerShort...',
+      );
       final readySent = await _signalingService.sendPunchReady(
         readyRecipientPubkey,
         identity.publicKey,
+        requireDirectTransport: readyRecipientHex == peerHex,
       );
       if (!readySent) {
         _failHolePunchAttempt(
@@ -2119,8 +2413,9 @@ class Bitchat {
 
     if (iAmInitiator) {
       debugPrint(
-          '[hole-punch] Local punch complete for $peerShort; waiting for '
-          'explicit PUNCH_READY before connecting...');
+        '[hole-punch] Local punch complete for $peerShort; waiting for '
+        'explicit PUNCH_READY before connecting...',
+      );
       await _maybeEstablishPunchConnection(peerHex);
     } else if (!iAmInitiator) {
       // We punched but we're not the initiator — wait for incoming UDX connection.
@@ -2144,7 +2439,8 @@ class Bitchat {
     final facilitatorCount = trustedFriendCount + rendezvousCount;
 
     debugPrint(
-        '[discover] Trying to reach $name via $facilitatorCount signaling facilitator(s)');
+      '[discover] Trying to reach $name via $facilitatorCount signaling facilitator(s)',
+    );
 
     if (facilitatorCount == 0) {
       debugPrint('[discover] No signaling facilitators available');
@@ -2153,17 +2449,22 @@ class Bitchat {
 
     // Step 1: Ask all facilitators which ones actually know the peer's address.
     debugPrint('[discover] Querying friends for $name address...');
-    final candidates =
-        await _signalingService.queryPeerAddressCandidates(pubkeyBytes);
+    final candidates = await _signalingService.queryPeerAddressCandidates(
+      pubkeyBytes,
+    );
 
     if (candidates.isEmpty) {
-      debugPrint('[discover] No facilitator currently reports an address for '
-          '$name');
+      debugPrint(
+        '[discover] No facilitator currently reports an address for '
+        '$name',
+      );
       return false;
     }
 
-    debugPrint('[discover] ${candidates.length} facilitator(s) replied for '
-        '$name');
+    debugPrint(
+      '[discover] ${candidates.length} facilitator(s) replied for '
+      '$name',
+    );
 
     // Step 2: Try direct UDP to every unique compatible address we learned.
     final triedAddresses = <String>{};
@@ -2182,28 +2483,31 @@ class Bitchat {
         continue;
       }
       if (_udpService != null && !_udpService!.canDialAddress(addr.ip)) {
-        debugPrint('[discover] Skipping incompatible UDP address for $name: '
-            '$address');
+        debugPrint(
+          '[discover] Skipping incompatible UDP address for $name: '
+          '$address',
+        );
         continue;
       }
 
-      facilitatorOrder.add(candidate);
       final normalized = addr.toAddressString();
       if (!triedAddresses.add(normalized)) {
         continue;
       }
 
+      facilitatorOrder.add(candidate);
       debugPrint(
-          '[discover] Facilitator ${candidate.responderPubkey.map((b) => b.toRadixString(16).padLeft(2, '0')).join().substring(0, 8)} '
-          'reports $name at $normalized');
-      store.dispatch(AssociateUdpAddressAction(
-        publicKey: pubkeyBytes,
-        address: normalized,
-      ));
+        '[discover] Facilitator ${candidate.responderPubkey.map((b) => b.toRadixString(16).padLeft(2, '0')).join().substring(0, 8)} '
+        'reports $name at $normalized',
+      );
+      store.dispatch(
+        AssociateUdpAddressAction(publicKey: pubkeyBytes, address: normalized),
+      );
 
       if (_udpService != null) {
         debugPrint('[discover] Trying direct UDP to $name at $normalized...');
-        if (await _udpService!.connectToPeer(pubkeyHex, addr.ip, addr.port)) {
+        final announce = await _createSignedAnnounce(address: udpAddress);
+        if (await _sendViaUdp(pubkeyHex, normalized, announce)) {
           debugPrint('[discover] Direct UDP to $name succeeded');
           return true;
         }
@@ -2212,8 +2516,10 @@ class Bitchat {
     }
 
     if (facilitatorOrder.isEmpty) {
-      debugPrint('[discover] No compatible facilitator address remains for '
-          '$name');
+      debugPrint(
+        '[discover] No compatible facilitator address remains for '
+        '$name',
+      );
       return false;
     }
 
@@ -2223,8 +2529,10 @@ class Bitchat {
       final facilitatorHex = candidate.responderPubkey
           .map((b) => b.toRadixString(16).padLeft(2, '0'))
           .join();
-      debugPrint('[discover] Requesting coordinated hole-punch to $name via '
-          '${facilitatorHex.substring(0, 8)}...');
+      debugPrint(
+        '[discover] Requesting coordinated hole-punch to $name via '
+        '${facilitatorHex.substring(0, 8)}...',
+      );
 
       _beginHolePunchAttempt(pubkeyHex);
       final sent = await _signalingService.requestHolePunchViaFriend(
@@ -2232,8 +2540,10 @@ class Bitchat {
         candidate.responderPubkey,
       );
       if (!sent) {
-        debugPrint('[discover] Could not reach facilitator '
-            '${facilitatorHex.substring(0, 8)}...');
+        debugPrint(
+          '[discover] Could not reach facilitator '
+          '${facilitatorHex.substring(0, 8)}...',
+        );
         _failHolePunchAttempt(pubkeyHex, 'Could not reach facilitator');
         continue;
       }
@@ -2244,15 +2554,19 @@ class Bitchat {
         return false;
       }
 
-      debugPrint('[discover] Hole-punch requested via '
-          '${facilitatorHex.substring(0, 8)}; waiting for PUNCH_INITIATE '
-          '(timeout: 15s)...');
+      debugPrint(
+        '[discover] Hole-punch requested via '
+        '${facilitatorHex.substring(0, 8)}; waiting for PUNCH_INITIATE '
+        '(timeout: 15s)...',
+      );
 
       final succeeded = await completer.future.timeout(
         const Duration(seconds: 15),
         onTimeout: () {
-          debugPrint('[discover] Hole-punch timed out for $name via '
-              '${facilitatorHex.substring(0, 8)}');
+          debugPrint(
+            '[discover] Hole-punch timed out for $name via '
+            '${facilitatorHex.substring(0, 8)}',
+          );
           _failHolePunchAttempt(
             pubkeyHex,
             'Timed out waiting for coordinated hole-punch',
@@ -2281,45 +2595,70 @@ class Bitchat {
   ///
   /// Throttled: each peer is attempted at most once per [_discoveryRetryInterval].
   void _discoverUnreachableFriends() {
-    if (!_udpAvailable) return; // Need UDP to establish the connection
+    debugPrint("Discovering unreachable friends");
+    if (!_udpAvailable){
+      debugPrint("No UDP");
+      return; // Need UDP to establish the connection
+    } 
 
     final wellConnected = store.state.peers.wellConnectedFriends;
     final rendezvousCount = _configuredRendezvousServers().length;
-    if (wellConnected.isEmpty && rendezvousCount == 0) return;
+    if (wellConnected.isEmpty && rendezvousCount == 0) {
+      debugPrint("No well connected friends and no RVs");
+      return;
+      }
 
     final now = DateTime.now();
     final friends = _peersState.friends;
 
+    var len = friends.length;
+    debugPrint("Have $len friends");
+
     for (final friend in friends) {
       // Skip friends we can already reach
-      if (friend.hasBleConnection) continue;
-      if (_udpService?.getPeerIdForPubkey(friend.publicKey) != null) continue;
+      if (_hasLiveBlePath(friend)) {
+        debugPrint("Have live BLE path to friend");
+        continue;
+      }
+      if (_udpService?.getPeerIdForPubkey(friend.publicKey) != null) {
+        debugPrint("Have peer Id for public key in udp service");
+        continue;
+      }
 
       // Skip if we attempted discovery recently
       final lastAttempt = _lastDiscoveryAttempt[friend.pubkeyHex];
       if (lastAttempt != null &&
           now.difference(lastAttempt) < _discoveryRetryInterval) {
+            debugPrint("SKip because tried recently");
         continue;
       }
 
       // Skip if this friend IS one of our well-connected friends (they're
       // reachable — that's how we'd signal through them)
-      if (wellConnected.any((wc) => wc.pubkeyHex == friend.pubkeyHex)) continue;
+      // if (wellConnected.any((wc) => wc.pubkeyHex == friend.pubkeyHex)) {
+      //   debugPrint("Skip because it's well connected");
+      //   continue;
+      // }
 
-      debugPrint('[discover] Friend ${friend.displayName} is unreachable, '
-          'trying discovery via '
-          '${wellConnected.length + rendezvousCount} facilitator(s)...');
+      debugPrint(
+        '[discover] Friend ${friend.displayName} is unreachable, '
+        'trying discovery via '
+        '${wellConnected.length + rendezvousCount} facilitator(s)...',
+      );
       _lastDiscoveryAttempt[friend.pubkeyHex] = now;
 
       // Fire-and-forget — don't block the announce tick
       _discoverPeerViaFriends(friend).then((success) {
         if (success) {
           debugPrint(
-              '[discover] Successfully reached ${friend.displayName} via friends');
+            '[discover] Successfully reached ${friend.displayName} via friends',
+          );
           _lastDiscoveryAttempt.remove(friend.pubkeyHex);
         } else {
-          debugPrint('[discover] Discovery failed for ${friend.displayName}, '
-              'will retry in ${_discoveryRetryInterval.inSeconds}s');
+          debugPrint(
+            '[discover] Discovery failed for ${friend.displayName}, '
+            'will retry in ${_discoveryRetryInterval.inSeconds}s',
+          );
         }
       });
     }
@@ -2334,12 +2673,14 @@ class Bitchat {
           ? MessageTransport.udp
           : MessageTransport.ble;
 
-      store.dispatch(MessageReceivedAction(
-        messageId: messageId,
-        transport: transport,
-        senderPubkey: senderPubkey,
-        payloadSize: payload.length,
-      ));
+      store.dispatch(
+        MessageReceivedAction(
+          messageId: messageId,
+          transport: transport,
+          senderPubkey: senderPubkey,
+          payloadSize: payload.length,
+        ),
+      );
       onMessageReceived?.call(messageId, senderPubkey, payload, transport);
     };
 
@@ -2443,12 +2784,16 @@ class Bitchat {
           final iAmInitiator = myPubkeyHex.compareTo(pubkeyHex) < 0;
 
           if (iAmInitiator) {
-            debugPrint('[auto-udp] Friend ${data.nickname} has UDP address '
-                '${data.udpAddress}, connecting proactively (I am initiator)...');
+            debugPrint(
+              '[auto-udp] Friend ${data.nickname} has UDP address '
+              '${data.udpAddress}, connecting proactively (I am initiator)...',
+            );
             _connectToFriendViaUdp(pubkeyHex, data.udpAddress!);
           } else {
-            debugPrint('[auto-udp] Friend ${data.nickname} has UDP address '
-                '${data.udpAddress}, waiting for them to connect (they are initiator)');
+            debugPrint(
+              '[auto-udp] Friend ${data.nickname} has UDP address '
+              '${data.udpAddress}, waiting for them to connect (they are initiator)',
+            );
           }
         }
       }
@@ -2493,15 +2838,10 @@ class Bitchat {
     // SignalingService sends signaling payloads through us (wrapped in BitchatPacket)
     _signalingService.sendSignaling =
         (recipientPubkey, signalingPayload) async {
-      final packet = BitchatPacket(
-        type: PacketType.signaling,
-        senderPubkey: identity.publicKey,
-        recipientPubkey: recipientPubkey,
-        payload: signalingPayload,
-        signature: Uint8List(64),
+      final bytes = await _createSignedSignalingPacket(
+        recipientPubkey,
+        signalingPayload,
       );
-      await _protocolHandler.signPacket(packet);
-      final bytes = packet.serialize();
 
       final pubkeyHex = recipientPubkey
           .map((b) => b.toRadixString(16).padLeft(2, '0'))
@@ -2547,6 +2887,7 @@ class Bitchat {
 
       return false;
     };
+    _signalingService.sendDirectSignaling = _sendDirectSignalingOverLiveBle;
 
     // Hole-punch initiation: a well-connected friend told us to start punching
     _signalingService.onPunchInitiate =
@@ -2587,9 +2928,10 @@ class Bitchat {
           !_udpAvailable ||
           !_udpService!.canDialAddress(reflectedIp)) {
         debugPrint(
-            'Reflected ${reflectedIp.type == InternetAddressType.IPv6 ? "IPv6" : "IPv4"} '
-            'address $ip:$port — noted for display, but the current UDP '
-            'socket cannot use that family.');
+          'Reflected ${reflectedIp.type == InternetAddressType.IPv6 ? "IPv6" : "IPv4"} '
+          'address $ip:$port — noted for display, but the current UDP '
+          'socket cannot use that family.',
+        );
         return;
       }
 
@@ -2597,13 +2939,12 @@ class Bitchat {
       if (reflected == _publicAddress) return; // No change
 
       debugPrint(
-          'Public address updated via reflection: $_publicAddress → $reflected');
+        'Public address updated via reflection: $_publicAddress → $reflected',
+      );
       _publicAddress = reflected;
       store.dispatch(PublicAddressUpdatedAction(reflected));
       _resetRendezvousBackoff();
-      unawaited(_syncConfiguredRendezvous(
-        reason: 'reflected-address-updated',
-      ));
+      unawaited(_syncConfiguredRendezvous(reason: 'reflected-address-updated'));
     };
   }
 
@@ -2692,22 +3033,26 @@ class Bitchat {
         if (wasPunching) {
           final remote = _udpService!.getRemoteAddress(event.peerId);
           if (remote != null) {
-            store.dispatch(HolePunchSucceededAction(
-              event.peerId,
-              remote.ip.address,
-              remote.port,
-            ));
+            store.dispatch(
+              HolePunchSucceededAction(
+                event.peerId,
+                remote.ip.address,
+                remote.port,
+              ),
+            );
           } else {
             final peer = _peersState.getPeerByPubkeyHex(event.peerId);
             final parsed = peer?.udpAddress != null
                 ? parseAddressString(peer!.udpAddress!)
                 : null;
             if (parsed != null) {
-              store.dispatch(HolePunchSucceededAction(
-                event.peerId,
-                parsed.ip.address,
-                parsed.port,
-              ));
+              store.dispatch(
+                HolePunchSucceededAction(
+                  event.peerId,
+                  parsed.ip.address,
+                  parsed.port,
+                ),
+              );
             }
           }
         }
@@ -2731,10 +3076,12 @@ class Bitchat {
           _clearHolePunchState(event.peerId);
         }
       }
-      store.dispatch(PeerUdpConnectionChangedAction(
-        pubkeyHex: event.peerId,
-        connected: event.connected,
-      ));
+      store.dispatch(
+        PeerUdpConnectionChangedAction(
+          pubkeyHex: event.peerId,
+          connected: event.connected,
+        ),
+      );
     });
   }
 
@@ -2880,7 +3227,8 @@ class Bitchat {
         _bleFriendAnnounceSent.remove(deviceId);
       }
       debugPrint(
-          '[ble-announce] Sent immediate ANNOUNCE to $deviceId (friend: $isFriend)');
+        '[ble-announce] Sent immediate ANNOUNCE to $deviceId (friend: $isFriend)',
+      );
     } else {
       debugPrint('[ble-announce] Failed to send ANNOUNCE to $deviceId');
     }
@@ -2953,8 +3301,9 @@ class Bitchat {
       myAddress,
       context: 'direct-announce',
     );
-    final payload =
-        _protocolHandler.createAnnouncePayload(address: normalizedAddress);
+    final payload = _protocolHandler.createAnnouncePayload(
+      address: normalizedAddress,
+    );
     final packet = BitchatPacket(
       type: PacketType.announce,
       ttl: 0,
@@ -2984,8 +3333,11 @@ class Bitchat {
         final peer = _peersState.getPeerByPubkeyHex(friendPubkeyHex);
         final friendAddress = peer?.udpAddress;
         if (friendAddress != null && friendAddress.isNotEmpty) {
-          final udpSent =
-              await _sendViaUdp(friendPubkeyHex, friendAddress, bytes);
+          final udpSent = await _sendViaUdp(
+            friendPubkeyHex,
+            friendAddress,
+            bytes,
+          );
           sent = sent || udpSent;
         }
       }
@@ -3022,8 +3374,10 @@ class Bitchat {
         final peer = _peersState.getPeerByPubkeyHex(pubkeyHex);
         if (peer == null) continue;
 
-        debugPrint('[udp-stale] No UDP traffic from ${peer.displayName} for '
-            '${staleThreshold.inSeconds}s; disconnecting stale session');
+        debugPrint(
+          '[udp-stale] No UDP traffic from ${peer.displayName} for '
+          '${staleThreshold.inSeconds}s; disconnecting stale session',
+        );
         store.dispatch(PeerUdpDisconnectedAction(peer.publicKey));
         unawaited(_udpService!.disconnectFromPeer(pubkeyHex));
       }
@@ -3051,8 +3405,10 @@ class Bitchat {
 
     for (final fragment in fragmented.fragments) {
       await _protocolHandler.signPacket(fragment);
-      final sent =
-          await _bleService!.sendToPeer(bleDeviceId, fragment.serialize());
+      final sent = await _bleService!.sendToPeer(
+        bleDeviceId,
+        fragment.serialize(),
+      );
       if (!sent) return false;
       await Future.delayed(FragmentHandler.fragmentDelay);
     }

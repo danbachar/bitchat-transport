@@ -56,7 +56,7 @@ class TransportsState {
 
   /// Our public IP address (no port), for display purposes.
   /// Set even when behind NAT. Updated by seeip.org discovery and friend
-  /// reflection. Prefers IPv6 over IPv4.
+  /// reflection. IPv6-only.
   final String? publicIp;
 
   /// The current IP network type used for Internet connectivity.

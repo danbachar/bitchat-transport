@@ -536,7 +536,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           child: Text(
             'A lightweight server that helps peers find each other for '
             'hole-punching. Add one or more servers below. Server is stored '
-            'only after live ANNOUNCE response. IPv6 and IPv4 supported.',
+            'only after live ANNOUNCE response. IPv6 only.',
             style: TextStyle(color: Colors.grey, fontSize: 13),
           ),
         ),
@@ -670,9 +670,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   String _formatAnchorDetails(RendezvousServerSettings server) {
-    return 'Rendezvous server\n'
-        'Address: ${server.address}\n'
-        'Public key: ${server.pubkeyHex}';
+    return '${server.address} ${server.pubkeyHex}';
   }
 
   Future<void> _copyAnchorDetails(RendezvousServerSettings server) async {
