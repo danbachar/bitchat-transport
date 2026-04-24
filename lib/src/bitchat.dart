@@ -2021,12 +2021,17 @@ class Bitchat {
     late final Future<bool> udxConnectFuture;
     udxConnectFuture = () async {
       // Hole-punch to open NAT mappings before UDX connection attempt.
-      // Skip for well-connected peers — they have public addresses, no NAT.
+      // Skip for peers with publicly routable addresses — punching is wasted
+      // when no NAT mapping is needed. Using [hasPublicUdpAddress] (not the
+      // verified [isWellConnected]) is intentional: skipping the punch is the
+      // path by which we gain reachability evidence in the first place. If
+      // the direct attempt fails, the caller's fallback path will retry with
+      // a punch via signaling.
       if (performPreConnectPunch &&
           !isRendezvous &&
           _holePunchService != null &&
           peer != null &&
-          !peer.isWellConnected) {
+          !peer.hasPublicUdpAddress) {
         debugPrint(
           '[udp-send] Hole-punching to $udpAddress before connecting...',
         );
@@ -3053,6 +3058,25 @@ class Bitchat {
                   parsed.port,
                 ),
               );
+            }
+          }
+        } else {
+          // Connection succeeded with no prior hole-punch coordination —
+          // empirical proof of unsolicited UDP reachability.
+          //
+          // Incoming: a peer reached us at our public address without us
+          // first opening a NAT mapping for them. This proves WE accept
+          // unsolicited inbound (i.e. our firewall/NAT path is open).
+          //
+          // Outgoing: we reached the peer at their advertised address
+          // without any punch coordination. This proves THEIR address
+          // accepts unsolicited inbound.
+          if (event.isIncoming) {
+            store.dispatch(UnsolicitedInboundObservedAction());
+          } else {
+            final peer = _peersState.getPeerByPubkeyHex(event.peerId);
+            if (peer != null) {
+              store.dispatch(PeerDirectReachObservedAction(peer.publicKey));
             }
           }
         }

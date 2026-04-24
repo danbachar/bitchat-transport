@@ -446,6 +446,7 @@ class UdpTransportService extends TransportService {
         peerId: pubkeyHex,
         transport: TransportType.udp,
         connected: true,
+        isIncoming: false,
       ));
 
       _lastConnectFailureKind = null;
@@ -744,6 +745,7 @@ class UdpTransportService extends TransportService {
         peerId: pubkeyHex,
         transport: TransportType.udp,
         connected: true,
+        isIncoming: true,
       ));
 
       debugPrint('Mapped incoming connection $tempKey → $pubkeyHex');

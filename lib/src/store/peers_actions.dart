@@ -252,3 +252,17 @@ class FriendRemovedAction extends PeerAction {
 
   FriendRemovedAction(this.publicKey);
 }
+
+// ===== Reachability Verification Actions =====
+
+/// We successfully reached a peer at their UDP address without coordinating
+/// a hole-punch — empirical proof that they accept unsolicited inbound.
+/// Promotes the peer from "candidate" (publicly routable address) to
+/// "verified well-connected".
+class PeerDirectReachObservedAction extends PeerAction {
+  final Uint8List publicKey;
+  final DateTime observedAt;
+
+  PeerDirectReachObservedAction(this.publicKey, {DateTime? observedAt})
+      : observedAt = observedAt ?? DateTime.now();
+}

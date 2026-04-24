@@ -1130,14 +1130,11 @@ void main() {
 
       final result = peersReducer(initial, action);
 
-      // When address is empty, copyWith with null keeps old value for
-      // udpAddress. The reducer passes: udpAddress: action.address.isEmpty ? null : action.address
-      // But copyWith(udpAddress: null) preserves old value due to ?? semantics.
-      // This documents the actual behavior of the reducer.
+      // The reducer constructs PeerState directly (not via copyWith) so it
+      // can actually set nullable fields to null. An empty address clears
+      // the stored udpAddress.
       final peer = result.peers[hex]!;
-      // The reducer uses copyWith which can't clear nullable fields to null.
-      // So the old udpAddress is preserved. This is a known copyWith limitation.
-      expect(peer.udpAddress, '[2001:db8::1]:4001');
+      expect(peer.udpAddress, isNull);
     });
 
     test('is a no-op for unknown peer', () {

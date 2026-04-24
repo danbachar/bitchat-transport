@@ -1,6 +1,5 @@
 import 'dart:math' as math;
 import '../models/peer.dart';
-import '../transport/address_utils.dart';
 import 'peers_state.dart';
 import 'peers_actions.dart';
 
@@ -215,15 +214,8 @@ PeersState peersReducer(PeersState state, dynamic action) {
 
     final isBle = action.transport == PeerTransport.bleDirect;
 
-    // Derive well-connected status from the UDP address in this ANNOUNCE.
-    // A peer is well-connected if they advertise a globally routable public
-    // UDP address for the active IP family.
-    // The address in the ANNOUNCE is authoritative — if absent, the peer has no address.
-    final wellConnected = action.udpAddress != null &&
-        isGloballyRoutableAddress(action.udpAddress!);
-
     if (existing == null) {
-      // New peer — set only the field matching the role
+      // New peer — no prior reachability evidence.
       final newPeer = PeerState(
         publicKey: action.publicKey,
         nickname: action.nickname,
@@ -238,7 +230,6 @@ PeersState peersReducer(PeersState state, dynamic action) {
         lastUdpSeen: action.transport == PeerTransport.udp ? now : null,
         udpAddress: action.udpAddress,
         linkLocalAddress: action.linkLocalAddress,
-        isWellConnected: wellConnected,
       );
       return state.copyWith(
         peers: Map.from(state.peers)..[pubkeyHex] = newPeer,
@@ -260,6 +251,10 @@ PeersState peersReducer(PeersState state, dynamic action) {
       // TODO: Fix BLE peripheral to reliably map central device IDs to
       // friend public keys so it can skip friends in the broadcast and
       // only send them the directed friend ANNOUNCE with address.
+      final newUdpAddress = action.udpAddress ?? existing.udpAddress;
+      // If the UDP address changed, prior reachability proof is invalid
+      // (it was bound to the previous address/network path).
+      final preserveReach = newUdpAddress == existing.udpAddress;
       final updated = PeerState(
         publicKey: existing.publicKey,
         nickname: action.nickname,
@@ -275,12 +270,10 @@ PeersState peersReducer(PeersState state, dynamic action) {
         lastBleSeen: isBle ? now : existing.lastBleSeen,
         lastUdpSeen:
             action.transport == PeerTransport.udp ? now : existing.lastUdpSeen,
-        udpAddress: action.udpAddress ?? existing.udpAddress,
+        udpAddress: newUdpAddress,
         linkLocalAddress: action.linkLocalAddress ?? existing.linkLocalAddress,
         isFriend: existing.isFriend,
-        isWellConnected: action.udpAddress != null
-            ? wellConnected
-            : existing.isWellConnected,
+        lastDirectReachAt: preserveReach ? existing.lastDirectReachAt : null,
         hasLiveUdpConnection: existing.hasLiveUdpConnection,
       );
       return state.copyWith(
@@ -340,7 +333,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
         udpAddress: existing.udpAddress,
         linkLocalAddress: existing.linkLocalAddress,
         isFriend: existing.isFriend,
-        isWellConnected: existing.isWellConnected,
+        lastDirectReachAt: existing.lastDirectReachAt,
         hasLiveUdpConnection: existing.hasLiveUdpConnection,
       );
       return state.copyWith(
@@ -405,7 +398,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
         udpAddress: existing.udpAddress, // Preserve for reconnection
         linkLocalAddress: existing.linkLocalAddress,
         isFriend: existing.isFriend,
-        isWellConnected: existing.isWellConnected,
+        lastDirectReachAt: existing.lastDirectReachAt,
         hasLiveUdpConnection: false,
       );
       return state.copyWith(
@@ -460,7 +453,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
             udpAddress: peer.udpAddress,
             linkLocalAddress: peer.linkLocalAddress,
             isFriend: peer.isFriend,
-            isWellConnected: peer.isWellConnected,
+            lastDirectReachAt: peer.lastDirectReachAt,
             hasLiveUdpConnection: peer.hasLiveUdpConnection,
           );
           return;
@@ -493,7 +486,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
             udpAddress: peer.udpAddress, // Preserve for reconnection
             linkLocalAddress: peer.linkLocalAddress,
             isFriend: true,
-            isWellConnected: peer.isWellConnected,
+            lastDirectReachAt: peer.lastDirectReachAt,
             hasLiveUdpConnection: peer.hasLiveUdpConnection,
           );
         } else {
@@ -531,8 +524,27 @@ PeersState peersReducer(PeersState state, dynamic action) {
     final pubkeyHex = _pubkeyToHex(action.publicKey);
     final existing = state.peers[pubkeyHex];
     if (existing != null) {
-      final updated = existing.copyWith(
-        udpAddress: action.address.isEmpty ? null : action.address,
+      final newAddress = action.address.isEmpty ? null : action.address;
+      // If the address changed, prior reachability proof is invalid.
+      final preserveReach = newAddress == existing.udpAddress;
+      final updated = PeerState(
+        publicKey: existing.publicKey,
+        nickname: existing.nickname,
+        connectionState: existing.connectionState,
+        transport: existing.transport,
+        rssi: existing.rssi,
+        protocolVersion: existing.protocolVersion,
+        lastSeen: existing.lastSeen,
+        bleCentralDeviceId: existing.bleCentralDeviceId,
+        blePeripheralDeviceId: existing.blePeripheralDeviceId,
+        lastBleSeen: existing.lastBleSeen,
+        lastUdpSeen: existing.lastUdpSeen,
+        udpAddress: newAddress,
+        linkLocalAddress: existing.linkLocalAddress,
+        isFriend: existing.isFriend,
+        lastDirectReachAt:
+            preserveReach ? existing.lastDirectReachAt : null,
+        hasLiveUdpConnection: existing.hasLiveUdpConnection,
       );
       return state.copyWith(
         peers: Map.from(state.peers)..[pubkeyHex] = updated,
@@ -598,13 +610,26 @@ PeersState peersReducer(PeersState state, dynamic action) {
         // Clear all UDP/friend fields
         isFriend: false,
         udpAddress: null,
-        isWellConnected: false,
+        lastDirectReachAt: null,
       );
       return state.copyWith(
         peers: Map.from(state.peers)..[pubkeyHex] = updated,
       );
     }
     return state;
+  }
+
+  if (action is PeerDirectReachObservedAction) {
+    final pubkeyHex = _pubkeyToHex(action.publicKey);
+    final existing = state.peers[pubkeyHex];
+    if (existing == null) return state;
+    // Only meaningful if the peer has a public-looking address.
+    // Without a public address, there's nothing to be "well-connected" at.
+    if (!existing.hasPublicUdpAddress) return state;
+    final updated = existing.copyWith(lastDirectReachAt: action.observedAt);
+    return state.copyWith(
+      peers: Map.from(state.peers)..[pubkeyHex] = updated,
+    );
   }
 
   return state;
