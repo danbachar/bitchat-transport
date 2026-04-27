@@ -96,7 +96,7 @@ void main() {
       expect(receivedAnnounce, isNotNull);
       expect(receivedAnnounce!.publicKey, equals(aliceIdentity.publicKey));
       expect(receivedAnnounce!.nickname, equals('Alice'));
-      expect(receivedAnnounce!.protocolVersion, equals(1));
+      expect(receivedAnnounce!.protocolVersion, equals(2));
       expect(receivedTransport, equals(PeerTransport.bleDirect));
 
       // Verify Bob's Redux store was updated
@@ -109,7 +109,8 @@ void main() {
 
     test('ANNOUNCE with UDP address roundtrips correctly', () async {
       const address = '[2001:db8::1]:4001';
-      final announcePayload = aliceProtocol.createAnnouncePayload(address: address);
+      final announcePayload =
+          aliceProtocol.createAnnouncePayload(candidates: [address]);
 
       final packet = BitchatPacket(
         type: PacketType.announce,
@@ -133,7 +134,7 @@ void main() {
       );
 
       expect(receivedAnnounce, isNotNull);
-      expect(receivedAnnounce!.udpAddress, equals(address));
+      expect(receivedAnnounce!.candidates, equals([address]));
 
       // Verify UDP address stored in Redux
       final peerState = bobStore.state.peers.getPeerByPubkey(aliceIdentity.publicKey);
@@ -282,7 +283,7 @@ void main() {
       expect(receivedAnnounce, isNotNull);
       expect(receivedAnnounce!.publicKey, equals(aliceIdentity.publicKey));
       expect(receivedAnnounce!.nickname, equals('Alice'));
-      expect(receivedAnnounce!.protocolVersion, equals(1));
+      expect(receivedAnnounce!.protocolVersion, equals(2));
       expect(receivedTransport, equals(PeerTransport.udp));
 
       // Verify Bob's Redux store was updated
@@ -294,7 +295,8 @@ void main() {
 
     test('UDP ANNOUNCE with address roundtrips correctly', () async {
       const address = '/ip6/::1/udp/4001/udx';
-      final announcePayload = aliceProtocol.createAnnouncePayload(address: address);
+      final announcePayload =
+          aliceProtocol.createAnnouncePayload(candidates: [address]);
 
       final packet = BitchatPacket(
         type: PacketType.announce,
@@ -316,7 +318,7 @@ void main() {
         udpPeerId: 'peer-alice-id',
       );
 
-      expect(receivedAnnounce!.udpAddress, equals(address));
+      expect(receivedAnnounce!.candidates, equals([address]));
     });
   });
 
@@ -491,7 +493,8 @@ void main() {
 
       // Then: Alice announces via UDP with address
       const udpAddr = '[2001:db8::a]:4001';
-      final udpAnnouncePayload = aliceProtocol.createAnnouncePayload(address: udpAddr);
+      final udpAnnouncePayload =
+          aliceProtocol.createAnnouncePayload(candidates: [udpAddr]);
       final udpPacket = BitchatPacket(
         type: PacketType.announce,
         senderPubkey: aliceIdentity.publicKey,

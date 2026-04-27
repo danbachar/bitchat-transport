@@ -46,7 +46,7 @@ PeerState _wellConnectedFriend(Uint8List pubkey, {String? udpAddress}) {
     nickname: 'Friend-${_pubkeyHex(pubkey).substring(0, 4)}',
     connectionState: PeerConnectionState.connected,
     isFriend: true,
-    udpAddress: udpAddress ?? '[2606:4700::1]:4001',
+    udpCandidates: [udpAddress ?? '[2606:4700::1]:4001'],
     lastDirectReachAt: DateTime.now(),
   );
 }
@@ -58,7 +58,7 @@ PeerState _regularFriend(Uint8List pubkey, {String? udpAddress}) {
     nickname: 'Peer-${_pubkeyHex(pubkey).substring(0, 4)}',
     connectionState: PeerConnectionState.connected,
     isFriend: true,
-    udpAddress: udpAddress,
+    udpCandidates: udpAddress != null ? [udpAddress] : const [],
   );
 }
 

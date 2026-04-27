@@ -112,8 +112,8 @@ void main() {
       final announce = AnnounceData(
         publicKey: requesterPubkey,
         nickname: 'requester',
-        protocolVersion: 1,
-        udpAddress: '[2001:db8::99]:7000',
+        protocolVersion: 2,
+        candidates: const ['[2001:db8::99]:7000'],
       );
 
       handler.processAnnounce(

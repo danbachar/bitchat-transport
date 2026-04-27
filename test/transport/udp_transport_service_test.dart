@@ -31,8 +31,27 @@ InternetAddress _loopbackForFamily(InternetAddressType family) =>
         ? InternetAddress.loopbackIPv6
         : InternetAddress.loopbackIPv4;
 
-InternetAddress _loopbackFor(UdpTransportService service) =>
-    _loopbackForFamily(service.activeAddressType ?? InternetAddressType.IPv6);
+/// Pick a loopback address whose family the [service] is bound to. Prefers
+/// IPv6 if available (matches [UdpTransportService.localPort], which falls
+/// back to v6 first), otherwise IPv4.
+InternetAddress _loopbackFor(UdpTransportService service) {
+  final families = service.activeAddressTypes;
+  if (families.contains(InternetAddressType.IPv6)) {
+    return InternetAddress.loopbackIPv6;
+  }
+  if (families.contains(InternetAddressType.IPv4)) {
+    return InternetAddress.loopbackIPv4;
+  }
+  return InternetAddress.loopbackIPv6;
+}
+
+/// Pick a family the [service] is bound to (preferring IPv6).
+InternetAddressType _familyFor(UdpTransportService service) {
+  final families = service.activeAddressTypes;
+  if (families.contains(InternetAddressType.IPv6)) return InternetAddressType.IPv6;
+  if (families.contains(InternetAddressType.IPv4)) return InternetAddressType.IPv4;
+  return InternetAddressType.IPv6;
+}
 
 void main() {
   group('UdpTransportService', () {
@@ -62,7 +81,7 @@ void main() {
         expect(service.isMultiplexerActive, isFalse);
       });
 
-      test('initialize binds socket and transitions to ready', () async {
+      test('initialize binds dual sockets and transitions to ready', () async {
         final service = UdpTransportService(
           identity: identity,
           store: store,
@@ -73,18 +92,19 @@ void main() {
 
         expect(result, isTrue);
         expect(service.state, equals(TransportState.ready));
-        expect(service.rawSocket, isNotNull);
+        // At least one of the two wildcard sockets must bind.
+        expect(service.activeAddressTypes, isNotEmpty);
         expect(service.localPort, isNotNull);
         expect(service.localPort, greaterThan(0));
-        expect(service.activeAddressType, isNotNull);
         expect(service.isMultiplexerActive, isFalse);
 
         await service.dispose();
       });
 
-      test('initialize rejects IPv4 addresses even on loopback', () async {
-        // The transport is IPv6-only. IPv4 addresses must never be dialable,
-        // regardless of whether they are loopback.
+      test('initialize accepts both IPv4 and IPv6 addresses when both bind',
+          () async {
+        // The transport now binds both v4 and v6 wildcard sockets.
+        // canDialAddress should accept whichever families are bound.
         final service = UdpTransportService(
           identity: identity,
           store: store,
@@ -92,9 +112,13 @@ void main() {
         );
         await service.initialize();
 
-        expect(service.activeAddressType, equals(InternetAddressType.IPv6));
-        expect(service.canDialAddress(InternetAddress.loopbackIPv4), isFalse);
-        expect(service.canDialAddress(InternetAddress.loopbackIPv6), isTrue);
+        final families = service.activeAddressTypes;
+        if (families.contains(InternetAddressType.IPv6)) {
+          expect(service.canDialAddress(InternetAddress.loopbackIPv6), isTrue);
+        }
+        if (families.contains(InternetAddressType.IPv4)) {
+          expect(service.canDialAddress(InternetAddress.loopbackIPv4), isTrue);
+        }
 
         await service.dispose();
       });
@@ -266,9 +290,10 @@ void main() {
         await service.dispose();
       });
 
-      test('connectToPeer returns false for IPv4 addresses', () async {
-        // The transport is IPv6-only. An IPv4 target means the peer is
-        // unreachable from our perspective, regardless of the target.
+      test('connectToPeer returns false when family is not bound', () async {
+        // If a transport happens to lack one of the families (e.g. on a
+        // platform where v4 binding fails), connectToPeer to an address in
+        // that family should fail fast.
         final service = UdpTransportService(
           identity: identity,
           store: store,
@@ -277,18 +302,27 @@ void main() {
         await service.initialize();
         service.startMultiplexer();
 
-        final result = await service.connectToPeer(
-          'deadbeef' * 8,
-          InternetAddress('203.0.113.1'),
-          65535,
-        );
+        // Build an address in a family the transport is NOT bound to. If both
+        // families are bound, this branch is skipped (the ability to dial
+        // either family is the expected behaviour).
+        final families = service.activeAddressTypes;
+        if (families.length < 2) {
+          final missing = families.contains(InternetAddressType.IPv6)
+              ? InternetAddress('203.0.113.1') // v4
+              : InternetAddress('2001:db8::1'); // v6
+          final result = await service.connectToPeer(
+            'deadbeef' * 8,
+            missing,
+            65535,
+          );
 
-        expect(result, isFalse);
-        expect(service.connectedCount, equals(0));
-        expect(
-          service.lastConnectFailureKind,
-          equals(UdpConnectFailureKind.networkUnreachable),
-        );
+          expect(result, isFalse);
+          expect(service.connectedCount, equals(0));
+          expect(
+            service.lastConnectFailureKind,
+            equals(UdpConnectFailureKind.networkUnreachable),
+          );
+        }
 
         await service.dispose();
       });
@@ -374,8 +408,8 @@ void main() {
         // Initialize both
         await alice.initialize();
         await bob.initialize();
-        expect(alice.activeAddressType, equals(bob.activeAddressType));
-        final loopback = _loopbackForFamily(bob.activeAddressType!);
+        expect(alice.activeAddressTypes, equals(bob.activeAddressTypes));
+        final loopback = _loopbackForFamily(_familyFor(bob));
 
         // Start multiplexers
         alice.startMultiplexer();
@@ -442,8 +476,8 @@ void main() {
 
         await alice.initialize();
         await bob.initialize();
-        expect(alice.activeAddressType, equals(bob.activeAddressType));
-        final loopback = _loopbackForFamily(bob.activeAddressType!);
+        expect(alice.activeAddressTypes, equals(bob.activeAddressTypes));
+        final loopback = _loopbackForFamily(_familyFor(bob));
         alice.startMultiplexer();
         bob.startMultiplexer();
 
@@ -504,8 +538,8 @@ void main() {
         // Phase 1: Both bind sockets (no multiplexer yet)
         await alice.initialize();
         await bob.initialize();
-        expect(alice.activeAddressType, equals(bob.activeAddressType));
-        final loopback = _loopbackForFamily(bob.activeAddressType!);
+        expect(alice.activeAddressTypes, equals(bob.activeAddressTypes));
+        final loopback = _loopbackForFamily(_familyFor(bob));
 
         // Phase 2: Exchange punch packets on raw sockets
         final punchData =
