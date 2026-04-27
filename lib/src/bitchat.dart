@@ -2021,12 +2021,17 @@ class Bitchat {
     late final Future<bool> udxConnectFuture;
     udxConnectFuture = () async {
       // Hole-punch to open NAT mappings before UDX connection attempt.
-      // Skip for well-connected peers — they have public addresses, no NAT.
+      // Skip for peers with publicly routable addresses — punching is wasted
+      // when no NAT mapping is needed. Using [hasPublicUdpAddress] (not the
+      // verified [isWellConnected]) is intentional: skipping the punch is the
+      // path by which we gain reachability evidence in the first place. If
+      // the direct attempt fails, the caller's fallback path will retry with
+      // a punch via signaling.
       if (performPreConnectPunch &&
           !isRendezvous &&
           _holePunchService != null &&
           peer != null &&
-          !peer.isWellConnected) {
+          !peer.hasPublicUdpAddress) {
         debugPrint(
           '[udp-send] Hole-punching to $udpAddress before connecting...',
         );
@@ -3052,6 +3057,66 @@ class Bitchat {
                   parsed.ip.address,
                   parsed.port,
                 ),
+              );
+            }
+          }
+        } else {
+          // Connection succeeded with no prior hole-punch coordination —
+          // empirical proof of unsolicited UDP reachability.
+          //
+          // Incoming: a peer reached us at our public address without us
+          // first opening a NAT mapping for them. This proves WE accept
+          // unsolicited inbound (i.e. our firewall/NAT path is open).
+          //
+          // Outgoing: we reached the peer at their advertised address
+          // without any punch coordination. This proves THEIR address
+          // accepts unsolicited inbound.
+          final peer = _peersState.getPeerByPubkeyHex(event.peerId);
+          final observedRemote = _udpService!.getRemoteAddress(event.peerId);
+          final peerAdvertised = peer?.udpAddress != null
+              ? parseAddressString(peer!.udpAddress!)
+              : null;
+          final matchedAdvertisedAddress =
+              observedRemote != null &&
+                  peerAdvertised != null &&
+                  observedRemote.ip.address == peerAdvertised.ip.address &&
+                  observedRemote.port == peerAdvertised.port;
+
+          if (event.isIncoming) {
+            // Only accept inbound proof if the peer reached us on the same
+            // address they advertise publicly. This avoids treating LAN or
+            // link-local paths as proof of unsolicited public reachability.
+            if (peer?.hasPublicUdpAddress == true && matchedAdvertisedAddress) {
+              store.dispatch(UnsolicitedInboundObservedAction());
+            } else {
+              debugPrint(
+                'Ignoring inbound well-connected proof for ${event.peerId}: '
+                'peer advertised=${peer?.udpAddress}, observed=$observedRemote',
+              );
+            }
+          } else if (peer != null) {
+            // Bind peer reachability proof to the exact advertised address
+            // that succeeded, not just any direct path.
+            if (peer.hasPublicUdpAddress && matchedAdvertisedAddress) {
+final remote = _udpService!.getRemoteAddress(event.peerId);
+              final advertised = peer.udpAddress != null
+                  ? parseAddressString(peer.udpAddress!)
+                  : null;
+              final reachedAdvertisedAddress = remote != null &&
+                  advertised != null &&
+                  remote.port == advertised.port &&
+                  remote.ip.address == advertised.ip.address;
+              if (reachedAdvertisedAddress) {
+                store.dispatch(PeerDirectReachObservedAction(peer.publicKey));
+              } else {
+                debugPrint(
+                    'Skipping direct-reach proof for ${event.peerId}: connected to '
+                    '${remote?.ip.address ?? "unknown"}:${remote?.port ?? 0} '
+                    'but advertised ${peer.udpAddress ?? "none"}');
+              }            } else {
+              debugPrint(
+                'Ignoring peer direct-reach proof for ${event.peerId}: '
+                'peer advertised=${peer.udpAddress}, observed=$observedRemote',
               );
             }
           }

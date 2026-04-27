@@ -36,14 +36,18 @@ Store<AppState> _storeWithPeers(
 }
 
 /// Create a PeerState that qualifies as a well-connected friend.
+/// Sets [lastDirectReachAt] so [isWellConnected] returns true (the verified
+/// state requires both a public address AND prior reachability evidence).
+/// Address must be outside the documentation range (2001:db8::/32) — that
+/// range is filtered out by [hasPublicUdpAddress].
 PeerState _wellConnectedFriend(Uint8List pubkey, {String? udpAddress}) {
   return PeerState(
     publicKey: pubkey,
     nickname: 'Friend-${_pubkeyHex(pubkey).substring(0, 4)}',
     connectionState: PeerConnectionState.connected,
     isFriend: true,
-    isWellConnected: true,
-    udpAddress: udpAddress ?? '[2001:db8::1]:4001',
+    udpAddress: udpAddress ?? '[2606:4700::1]:4001',
+    lastDirectReachAt: DateTime.now(),
   );
 }
 
@@ -54,7 +58,6 @@ PeerState _regularFriend(Uint8List pubkey, {String? udpAddress}) {
     nickname: 'Peer-${_pubkeyHex(pubkey).substring(0, 4)}',
     connectionState: PeerConnectionState.connected,
     isFriend: true,
-    isWellConnected: false,
     udpAddress: udpAddress,
   );
 }
@@ -337,7 +340,7 @@ void main() {
           friendHex: _wellConnectedFriend(friendKey),
           friend2Hex: _wellConnectedFriend(
             friend2Key,
-            udpAddress: '[2001:db8:3::1]:4001',
+            udpAddress: '[2606:4700:3::1]:4001',
           ),
         }),
       );

@@ -62,6 +62,15 @@ class TransportsState {
   /// The current IP network type used for Internet connectivity.
   final NetworkConnectionType networkConnectionType;
 
+  /// When we last observed unsolicited inbound traffic at [publicAddress]
+  /// — i.e. a peer connected to us via UDP without us first coordinating
+  /// a hole-punch. This is empirical proof that our firewall and NAT path
+  /// allow inbound packets at the claimed address.
+  ///
+  /// Bound to [publicAddress]: cleared whenever the address changes, since
+  /// any prior proof was for a different network path.
+  final DateTime? lastUnsolicitedInboundAt;
+
   const TransportsState({
     this.bleState = TransportState.uninitialized,
     this.udpState = TransportState.uninitialized,
@@ -71,6 +80,7 @@ class TransportsState {
     this.publicAddress,
     this.publicIp,
     this.networkConnectionType = NetworkConnectionType.offline,
+    this.lastUnsolicitedInboundAt,
   });
 
   static const TransportsState initial = TransportsState();
@@ -82,11 +92,24 @@ class TransportsState {
   /// Whether the system is in a healthy state (any transport active)
   bool get isHealthy => isAnyActive;
 
-  /// Whether this device is well-connected (has a globally routable public address).
+  /// Whether this device has a publicly routable address candidate.
   ///
-  /// Well-connected devices can act as relay facilitators for friends behind NAT.
-  bool get isWellConnected =>
+  /// This means the address *looks* reachable, but we have no proof yet
+  /// that unsolicited inbound actually works. Use [isWellConnected] for
+  /// decisions where reachability matters.
+  bool get hasPublicAddress =>
       publicAddress != null && isGloballyRoutableAddress(publicAddress!);
+
+  /// Whether this device is verified well-connected: has a public address
+  /// AND we have observed unsolicited inbound at that address.
+  ///
+  /// Only verified well-connected devices should advertise themselves as
+  /// signaling facilitators. A device with a public address but no proof
+  /// of inbound reachability may sit behind a stateful firewall that
+  /// silently drops unsolicited packets — picking it as facilitator
+  /// causes silent hole-punch failures.
+  bool get isWellConnected =>
+      hasPublicAddress && lastUnsolicitedInboundAt != null;
 
   /// Overall status display string derived from per-transport states
   String get statusDisplayString {
@@ -116,6 +139,7 @@ class TransportsState {
     String? publicAddress,
     String? publicIp,
     NetworkConnectionType? networkConnectionType,
+    DateTime? lastUnsolicitedInboundAt,
   }) {
     return TransportsState(
       bleState: bleState ?? this.bleState,
@@ -127,11 +151,14 @@ class TransportsState {
       publicIp: publicIp ?? this.publicIp,
       networkConnectionType:
           networkConnectionType ?? this.networkConnectionType,
+      lastUnsolicitedInboundAt:
+          lastUnsolicitedInboundAt ?? this.lastUnsolicitedInboundAt,
     );
   }
 
   /// Create a copy with publicAddress explicitly cleared (set to null).
   /// Keeps publicIp — the IP is still valid even if the full address isn't.
+  /// Also clears lastUnsolicitedInboundAt — the proof was bound to the address.
   TransportsState clearPublicAddress() {
     return TransportsState(
       bleState: bleState,
@@ -142,10 +169,12 @@ class TransportsState {
       publicAddress: null,
       publicIp: publicIp,
       networkConnectionType: networkConnectionType,
+      lastUnsolicitedInboundAt: null,
     );
   }
 
   /// Create a copy with both publicAddress and publicIp cleared.
+  /// Also clears lastUnsolicitedInboundAt — the proof was bound to the address.
   TransportsState clearPublicConnectivity() {
     return TransportsState(
       bleState: bleState,
@@ -156,6 +185,23 @@ class TransportsState {
       publicAddress: null,
       publicIp: null,
       networkConnectionType: networkConnectionType,
+      lastUnsolicitedInboundAt: null,
+    );
+  }
+
+  /// Create a copy with publicAddress changed to a new value, clearing the
+  /// reachability proof (since the proof was bound to the previous address).
+  TransportsState withNewPublicAddress(String address) {
+    return TransportsState(
+      bleState: bleState,
+      udpState: udpState,
+      bleError: bleError,
+      udpError: udpError,
+      bleScanning: bleScanning,
+      publicAddress: address,
+      publicIp: publicIp,
+      networkConnectionType: networkConnectionType,
+      lastUnsolicitedInboundAt: null,
     );
   }
 
@@ -171,7 +217,8 @@ class TransportsState {
           bleScanning == other.bleScanning &&
           publicAddress == other.publicAddress &&
           publicIp == other.publicIp &&
-          networkConnectionType == other.networkConnectionType;
+          networkConnectionType == other.networkConnectionType &&
+          lastUnsolicitedInboundAt == other.lastUnsolicitedInboundAt;
 
   @override
   int get hashCode => Object.hash(
@@ -183,9 +230,10 @@ class TransportsState {
         publicAddress,
         publicIp,
         networkConnectionType,
+        lastUnsolicitedInboundAt,
       );
 
   @override
   String toString() =>
-      'TransportsState(ble: $bleState, udp: $udpState, scanning: $bleScanning, publicAddr: $publicAddress, publicIp: $publicIp, network: ${networkConnectionType.displayName})';
+      'TransportsState(ble: $bleState, udp: $udpState, scanning: $bleScanning, publicAddr: $publicAddress, publicIp: $publicIp, network: ${networkConnectionType.displayName}, wellConnected: $isWellConnected)';
 }

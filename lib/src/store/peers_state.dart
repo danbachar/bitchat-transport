@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import '../models/peer.dart';
+import '../transport/address_utils.dart';
 
 /// Represents a discovered peer before identity (ANNOUNCE) is exchanged.
 /// Immutable version for Redux state.
@@ -173,8 +174,13 @@ class PeerState {
   /// Whether this peer is a friend (friendship established)
   final bool isFriend;
 
-  /// Whether this peer is well-connected and can serve as a signaling node
-  final bool isWellConnected;
+  /// When we last successfully reached this peer at [udpAddress] over UDP
+  /// without a prior hole-punch coordination — i.e. the address accepts
+  /// unsolicited inbound. This is the proof that the peer is well-connected.
+  ///
+  /// Bound to [udpAddress]: cleared whenever the UDP address changes, since
+  /// any prior proof was for a different network path.
+  final DateTime? lastDirectReachAt;
 
   /// Whether there is a live UDX connection to this peer.
   /// Set true when UDX handshake completes, false when the stream closes.
@@ -197,7 +203,7 @@ class PeerState {
     this.udpAddress,
     this.linkLocalAddress,
     this.isFriend = false,
-    this.isWellConnected = false,
+    this.lastDirectReachAt,
     this.hasLiveUdpConnection = false,
   });
 
@@ -221,6 +227,22 @@ class PeerState {
   /// For UDP, a stored address is sufficient (we can attempt to connect).
   /// See [isLiveReachable] for actual live connection status.
   bool get isReachable => hasBleConnection || udpAddress != null;
+
+  /// Whether this peer's [udpAddress] is a publicly routable candidate.
+  /// A candidate may not actually accept unsolicited inbound — see
+  /// [isWellConnected] for the verified version.
+  bool get hasPublicUdpAddress =>
+      udpAddress != null && isGloballyRoutableAddress(udpAddress!);
+
+  /// Whether this peer is verified well-connected: claims a public UDP
+  /// address AND we have proof that they accept unsolicited inbound at
+  /// that address (we successfully reached them without hole-punching, or
+  /// they reached us via an unsolicited path).
+  ///
+  /// Only verified well-connected peers should be used as signaling
+  /// facilitators or trusted to skip hole-punching on outbound sends.
+  bool get isWellConnected =>
+      hasPublicUdpAddress && lastDirectReachAt != null;
 
   /// Whether this peer has a live, active connection right now.
   /// Use this for UI "online" status — not for signaling/discovery.
@@ -256,7 +278,7 @@ class PeerState {
     String? udpAddress,
     String? linkLocalAddress,
     bool? isFriend,
-    bool? isWellConnected,
+    DateTime? lastDirectReachAt,
     bool? hasLiveUdpConnection,
   }) {
     return PeerState(
@@ -274,7 +296,7 @@ class PeerState {
       udpAddress: udpAddress ?? this.udpAddress,
       linkLocalAddress: linkLocalAddress ?? this.linkLocalAddress,
       isFriend: isFriend ?? this.isFriend,
-      isWellConnected: isWellConnected ?? this.isWellConnected,
+      lastDirectReachAt: lastDirectReachAt ?? this.lastDirectReachAt,
       hasLiveUdpConnection: hasLiveUdpConnection ?? this.hasLiveUdpConnection,
     );
   }
@@ -294,7 +316,7 @@ class PeerState {
           udpAddress == other.udpAddress &&
           linkLocalAddress == other.linkLocalAddress &&
           isFriend == other.isFriend &&
-          isWellConnected == other.isWellConnected &&
+          lastDirectReachAt == other.lastDirectReachAt &&
           hasLiveUdpConnection == other.hasLiveUdpConnection;
 
   @override
@@ -309,7 +331,7 @@ class PeerState {
     udpAddress,
     linkLocalAddress,
     isFriend,
-    isWellConnected,
+    lastDirectReachAt,
     hasLiveUdpConnection,
   );
 }
