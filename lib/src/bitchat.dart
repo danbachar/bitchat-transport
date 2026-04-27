@@ -3098,8 +3098,22 @@ class Bitchat {
             // Bind peer reachability proof to the exact advertised address
             // that succeeded, not just any direct path.
             if (peer.hasPublicUdpAddress && matchedAdvertisedAddress) {
-              store.dispatch(PeerDirectReachObservedAction(peer.publicKey));
-            } else {
+final remote = _udpService!.getRemoteAddress(event.peerId);
+              final advertised = peer.udpAddress != null
+                  ? parseAddressString(peer.udpAddress!)
+                  : null;
+              final reachedAdvertisedAddress = remote != null &&
+                  advertised != null &&
+                  remote.port == advertised.port &&
+                  remote.ip.address == advertised.ip.address;
+              if (reachedAdvertisedAddress) {
+                store.dispatch(PeerDirectReachObservedAction(peer.publicKey));
+              } else {
+                debugPrint(
+                    'Skipping direct-reach proof for ${event.peerId}: connected to '
+                    '${remote?.ip.address ?? "unknown"}:${remote?.port ?? 0} '
+                    'but advertised ${peer.udpAddress ?? "none"}');
+              }            } else {
               debugPrint(
                 'Ignoring peer direct-reach proof for ${event.peerId}: '
                 'peer advertised=${peer.udpAddress}, observed=$observedRemote',
