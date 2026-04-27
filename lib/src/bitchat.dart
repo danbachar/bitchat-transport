@@ -993,7 +993,8 @@ class Bitchat {
 
         _lastRendezvousSuppressionLogKey.remove(configKey);
 
-        final announce = await _createSignedAnnounce(address: udpAddress);
+        final announce =
+            await _createSignedAnnounce(candidates: _localCandidates);
         if (await _udpService!.sendToPeer(rendezvous.pubkeyHex, announce)) {
           _resetRendezvousBackoff(configKey);
           debugPrint(
@@ -1910,7 +1911,8 @@ class Bitchat {
       _sustainHolePunchTraffic(peerHex, target, phase: 'initiator-connect'),
     );
 
-    final announce = await _createSignedAnnounce(address: udpAddress);
+    final announce =
+        await _createSignedAnnounce(candidates: _localCandidates);
     final connected = await _sendViaUdp(
       peerHex,
       target.toAddressString(),
@@ -2515,7 +2517,8 @@ class Bitchat {
 
       if (_udpService != null) {
         debugPrint('[discover] Trying direct UDP to $name at $normalized...');
-        final announce = await _createSignedAnnounce(address: udpAddress);
+        final announce =
+            await _createSignedAnnounce(candidates: _localCandidates);
         if (await _sendViaUdp(pubkeyHex, normalized, announce)) {
           debugPrint('[discover] Direct UDP to $name succeeded');
           return true;
