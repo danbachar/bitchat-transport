@@ -3071,12 +3071,39 @@ class Bitchat {
           // Outgoing: we reached the peer at their advertised address
           // without any punch coordination. This proves THEIR address
           // accepts unsolicited inbound.
+          final peer = _peersState.getPeerByPubkeyHex(event.peerId);
+          final observedRemote = _udpService!.getRemoteAddress(event.peerId);
+          final peerAdvertised = peer?.udpAddress != null
+              ? parseAddressString(peer!.udpAddress!)
+              : null;
+          final matchedAdvertisedAddress =
+              observedRemote != null &&
+                  peerAdvertised != null &&
+                  observedRemote.ip.address == peerAdvertised.ip.address &&
+                  observedRemote.port == peerAdvertised.port;
+
           if (event.isIncoming) {
-            store.dispatch(UnsolicitedInboundObservedAction());
-          } else {
-            final peer = _peersState.getPeerByPubkeyHex(event.peerId);
-            if (peer != null) {
+            // Only accept inbound proof if the peer reached us on the same
+            // address they advertise publicly. This avoids treating LAN or
+            // link-local paths as proof of unsolicited public reachability.
+            if (peer?.hasPublicUdpAddress == true && matchedAdvertisedAddress) {
+              store.dispatch(UnsolicitedInboundObservedAction());
+            } else {
+              debugPrint(
+                'Ignoring inbound well-connected proof for ${event.peerId}: '
+                'peer advertised=${peer?.udpAddress}, observed=$observedRemote',
+              );
+            }
+          } else if (peer != null) {
+            // Bind peer reachability proof to the exact advertised address
+            // that succeeded, not just any direct path.
+            if (peer.hasPublicUdpAddress && matchedAdvertisedAddress) {
               store.dispatch(PeerDirectReachObservedAction(peer.publicKey));
+            } else {
+              debugPrint(
+                'Ignoring peer direct-reach proof for ${event.peerId}: '
+                'peer advertised=${peer.udpAddress}, observed=$observedRemote',
+              );
             }
           }
         }
