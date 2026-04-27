@@ -642,7 +642,10 @@ class SignalingService {
     final peer = store.state.peers.getPeerByPubkeyHex(pubkeyHex);
     if (peer == null || !peer.isFriend) return null;
 
-    final udpAddress = peer.udpAddress;
+    // Signaling addresses are routed through the public Internet, so prefer
+    // a globally-routable candidate over a LAN one when falling back to peer
+    // state.
+    final udpAddress = peer.publicUdpAddress ?? peer.udpAddress;
     if (udpAddress == null || udpAddress.isEmpty) return null;
 
     final parsed = parseAddressString(udpAddress);

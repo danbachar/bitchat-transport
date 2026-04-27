@@ -26,47 +26,70 @@ void main() {
       test('encodes public key, version, and nickname correctly', () {
         final payload = handler.createAnnouncePayload();
 
-        // Verify payload structure
-        expect(payload.length, greaterThanOrEqualTo(32 + 2 + 1 + 'TestUser'.length + 2));
+        // pubkey(32) + version(2) + nickLen(1) + nick + count(1)
+        expect(payload.length,
+            equals(32 + 2 + 1 + 'TestUser'.length + 1));
 
-        // Public key (first 32 bytes)
         final pubkeyFromPayload = payload.sublist(0, 32);
         expect(pubkeyFromPayload, equals(testIdentity.publicKey));
 
-        // Protocol version (next 2 bytes)
-        final versionData = ByteData.view(payload.buffer, payload.offsetInBytes + 32, 2);
+        final versionData =
+            ByteData.view(payload.buffer, payload.offsetInBytes + 32, 2);
         final version = versionData.getUint16(0, Endian.big);
-        expect(version, equals(1)); // Protocol version 1
+        expect(version, equals(2));
 
-        // Nickname length and nickname
         final nickLen = payload[34];
         expect(nickLen, equals('TestUser'.length));
-        final nickname = String.fromCharCodes(payload.sublist(35, 35 + nickLen));
+        final nickname =
+            String.fromCharCodes(payload.sublist(35, 35 + nickLen));
         expect(nickname, equals('TestUser'));
+
+        // count byte should be 0 (no candidates)
+        expect(payload[35 + nickLen], equals(0));
       });
 
-      test('creates payload without address when not provided', () {
+      test('encodes empty candidate list when none provided', () {
         final payload = handler.createAnnouncePayload();
-
-        // Address length should be 0 (2 bytes at the end)
-        final offset = 32 + 2 + 1 + 'TestUser'.length;
-        final addrLenData = ByteData.view(payload.buffer, payload.offsetInBytes + offset, 2);
-        final addrLen = addrLenData.getUint16(0, Endian.big);
-        expect(addrLen, equals(0));
+        final countOffset = 32 + 2 + 1 + 'TestUser'.length;
+        expect(payload[countOffset], equals(0));
       });
 
-      test('includes UDP address when provided', () {
-        final testAddress = '[::1]:4001';
-        final payload = handler.createAnnouncePayload(address: testAddress);
+      test('includes a single candidate when provided', () {
+        final addr = '[::1]:4001';
+        final payload =
+            handler.createAnnouncePayload(candidates: [addr]);
 
-        // Find address in payload
-        final offset = 32 + 2 + 1 + 'TestUser'.length;
-        final addrLenData = ByteData.view(payload.buffer, payload.offsetInBytes + offset, 2);
+        final countOffset = 32 + 2 + 1 + 'TestUser'.length;
+        expect(payload[countOffset], equals(1));
+
+        final addrLenData = ByteData.view(
+            payload.buffer, payload.offsetInBytes + countOffset + 1, 2);
         final addrLen = addrLenData.getUint16(0, Endian.big);
-        expect(addrLen, equals(testAddress.length));
+        expect(addrLen, equals(addr.length));
 
-        final address = String.fromCharCodes(payload.sublist(offset + 2, offset + 2 + addrLen));
-        expect(address, equals(testAddress));
+        final addrBytes = payload.sublist(
+            countOffset + 3, countOffset + 3 + addrLen);
+        expect(String.fromCharCodes(addrBytes), equals(addr));
+      });
+
+      test('includes multiple candidates in order', () {
+        final candidates = ['[fe80::1]:4242', '[2001:db8::1]:4242', '10.0.0.1:4242'];
+        final payload = handler.createAnnouncePayload(candidates: candidates);
+
+        final countOffset = 32 + 2 + 1 + 'TestUser'.length;
+        expect(payload[countOffset], equals(3));
+
+        var offset = countOffset + 1;
+        for (final expected in candidates) {
+          final lenData = ByteData.view(
+              payload.buffer, payload.offsetInBytes + offset, 2);
+          final len = lenData.getUint16(0, Endian.big);
+          expect(len, equals(expected.length));
+          final got =
+              String.fromCharCodes(payload.sublist(offset + 2, offset + 2 + len));
+          expect(got, equals(expected));
+          offset += 2 + len;
+        }
       });
 
       test('handles empty nickname', () async {
@@ -80,9 +103,10 @@ void main() {
 
         final payload = emptyHandler.createAnnouncePayload();
 
-        // Should have valid structure with 0-length nickname
-        expect(payload.length, equals(32 + 2 + 1 + 2 + 2)); // pubkey + version + nickLen(0) + addrLen(0) + llAddrLen(0)
+        // pubkey(32) + version(2) + nickLen(1, value=0) + count(1, value=0)
+        expect(payload.length, equals(32 + 2 + 1 + 1));
         expect(payload[34], equals(0)); // nickname length = 0
+        expect(payload[35], equals(0)); // candidate count = 0
       });
     });
 
@@ -93,69 +117,46 @@ void main() {
 
         expect(decoded.publicKey, equals(testIdentity.publicKey));
         expect(decoded.nickname, equals('TestUser'));
-        expect(decoded.protocolVersion, equals(1));
-        expect(decoded.udpAddress, isNull);
+        expect(decoded.protocolVersion, equals(2));
+        expect(decoded.candidates, isEmpty);
       });
 
-      test('decodes announce with UDP address', () {
-        final testAddress = '[2001:db8::64]:5000';
-        final payload = handler.createAnnouncePayload(address: testAddress);
+      test('decodes announce with a single candidate', () {
+        final addr = '[2001:db8::64]:5000';
+        final payload = handler.createAnnouncePayload(candidates: [addr]);
         final decoded = handler.decodeAnnounce(payload);
 
-        expect(decoded.publicKey, equals(testIdentity.publicKey));
-        expect(decoded.nickname, equals('TestUser'));
-        expect(decoded.protocolVersion, equals(1));
-        expect(decoded.udpAddress, equals(testAddress));
+        expect(decoded.candidates, equals([addr]));
       });
 
-      test('handles announce without address field (legacy)', () {
-        // Create minimal payload (pubkey + version + nickname, no address)
-        final nicknameBytes = utf8.encode('OldPeer');
-        final buffer = ByteData(32 + 2 + 1 + nicknameBytes.length);
-        var offset = 0;
-
-        // Public key
-        buffer.buffer.asUint8List().setRange(offset, offset + 32, testIdentity.publicKey);
-        offset += 32;
-
-        // Version
-        buffer.setUint16(offset, 1, Endian.big);
-        offset += 2;
-
-        // Nickname
-        buffer.setUint8(offset++, nicknameBytes.length);
-        buffer.buffer.asUint8List().setRange(offset, offset + nicknameBytes.length, nicknameBytes);
-
-        final payload = buffer.buffer.asUint8List();
+      test('decodes announce with multiple candidates in order', () {
+        final candidates = [
+          '[fe80::cafe]:4242',
+          '[2001:db8::1]:4242',
+          '192.168.1.5:4242',
+          '203.0.113.7:4242',
+        ];
+        final payload = handler.createAnnouncePayload(candidates: candidates);
         final decoded = handler.decodeAnnounce(payload);
 
-        expect(decoded.nickname, equals('OldPeer'));
-        expect(decoded.udpAddress, isNull); // No address field
+        expect(decoded.candidates, equals(candidates));
       });
 
       test('handles empty nickname in payload', () {
-        final buffer = ByteData(32 + 2 + 1 + 2);
+        final buffer = ByteData(32 + 2 + 1 + 1);
         var offset = 0;
-
-        // Public key
         buffer.buffer.asUint8List().setRange(offset, offset + 32, testIdentity.publicKey);
         offset += 32;
-
-        // Version
-        buffer.setUint16(offset, 1, Endian.big);
+        buffer.setUint16(offset, 2, Endian.big);
         offset += 2;
-
-        // Nickname length = 0
-        buffer.setUint8(offset++, 0);
-
-        // Address length = 0
-        buffer.setUint16(offset, 0, Endian.big);
+        buffer.setUint8(offset++, 0); // nickLen
+        buffer.setUint8(offset, 0); // candidate count
 
         final payload = buffer.buffer.asUint8List();
         final decoded = handler.decodeAnnounce(payload);
 
         expect(decoded.nickname, equals(''));
-        expect(decoded.udpAddress, isNull);
+        expect(decoded.candidates, isEmpty);
       });
     });
 
@@ -392,11 +393,10 @@ void main() {
     group('round-trip encoding/decoding', () {
       test('announce payload round-trip', () {
         final originalPayload = handler.createAnnouncePayload(
-          address: '[2001:db8::a]:8000',
+          candidates: ['[2001:db8::a]:8000', '10.1.2.3:8000'],
         );
         final decoded = handler.decodeAnnounce(originalPayload);
 
-        // Re-encode with decoded data
         final reEncodedIdentity = BitchatIdentity.fromMap({
           'publicKey': decoded.publicKey,
           'privateKey': testIdentity.privateKey,
@@ -404,7 +404,7 @@ void main() {
         });
         final reEncodedHandler = ProtocolHandler(identity: reEncodedIdentity);
         final reEncodedPayload = reEncodedHandler.createAnnouncePayload(
-          address: decoded.udpAddress,
+          candidates: decoded.candidates,
         );
 
         expect(reEncodedPayload, equals(originalPayload));

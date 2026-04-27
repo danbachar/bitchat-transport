@@ -222,6 +222,130 @@ bool isGloballyRoutableAddress(String addrString) {
   return isGloballyRoutableIPv4(parsed.ip);
 }
 
+/// Whether an IPv4 address falls in 169.254.0.0/16 (RFC 3927 link-local).
+bool isLinkLocalIPv4(InternetAddress addr) {
+  if (addr.type != InternetAddressType.IPv4) return false;
+  final bytes = addr.rawAddress;
+  return bytes.length == 4 && bytes[0] == 169 && bytes[1] == 254;
+}
+
+/// Whether an IPv4 address falls in RFC 1918 private space
+/// (10/8, 172.16/12, 192.168/16).
+bool isPrivateIPv4(InternetAddress addr) {
+  if (addr.type != InternetAddressType.IPv4) return false;
+  final bytes = addr.rawAddress;
+  if (bytes.length != 4) return false;
+  if (bytes[0] == 10) return true;
+  if (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31) return true;
+  if (bytes[0] == 192 && bytes[1] == 168) return true;
+  return false;
+}
+
+/// Whether an IPv6 address falls in fc00::/7 (RFC 4193 unique local).
+bool isUniqueLocalIPv6(InternetAddress addr) {
+  if (addr.type != InternetAddressType.IPv6) return false;
+  final bytes = addr.rawAddress;
+  return bytes.length == 16 && (bytes[0] & 0xFE) == 0xFC;
+}
+
+/// Categorisation of a candidate address used for prioritisation.
+///
+/// Order in this enum is the priority order (lower index = higher priority).
+/// LAN beats global; within LAN and within global, IPv6 beats IPv4. Inside
+/// each family, the more-local form (link-local) is preferred over the
+/// less-local form (ULA / RFC1918).
+enum AddressCategory {
+  ipv6LinkLocal,
+  ipv6UniqueLocal,
+  ipv4Private,
+  ipv4LinkLocal,
+  ipv6Global,
+  ipv4Global,
+  other,
+}
+
+/// Classify an [InternetAddress] into an [AddressCategory].
+AddressCategory categorizeAddress(InternetAddress addr) {
+  if (addr.type == InternetAddressType.IPv6) {
+    if (addr.isLinkLocal) return AddressCategory.ipv6LinkLocal;
+    if (isUniqueLocalIPv6(addr)) return AddressCategory.ipv6UniqueLocal;
+    if (isGloballyRoutableIPv6(addr)) return AddressCategory.ipv6Global;
+    return AddressCategory.other;
+  }
+  if (addr.type == InternetAddressType.IPv4) {
+    if (isLinkLocalIPv4(addr)) return AddressCategory.ipv4LinkLocal;
+    if (isPrivateIPv4(addr)) return AddressCategory.ipv4Private;
+    if (isGloballyRoutableIPv4(addr)) return AddressCategory.ipv4Global;
+    return AddressCategory.other;
+  }
+  return AddressCategory.other;
+}
+
+/// Classify an `ip:port` address string. Returns null on parse failure.
+AddressCategory? categorizeAddressString(String addrString) {
+  final parsed = parseAddressString(addrString);
+  if (parsed == null) return null;
+  return categorizeAddress(parsed.ip);
+}
+
+/// Sort key for a candidate. Lower is higher priority.
+///
+/// Unparsable strings sort to the very end so they never beat a real candidate
+/// while still leaving the list deterministic.
+int candidatePriority(String addrString) {
+  final category = categorizeAddressString(addrString);
+  if (category == null) return AddressCategory.values.length;
+  return category.index;
+}
+
+/// Returns [candidates] sorted by priority (best first). Stable for equal
+/// priorities — preserves the input order for ties so the sender's intent
+/// is respected when classification can't break the tie.
+List<String> sortCandidatesByPriority(Iterable<String> candidates) {
+  final indexed = candidates.toList().asMap().entries.toList();
+  indexed.sort((a, b) {
+    final pa = candidatePriority(a.value);
+    final pb = candidatePriority(b.value);
+    if (pa != pb) return pa.compareTo(pb);
+    return a.key.compareTo(b.key);
+  });
+  return [for (final e in indexed) e.value];
+}
+
+/// Returns the highest-priority candidate, or null if [candidates] is empty
+/// or contains only unclassifiable strings.
+String? selectBestCandidate(Iterable<String> candidates) {
+  String? best;
+  int bestPriority = AddressCategory.values.length;
+  for (final addr in candidates) {
+    final p = candidatePriority(addr);
+    if (p < bestPriority) {
+      best = addr;
+      bestPriority = p;
+    }
+  }
+  return best;
+}
+
+/// Returns the highest-priority candidate from [candidates] that satisfies
+/// [predicate], or null if none do.
+String? selectBestCandidateWhere(
+  Iterable<String> candidates,
+  bool Function(String) predicate,
+) {
+  String? best;
+  int bestPriority = AddressCategory.values.length;
+  for (final addr in candidates) {
+    if (!predicate(addr)) continue;
+    final p = candidatePriority(addr);
+    if (p < bestPriority) {
+      best = addr;
+      bestPriority = p;
+    }
+  }
+  return best;
+}
+
 // --- Private helpers ---
 
 bool _isIPv4Mapped(List<int> bytes) {

@@ -540,7 +540,8 @@ class AnchorServer {
     Uint8List recipientPubkey, {
     String? address,
   }) async {
-    final packet = _protocol.createAnnouncePacket(address: address);
+    final candidates = address != null ? <String>[address] : const <String>[];
+    final packet = _protocol.createAnnouncePacket(candidates: candidates);
     await _protocol.signPacket(packet);
     _sendPacket(_pubkeyToHex(recipientPubkey), packet);
   }
@@ -550,9 +551,11 @@ class AnchorServer {
 
     for (final entry in _peerConnections.entries) {
       try {
-        final packet = _protocol.createAnnouncePacket(
-          address: entry.value.advertisedLocalAddress,
-        );
+        final advertised = entry.value.advertisedLocalAddress;
+        final candidates =
+            advertised != null ? <String>[advertised] : const <String>[];
+        final packet =
+            _protocol.createAnnouncePacket(candidates: candidates);
         await _protocol.signPacket(packet);
         await entry.value.stream?.add(packet.serialize());
       } catch (e) {

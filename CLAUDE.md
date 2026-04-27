@@ -58,13 +58,9 @@ The `TransportState` lifecycle for each transport is: `uninitialized → initial
 
 User-facing UI strings should say "Internet", not "UDP" or internal protocol names.
 
-## Single Public Address
-
-Each device advertises exactly **one UDP address** — the public address discovered via an external service (seeip.org). Never advertise LAN/private addresses. Never add a second address field to the ANNOUNCE. If the public address doesn't work on the local network (hairpin routing failure), the solution is to fix the transport layer (e.g. fall back to raw UDP), not to add LAN addresses.
-
 ## Peer Address Persistence
 
-Never unilaterally clear a peer's stored UDP address. Update it when a new valid address arrives (from ANNOUNCE, signaling, or observation), and clear it only when the peer explicitly tells us they no longer have one. Stale peer cleanup, our-side disconnects, and transport restarts must not null out `udpAddress` — it is the last known location and the only way to attempt reconnection. This applies to friends and non-friends alike.
+Never unilaterally clear a peer's stored UDP candidates. Update them when new candidates arrive (from ANNOUNCE, signaling, or observation), and clear them only when the peer explicitly tells us they no longer have any. Stale peer cleanup, our-side disconnects, and transport restarts must not empty `udpCandidates` — it is the last known set of locations and the only way to attempt reconnection. This applies to friends and non-friends alike.
 
 ## Transport Independence
 

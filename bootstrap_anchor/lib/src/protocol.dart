@@ -10,7 +10,10 @@ import 'packet.dart';
 /// Wire-compatible with the Flutter client's ProtocolHandler.
 class Protocol {
   final AnchorIdentity identity;
-  static const int protocolVersion = 1;
+  static const int protocolVersion = 2;
+
+  /// Maximum number of candidates encoded in an ANNOUNCE.
+  static const int maxCandidates = 255;
 
   const Protocol({required this.identity});
 
@@ -48,14 +51,16 @@ class Protocol {
 
   /// Create ANNOUNCE payload.
   ///
-  /// Format: pubkey(32) + version(2) + nickLen(1) + nick + addrLen(2) + addr? + llAddrLen(2) + llAddr?
-  Uint8List createAnnouncePayload({String? address, String? linkLocalAddress}) {
+  /// Format:
+  /// ```
+  /// pubkey(32) + version(2) + nickLen(1) + nick
+  ///   + count(1) + repeated[ addrLen(2) + addrBytes ]
+  /// ```
+  Uint8List createAnnouncePayload({List<String> candidates = const []}) {
     final nicknameBytes = Uint8List.fromList(identity.nickname.codeUnits);
-    final addressBytes =
-        address != null ? Uint8List.fromList(address.codeUnits) : Uint8List(0);
-    final llAddrBytes = linkLocalAddress != null
-        ? Uint8List.fromList(linkLocalAddress.codeUnits)
-        : Uint8List(0);
+    final trimmed = candidates.length > maxCandidates
+        ? candidates.sublist(0, maxCandidates)
+        : candidates;
     final buffer = BytesBuilder();
 
     // Pubkey (32 bytes)
@@ -70,20 +75,15 @@ class Protocol {
     buffer.addByte(nicknameBytes.length);
     buffer.add(nicknameBytes);
 
-    // Address length (2 bytes) + address
-    final addrLenBytes = ByteData(2);
-    addrLenBytes.setUint16(0, addressBytes.length, Endian.big);
-    buffer.add(addrLenBytes.buffer.asUint8List());
-    if (addressBytes.isNotEmpty) {
-      buffer.add(addressBytes);
-    }
+    // Candidate count (1 byte)
+    buffer.addByte(trimmed.length);
 
-    // Link-local address length (2 bytes) + link-local address
-    final llAddrLenBytes = ByteData(2);
-    llAddrLenBytes.setUint16(0, llAddrBytes.length, Endian.big);
-    buffer.add(llAddrLenBytes.buffer.asUint8List());
-    if (llAddrBytes.isNotEmpty) {
-      buffer.add(llAddrBytes);
+    for (final candidate in trimmed) {
+      final addrBytes = Uint8List.fromList(candidate.codeUnits);
+      final addrLenBytes = ByteData(2);
+      addrLenBytes.setUint16(0, addrBytes.length, Endian.big);
+      buffer.add(addrLenBytes.buffer.asUint8List());
+      buffer.add(addrBytes);
     }
 
     return buffer.toBytes();
@@ -106,29 +106,22 @@ class Protocol {
         String.fromCharCodes(data.sublist(offset, offset + nicknameLength));
     offset += nicknameLength;
 
-    String? address;
-    if (offset + 2 <= data.length) {
-      final addrLength =
-          ByteData.view(data.buffer, data.offsetInBytes + offset, 2)
-              .getUint16(0, Endian.big);
-      offset += 2;
-      if (addrLength > 0 && offset + addrLength <= data.length) {
-        address =
-            String.fromCharCodes(data.sublist(offset, offset + addrLength));
+    final candidates = <String>[];
+    if (offset < data.length) {
+      final count = data[offset];
+      offset += 1;
+      for (var i = 0; i < count; i++) {
+        if (offset + 2 > data.length) break;
+        final addrLength =
+            ByteData.view(data.buffer, data.offsetInBytes + offset, 2)
+                .getUint16(0, Endian.big);
+        offset += 2;
+        if (offset + addrLength > data.length) break;
+        if (addrLength > 0) {
+          candidates.add(
+              String.fromCharCodes(data.sublist(offset, offset + addrLength)));
+        }
         offset += addrLength;
-      }
-    }
-
-    String? linkLocalAddress;
-    if (offset + 2 <= data.length) {
-      final llAddrLength =
-          ByteData.view(data.buffer, data.offsetInBytes + offset, 2)
-              .getUint16(0, Endian.big);
-      offset += 2;
-      if (llAddrLength > 0 && offset + llAddrLength <= data.length) {
-        linkLocalAddress =
-            String.fromCharCodes(data.sublist(offset, offset + llAddrLength));
-        offset += llAddrLength;
       }
     }
 
@@ -136,14 +129,13 @@ class Protocol {
       publicKey: Uint8List.fromList(pubkey),
       nickname: nickname,
       protocolVersion: version,
-      udpAddress: address,
-      linkLocalAddress: linkLocalAddress,
+      candidates: candidates,
     );
   }
 
   /// Create an ANNOUNCE packet (broadcast).
-  BitchatPacket createAnnouncePacket({String? address}) {
-    final payload = createAnnouncePayload(address: address);
+  BitchatPacket createAnnouncePacket({List<String> candidates = const []}) {
+    final payload = createAnnouncePayload(candidates: candidates);
     return BitchatPacket(
       type: PacketType.announce,
       senderPubkey: identity.publicKey,
@@ -188,22 +180,19 @@ class AnnounceData {
   final Uint8List publicKey;
   final String nickname;
   final int protocolVersion;
-  final String? udpAddress;
-  final String? linkLocalAddress;
+  final List<String> candidates;
 
   const AnnounceData({
     required this.publicKey,
     required this.nickname,
     required this.protocolVersion,
-    this.udpAddress,
-    this.linkLocalAddress,
+    this.candidates = const [],
   });
 
   String get pubkeyHex =>
       publicKey.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
   @override
-  String toString() => 'AnnounceData($nickname, v$protocolVersion'
-      '${udpAddress != null ? ", addr: $udpAddress" : ""}'
-      '${linkLocalAddress != null ? ", ll: $linkLocalAddress" : ""})';
+  String toString() =>
+      'AnnounceData($nickname, v$protocolVersion, candidates: $candidates)';
 }

@@ -117,8 +117,9 @@ class PeerAnnounceReceivedAction extends PeerAction {
   /// BLE device ID from our peripheral role (they connected to us)
   final String? blePeripheralDeviceId;
 
-  final String? udpAddress;
-  final String? linkLocalAddress;
+  /// Every UDP address the peer advertised (in announcement order).
+  /// May be empty (e.g. BLE non-friend ANNOUNCE).
+  final List<String> candidates;
 
   PeerAnnounceReceivedAction({
     required this.publicKey,
@@ -128,8 +129,7 @@ class PeerAnnounceReceivedAction extends PeerAction {
     this.transport = PeerTransport.bleDirect,
     this.bleCentralDeviceId,
     this.blePeripheralDeviceId,
-    this.udpAddress,
-    this.linkLocalAddress,
+    this.candidates = const [],
   });
 }
 
@@ -222,7 +222,10 @@ class AssociateBleDeviceAction extends PeerAction {
   });
 }
 
-/// Associate a UDP address with a pubkey
+/// Add an observed UDP address to a peer's candidate list (e.g. learned
+/// from signaling discovery or persisted friendship records). The address
+/// is merged into the existing list rather than replacing it — ANNOUNCE
+/// remains the authoritative source for the full candidate set.
 class AssociateUdpAddressAction extends PeerAction {
   final Uint8List publicKey;
   final String address;

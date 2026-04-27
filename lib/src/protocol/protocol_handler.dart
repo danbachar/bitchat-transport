@@ -11,24 +11,33 @@ import 'package:bitchat_transport/src/models/packet.dart';
 /// Extracted from transport layer to achieve separation of concerns.
 class ProtocolHandler {
   final BitchatIdentity identity;
-  static const int protocolVersion = 1;
+  static const int protocolVersion = 2;
+
+  /// Maximum number of candidates we'll encode in an ANNOUNCE.
+  /// 1-byte length field caps it at 255; we won't reasonably advertise that
+  /// many addresses, but encoders trim to this limit defensively.
+  static const int maxCandidates = 255;
 
   const ProtocolHandler({required this.identity});
 
   // ===== Encoding =====
 
-  /// Create ANNOUNCE payload
+  /// Create ANNOUNCE payload.
   ///
-  /// Format: [pubkey(32) + version(2) + nickLen(1) + nick + addrLen(2) + addr? + llAddrLen(2) + llAddr?]
+  /// Format:
+  /// ```
+  /// pubkey(32) + version(2) + nickLen(1) + nick
+  ///   + count(1) + repeated[ addrLen(2) + addrBytes ]
+  /// ```
   ///
-  /// The address field is included when the sender has a UDP address.
-  /// Omitted (addrLen 0) only for BLE announcements to non-friends (privacy).
-  /// The link-local address is optional and only included for BLE friends on
-  /// the same LAN — used as a faster alternative to global IPv6.
-  Uint8List createAnnouncePayload({String? address, String? linkLocalAddress}) {
+  /// The candidates list carries every address we want peers to consider,
+  /// in the order we want them tried. Sending an empty list (count 0) is
+  /// valid — used for BLE announcements to non-friends (privacy).
+  Uint8List createAnnouncePayload({List<String> candidates = const []}) {
     final nicknameBytes = Uint8List.fromList(identity.nickname.codeUnits);
-    final addressBytes = address != null ? Uint8List.fromList(address.codeUnits) : Uint8List(0);
-    final llAddrBytes = linkLocalAddress != null ? Uint8List.fromList(linkLocalAddress.codeUnits) : Uint8List(0);
+    final trimmed = candidates.length > maxCandidates
+        ? candidates.sublist(0, maxCandidates)
+        : candidates;
     final buffer = BytesBuilder();
 
     // Pubkey (32 bytes)
@@ -43,20 +52,16 @@ class ProtocolHandler {
     buffer.addByte(nicknameBytes.length);
     buffer.add(nicknameBytes);
 
-    // Address length (2 bytes) + address
-    final addrLenBytes = ByteData(2);
-    addrLenBytes.setUint16(0, addressBytes.length, Endian.big);
-    buffer.add(addrLenBytes.buffer.asUint8List());
-    if (addressBytes.isNotEmpty) {
-      buffer.add(addressBytes);
-    }
+    // Candidate count (1 byte)
+    buffer.addByte(trimmed.length);
 
-    // Link-local address length (2 bytes) + link-local address
-    final llAddrLenBytes = ByteData(2);
-    llAddrLenBytes.setUint16(0, llAddrBytes.length, Endian.big);
-    buffer.add(llAddrLenBytes.buffer.asUint8List());
-    if (llAddrBytes.isNotEmpty) {
-      buffer.add(llAddrBytes);
+    // Candidates
+    for (final candidate in trimmed) {
+      final addrBytes = Uint8List.fromList(candidate.codeUnits);
+      final addrLenBytes = ByteData(2);
+      addrLenBytes.setUint16(0, addrBytes.length, Endian.big);
+      buffer.add(addrLenBytes.buffer.asUint8List());
+      buffer.add(addrBytes);
     }
 
     return buffer.toBytes();
@@ -93,10 +98,13 @@ class ProtocolHandler {
 
   // ===== Decoding =====
 
-  /// Decode ANNOUNCE payload
+  /// Decode ANNOUNCE payload.
   ///
-  /// Format: [pubkey(32) + version(2) + nickLen(1) + nick + addrLen(2) + addr? + llAddrLen(2) + llAddr?]
-  /// Returns: AnnounceData with public key, nickname, version, optional address, and optional link-local
+  /// Format:
+  /// ```
+  /// pubkey(32) + version(2) + nickLen(1) + nick
+  ///   + count(1) + repeated[ addrLen(2) + addrBytes ]
+  /// ```
   AnnounceData decodeAnnounce(Uint8List data) {
     var offset = 0;
 
@@ -115,27 +123,23 @@ class ProtocolHandler {
     final nickname = String.fromCharCodes(data.sublist(offset, offset + nicknameLength));
     offset += nicknameLength;
 
-    // Address length (2 bytes) + address (optional - may not exist in old payloads)
-    String? address;
-    if (offset + 2 <= data.length) {
-      final addrLength = ByteData.view(data.buffer, data.offsetInBytes + offset, 2)
-          .getUint16(0, Endian.big);
-      offset += 2;
-      if (addrLength > 0 && offset + addrLength <= data.length) {
-        address = String.fromCharCodes(data.sublist(offset, offset + addrLength));
+    // Candidate count (1 byte) + repeated candidates
+    final candidates = <String>[];
+    if (offset < data.length) {
+      final count = data[offset];
+      offset += 1;
+      for (var i = 0; i < count; i++) {
+        if (offset + 2 > data.length) break;
+        final addrLength =
+            ByteData.view(data.buffer, data.offsetInBytes + offset, 2)
+                .getUint16(0, Endian.big);
+        offset += 2;
+        if (offset + addrLength > data.length) break;
+        if (addrLength > 0) {
+          candidates.add(
+              String.fromCharCodes(data.sublist(offset, offset + addrLength)));
+        }
         offset += addrLength;
-      }
-    }
-
-    // Link-local address length (2 bytes) + link-local address (optional)
-    String? linkLocalAddress;
-    if (offset + 2 <= data.length) {
-      final llAddrLength = ByteData.view(data.buffer, data.offsetInBytes + offset, 2)
-          .getUint16(0, Endian.big);
-      offset += 2;
-      if (llAddrLength > 0 && offset + llAddrLength <= data.length) {
-        linkLocalAddress = String.fromCharCodes(data.sublist(offset, offset + llAddrLength));
-        offset += llAddrLength;
       }
     }
 
@@ -143,8 +147,7 @@ class ProtocolHandler {
       publicKey: Uint8List.fromList(pubkey),
       nickname: nickname,
       protocolVersion: version,
-      udpAddress: address,
-      linkLocalAddress: linkLocalAddress,
+      candidates: candidates,
     );
   }
 
@@ -202,22 +205,26 @@ class ProtocolHandler {
   }
 }
 
-/// Decoded ANNOUNCE data
+/// Decoded ANNOUNCE data.
+///
+/// [candidates] is the list of `ip:port` strings the sender wants peers to
+/// try, in the order the sender prefers. The receiver classifies each
+/// address (link-local vs LAN vs global, v4 vs v6) and picks one according
+/// to its own priority policy.
 class AnnounceData {
   final Uint8List publicKey;
   final String nickname;
   final int protocolVersion;
-  final String? udpAddress;
-  final String? linkLocalAddress;
+  final List<String> candidates;
 
   const AnnounceData({
     required this.publicKey,
     required this.nickname,
     required this.protocolVersion,
-    this.udpAddress,
-    this.linkLocalAddress,
+    this.candidates = const [],
   });
 
   @override
-  String toString() => 'AnnounceData($nickname, v$protocolVersion${udpAddress != null ? ", addr: $udpAddress" : ""}${linkLocalAddress != null ? ", ll: $linkLocalAddress" : ""})';
+  String toString() =>
+      'AnnounceData($nickname, v$protocolVersion, candidates: $candidates)';
 }

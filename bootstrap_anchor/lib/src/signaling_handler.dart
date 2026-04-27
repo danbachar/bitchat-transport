@@ -70,6 +70,12 @@ class SignalingHandler {
   /// anchor's live-connection tracking (`_trackPeerConnection` /
   /// peer-disconnect handlers) so they always match the actual live session
   /// and never flip-flop to stale observations (raw packets, zombie sockets).
+  ///
+  /// TODO: Signaling currently models a single address per peer per family.
+  /// We pick the first globally-routable candidate as the canonical address
+  /// for the peer record, but ADDR_QUERY / PUNCH_INITIATE should ultimately
+  /// surface the full candidate list. Tracked alongside the multi-candidate
+  /// migration in the main client.
   void processAnnounce(
     AnnounceData data, {
     String? observedIp,
@@ -80,12 +86,21 @@ class SignalingHandler {
     // Register the peer as verified (they sent a valid signed ANNOUNCE)
     peerTable.addVerified(senderHex, nickname: data.nickname);
 
-    // Update peer table with ANNOUNCE data
+    // Pick the highest-priority globally-routable candidate as the address
+    // we record for this peer.
+    String? canonicalAddress;
+    for (final addr in data.candidates) {
+      if (_isGloballyRoutableAddrString(addr)) {
+        canonicalAddress = addr;
+        break;
+      }
+    }
+
     peerTable.upsert(
       publicKey: data.publicKey,
       nickname: data.nickname,
       pubkeyHex: senderHex,
-      udpAddress: data.udpAddress,
+      udpAddress: canonicalAddress,
     );
 
     // Reflect observed address back to the peer
@@ -93,6 +108,50 @@ class SignalingHandler {
       final reflect = AddrReflectMessage(ip: observedIp, port: observedPort);
       sendSignaling?.call(data.publicKey, codec.encode(reflect));
     }
+  }
+
+  /// Whether [addrString] parses as a globally-routable IPv4 or IPv6 address.
+  /// Mirrors the client-side classification (without pulling the full
+  /// address_utils package into the anchor codebase).
+  static bool _isGloballyRoutableAddrString(String addrString) {
+    if (addrString.isEmpty) return false;
+    String ipPart;
+    if (addrString.startsWith('[')) {
+      final close = addrString.indexOf(']');
+      if (close < 0) return false;
+      ipPart = addrString.substring(1, close);
+    } else {
+      final lastColon = addrString.lastIndexOf(':');
+      if (lastColon < 0) return false;
+      ipPart = addrString.substring(0, lastColon);
+      if (ipPart.contains(':')) return false;
+    }
+    final ip = InternetAddress.tryParse(ipPart);
+    if (ip == null) return false;
+    if (ip.isLoopback) return false;
+    if (ip.type == InternetAddressType.IPv6) {
+      if (ip.isLinkLocal) return false;
+      final bytes = ip.rawAddress;
+      if (bytes.length != 16) return false;
+      if (bytes.every((b) => b == 0)) return false;
+      if ((bytes[0] & 0xFE) == 0xFC) return false; // ULA
+      if (bytes[0] == 0xFF) return false; // multicast
+      return true;
+    }
+    if (ip.type == InternetAddressType.IPv4) {
+      final bytes = ip.rawAddress;
+      if (bytes.length != 4) return false;
+      final a = bytes[0];
+      final b = bytes[1];
+      if (a == 0 || a == 10 || a == 127) return false;
+      if (a == 100 && b >= 64 && b <= 127) return false; // CGNAT
+      if (a == 169 && b == 254) return false; // link-local
+      if (a == 172 && b >= 16 && b <= 31) return false;
+      if (a == 192 && b == 168) return false;
+      if (a >= 224) return false;
+      return true;
+    }
+    return false;
   }
 
   /// Process an incoming signaling packet.

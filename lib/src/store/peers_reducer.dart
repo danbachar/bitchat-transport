@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 import '../models/peer.dart';
+import '../transport/address_utils.dart';
 import 'peers_state.dart';
 import 'peers_actions.dart';
 
@@ -228,8 +229,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
         blePeripheralDeviceId: action.blePeripheralDeviceId,
         lastBleSeen: isBle ? now : null,
         lastUdpSeen: action.transport == PeerTransport.udp ? now : null,
-        udpAddress: action.udpAddress,
-        linkLocalAddress: action.linkLocalAddress,
+        udpCandidates: List.unmodifiable(action.candidates),
       );
       return state.copyWith(
         peers: Map.from(state.peers)..[pubkeyHex] = newPeer,
@@ -239,22 +239,20 @@ PeersState peersReducer(PeersState state, dynamic action) {
       // Merge BLE IDs: only update the field that's provided in this action,
       // preserve the other from existing state.
       //
-      // TODO: Revert to unconditional `udpAddress: action.udpAddress` once
-      // the BLE layer sends EITHER a friend ANNOUNCE (with address) OR a
-      // non-friend ANNOUNCE (without address) per recipient — never both.
-      // Currently a friend receives both because the peripheral can't
-      // reliably determine which centrals are friends (BLE device ID
-      // rotation). The non-friend broadcast (no address) arrives and nukes
-      // the address set by the UDP ANNOUNCE, causing peers to flicker in
-      // the online friends list. This null-coalescing is a workaround.
-      //
-      // TODO: Fix BLE peripheral to reliably map central device IDs to
-      // friend public keys so it can skip friends in the broadcast and
-      // only send them the directed friend ANNOUNCE with address.
-      final newUdpAddress = action.udpAddress ?? existing.udpAddress;
-      // If the UDP address changed, prior reachability proof is invalid
-      // (it was bound to the previous address/network path).
-      final preserveReach = newUdpAddress == existing.udpAddress;
+      // For candidates: ANNOUNCEs can deliberately carry an empty list
+      // (BLE non-friend broadcast for privacy). Keep prior candidates
+      // when the new list is empty so we don't lose reachability info
+      // received over a different transport — same workaround as before.
+      final newCandidates = action.candidates.isNotEmpty
+          ? List<String>.unmodifiable(action.candidates)
+          : existing.udpCandidates;
+      // If the publicly-routable candidate changed, prior reachability
+      // proof is invalid (it was bound to the previous address path).
+      final priorPublic =
+          selectBestCandidateWhere(existing.udpCandidates, isGloballyRoutableAddress);
+      final newPublic =
+          selectBestCandidateWhere(newCandidates, isGloballyRoutableAddress);
+      final preserveReach = newPublic == priorPublic;
       final updated = PeerState(
         publicKey: existing.publicKey,
         nickname: action.nickname,
@@ -270,8 +268,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
         lastBleSeen: isBle ? now : existing.lastBleSeen,
         lastUdpSeen:
             action.transport == PeerTransport.udp ? now : existing.lastUdpSeen,
-        udpAddress: newUdpAddress,
-        linkLocalAddress: action.linkLocalAddress ?? existing.linkLocalAddress,
+        udpCandidates: newCandidates,
         isFriend: existing.isFriend,
         lastDirectReachAt: preserveReach ? existing.lastDirectReachAt : null,
         hasLiveUdpConnection: existing.hasLiveUdpConnection,
@@ -330,8 +327,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
         blePeripheralDeviceId: newPeripheralId,
         lastBleSeen: hasAnyBle ? existing.lastBleSeen : null,
         lastUdpSeen: existing.lastUdpSeen,
-        udpAddress: existing.udpAddress,
-        linkLocalAddress: existing.linkLocalAddress,
+        udpCandidates: existing.udpCandidates,
         isFriend: existing.isFriend,
         lastDirectReachAt: existing.lastDirectReachAt,
         hasLiveUdpConnection: existing.hasLiveUdpConnection,
@@ -380,8 +376,8 @@ PeersState peersReducer(PeersState state, dynamic action) {
       final newConnectionState = existing.hasBleConnection
           ? existing.connectionState
           : PeerConnectionState.disconnected;
-      // Preserve UDP address — it's the last known location and needed
-      // for reconnection. Never clear peer addresses.
+      // Preserve UDP candidates — they're the last known locations and
+      // needed for reconnection. Never clear peer addresses.
       // Clear hasLiveUdpConnection — transport-level disconnect means no live stream.
       final updated = PeerState(
         publicKey: existing.publicKey,
@@ -395,8 +391,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
         blePeripheralDeviceId: existing.blePeripheralDeviceId,
         lastBleSeen: existing.lastBleSeen,
         lastUdpSeen: existing.lastUdpSeen,
-        udpAddress: existing.udpAddress, // Preserve for reconnection
-        linkLocalAddress: existing.linkLocalAddress,
+        udpCandidates: existing.udpCandidates, // Preserve for reconnection
         isFriend: existing.isFriend,
         lastDirectReachAt: existing.lastDirectReachAt,
         hasLiveUdpConnection: false,
@@ -450,8 +445,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
             blePeripheralDeviceId: null,
             lastBleSeen: null,
             lastUdpSeen: peer.lastUdpSeen,
-            udpAddress: peer.udpAddress,
-            linkLocalAddress: peer.linkLocalAddress,
+            udpCandidates: peer.udpCandidates,
             isFriend: peer.isFriend,
             lastDirectReachAt: peer.lastDirectReachAt,
             hasLiveUdpConnection: peer.hasLiveUdpConnection,
@@ -467,10 +461,10 @@ PeersState peersReducer(PeersState state, dynamic action) {
       if (timeSinceLastSeen > action.staleThreshold) {
         if (peer.isFriend) {
           // Friends are marked as disconnected when stale (no ANNOUNCE received).
-          // Clear BLE IDs (out of BLE range) but preserve UDP address — it's
-          // the last known location and needed for reconnection attempts.
-          // Clearing it would make the peer unreachable, preventing signaling
-          // and removing it from wellConnectedFriends.
+          // Clear BLE IDs (out of BLE range) but preserve UDP candidates —
+          // they're the last known locations and needed for reconnection.
+          // Clearing them would make the peer unreachable, preventing
+          // signaling and removing it from wellConnectedFriends.
           newMap[key] = PeerState(
             publicKey: peer.publicKey,
             nickname: peer.nickname,
@@ -483,8 +477,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
             blePeripheralDeviceId: null,
             lastBleSeen: null,
             lastUdpSeen: peer.lastUdpSeen,
-            udpAddress: peer.udpAddress, // Preserve for reconnection
-            linkLocalAddress: peer.linkLocalAddress,
+            udpCandidates: peer.udpCandidates, // Preserve for reconnection
             isFriend: true,
             lastDirectReachAt: peer.lastDirectReachAt,
             hasLiveUdpConnection: peer.hasLiveUdpConnection,
@@ -523,34 +516,39 @@ PeersState peersReducer(PeersState state, dynamic action) {
   if (action is AssociateUdpAddressAction) {
     final pubkeyHex = _pubkeyToHex(action.publicKey);
     final existing = state.peers[pubkeyHex];
-    if (existing != null) {
-      final newAddress = action.address.isEmpty ? null : action.address;
-      // If the address changed, prior reachability proof is invalid.
-      final preserveReach = newAddress == existing.udpAddress;
-      final updated = PeerState(
-        publicKey: existing.publicKey,
-        nickname: existing.nickname,
-        connectionState: existing.connectionState,
-        transport: existing.transport,
-        rssi: existing.rssi,
-        protocolVersion: existing.protocolVersion,
-        lastSeen: existing.lastSeen,
-        bleCentralDeviceId: existing.bleCentralDeviceId,
-        blePeripheralDeviceId: existing.blePeripheralDeviceId,
-        lastBleSeen: existing.lastBleSeen,
-        lastUdpSeen: existing.lastUdpSeen,
-        udpAddress: newAddress,
-        linkLocalAddress: existing.linkLocalAddress,
-        isFriend: existing.isFriend,
-        lastDirectReachAt:
-            preserveReach ? existing.lastDirectReachAt : null,
-        hasLiveUdpConnection: existing.hasLiveUdpConnection,
-      );
-      return state.copyWith(
-        peers: Map.from(state.peers)..[pubkeyHex] = updated,
-      );
-    }
-    return state;
+    if (existing == null) return state;
+    if (action.address.isEmpty) return state;
+    if (existing.udpCandidates.contains(action.address)) return state;
+    // Append the observed candidate; selection ranks at read time.
+    // Prior public-address proof is preserved if the highest-priority
+    // global candidate didn't change as a result of this addition.
+    final merged =
+        List<String>.unmodifiable([...existing.udpCandidates, action.address]);
+    final priorPublic =
+        selectBestCandidateWhere(existing.udpCandidates, isGloballyRoutableAddress);
+    final newPublic =
+        selectBestCandidateWhere(merged, isGloballyRoutableAddress);
+    final preserveReach = newPublic == priorPublic;
+    final updated = PeerState(
+      publicKey: existing.publicKey,
+      nickname: existing.nickname,
+      connectionState: existing.connectionState,
+      transport: existing.transport,
+      rssi: existing.rssi,
+      protocolVersion: existing.protocolVersion,
+      lastSeen: existing.lastSeen,
+      bleCentralDeviceId: existing.bleCentralDeviceId,
+      blePeripheralDeviceId: existing.blePeripheralDeviceId,
+      lastBleSeen: existing.lastBleSeen,
+      lastUdpSeen: existing.lastUdpSeen,
+      udpCandidates: merged,
+      isFriend: existing.isFriend,
+      lastDirectReachAt: preserveReach ? existing.lastDirectReachAt : null,
+      hasLiveUdpConnection: existing.hasLiveUdpConnection,
+    );
+    return state.copyWith(
+      peers: Map.from(state.peers)..[pubkeyHex] = updated,
+    );
   }
 
   // ===== Friendship Actions =====
@@ -609,7 +607,7 @@ PeersState peersReducer(PeersState state, dynamic action) {
         lastUdpSeen: existing.lastUdpSeen,
         // Clear all UDP/friend fields
         isFriend: false,
-        udpAddress: null,
+        udpCandidates: const [],
         lastDirectReachAt: null,
       );
       return state.copyWith(

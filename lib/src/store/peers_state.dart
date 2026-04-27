@@ -164,22 +164,21 @@ class PeerState {
   /// Used to age out stale UDX sessions independently of BLE freshness.
   final DateTime? lastUdpSeen;
 
-  /// UDP address if connected via UDP (ip:port format)
-  final String? udpAddress;
-
-  /// Link-local IPv6 address (fe80::...:port) for same-LAN fallback.
-  /// Only available from BLE-nearby peers. Tried before global address.
-  final String? linkLocalAddress;
+  /// All UDP candidate addresses we know for this peer, in the order the
+  /// peer announced them. Each entry is an `[ipv6]:port` or `ipv4:port`
+  /// string; categories include link-local, ULA, RFC1918, and globally
+  /// routable v4/v6. The selection service ranks them at send time.
+  final List<String> udpCandidates;
 
   /// Whether this peer is a friend (friendship established)
   final bool isFriend;
 
-  /// When we last successfully reached this peer at [udpAddress] over UDP
-  /// without a prior hole-punch coordination — i.e. the address accepts
-  /// unsolicited inbound. This is the proof that the peer is well-connected.
+  /// When we last successfully reached this peer at [publicUdpAddress] over
+  /// UDP without a prior hole-punch coordination — i.e. they accept
+  /// unsolicited inbound. Proof that the peer is well-connected.
   ///
-  /// Bound to [udpAddress]: cleared whenever the UDP address changes, since
-  /// any prior proof was for a different network path.
+  /// Bound to [publicUdpAddress]: cleared whenever the public candidate
+  /// changes, since any prior proof was for a different network path.
   final DateTime? lastDirectReachAt;
 
   /// Whether there is a live UDX connection to this peer.
@@ -200,8 +199,7 @@ class PeerState {
     this.blePeripheralDeviceId,
     this.lastBleSeen,
     this.lastUdpSeen,
-    this.udpAddress,
-    this.linkLocalAddress,
+    this.udpCandidates = const [],
     this.isFriend = false,
     this.lastDirectReachAt,
     this.hasLiveUdpConnection = false,
@@ -223,16 +221,25 @@ class PeerState {
   /// Prefers central (we initiated) since sendToPeer tries central service first.
   String? get bleDeviceId => bleCentralDeviceId ?? blePeripheralDeviceId;
 
-  /// Whether this peer is potentially reachable via any transport.
-  /// For UDP, a stored address is sufficient (we can attempt to connect).
-  /// See [isLiveReachable] for actual live connection status.
-  bool get isReachable => hasBleConnection || udpAddress != null;
+  /// The UDP address the selection service would currently pick — the
+  /// highest-priority candidate (link-local v6 first, then ULA, then v4
+  /// LAN, then global v6, then global v4). Null if no candidates exist.
+  String? get udpAddress => selectBestCandidate(udpCandidates);
 
-  /// Whether this peer's [udpAddress] is a publicly routable candidate.
-  /// A candidate may not actually accept unsolicited inbound — see
+  /// The highest-priority globally-routable candidate, or null if none.
+  /// This is the address other peers can reach us at without a hole-punch.
+  String? get publicUdpAddress =>
+      selectBestCandidateWhere(udpCandidates, isGloballyRoutableAddress);
+
+  /// Whether this peer is potentially reachable via any transport.
+  /// For UDP, having any candidate is sufficient (we can attempt to connect).
+  /// See [isLiveReachable] for actual live connection status.
+  bool get isReachable => hasBleConnection || udpCandidates.isNotEmpty;
+
+  /// Whether this peer advertises any publicly routable candidate. The
+  /// candidate may not actually accept unsolicited inbound — see
   /// [isWellConnected] for the verified version.
-  bool get hasPublicUdpAddress =>
-      udpAddress != null && isGloballyRoutableAddress(udpAddress!);
+  bool get hasPublicUdpAddress => publicUdpAddress != null;
 
   /// Whether this peer is verified well-connected: claims a public UDP
   /// address AND we have proof that they accept unsolicited inbound at
@@ -252,7 +259,7 @@ class PeerState {
   /// BLE is preferred when available; falls back to UDP, then stored value.
   PeerTransport get activeTransport {
     if (hasBleConnection) return PeerTransport.bleDirect;
-    if (udpAddress != null) return PeerTransport.udp;
+    if (udpCandidates.isNotEmpty) return PeerTransport.udp;
     return transport;
   }
 
@@ -275,8 +282,7 @@ class PeerState {
     String? blePeripheralDeviceId,
     DateTime? lastBleSeen,
     DateTime? lastUdpSeen,
-    String? udpAddress,
-    String? linkLocalAddress,
+    List<String>? udpCandidates,
     bool? isFriend,
     DateTime? lastDirectReachAt,
     bool? hasLiveUdpConnection,
@@ -293,8 +299,7 @@ class PeerState {
       blePeripheralDeviceId: blePeripheralDeviceId ?? this.blePeripheralDeviceId,
       lastBleSeen: lastBleSeen ?? this.lastBleSeen,
       lastUdpSeen: lastUdpSeen ?? this.lastUdpSeen,
-      udpAddress: udpAddress ?? this.udpAddress,
-      linkLocalAddress: linkLocalAddress ?? this.linkLocalAddress,
+      udpCandidates: udpCandidates ?? this.udpCandidates,
       isFriend: isFriend ?? this.isFriend,
       lastDirectReachAt: lastDirectReachAt ?? this.lastDirectReachAt,
       hasLiveUdpConnection: hasLiveUdpConnection ?? this.hasLiveUdpConnection,
@@ -313,8 +318,7 @@ class PeerState {
           rssi == other.rssi &&
           bleCentralDeviceId == other.bleCentralDeviceId &&
           blePeripheralDeviceId == other.blePeripheralDeviceId &&
-          udpAddress == other.udpAddress &&
-          linkLocalAddress == other.linkLocalAddress &&
+          listEquals(udpCandidates, other.udpCandidates) &&
           isFriend == other.isFriend &&
           lastDirectReachAt == other.lastDirectReachAt &&
           hasLiveUdpConnection == other.hasLiveUdpConnection;
@@ -328,8 +332,7 @@ class PeerState {
     rssi,
     bleCentralDeviceId,
     blePeripheralDeviceId,
-    udpAddress,
-    linkLocalAddress,
+    Object.hashAll(udpCandidates),
     isFriend,
     lastDirectReachAt,
     hasLiveUdpConnection,

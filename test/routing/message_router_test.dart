@@ -10,32 +10,39 @@ import 'package:bitchat_transport/src/models/packet.dart';
 import 'package:bitchat_transport/src/models/peer.dart';
 import 'package:bitchat_transport/src/store/store.dart';
 
-/// Helper to create a BLE ANNOUNCE payload:
-/// [pubkey(32) + version(2) + nickLen(1) + nick + addrLen(2) + addr?]
+/// Helper to create an ANNOUNCE payload (v2):
+/// [pubkey(32) + version(2) + nickLen(1) + nick
+///   + count(1) + repeated[ addrLen(2) + addrBytes ]]
+///
+/// Pass [address] (a single legacy candidate) or [candidates] (the full
+/// list). At most one of the two should be non-null.
 Uint8List buildAnnouncePayload({
   required Uint8List pubkey,
   String nickname = 'OtherPeer',
   String? address,
+  List<String>? candidates,
 }) {
+  final list = candidates ?? (address != null ? [address] : const <String>[]);
   final nicknameBytes = Uint8List.fromList(nickname.codeUnits);
-  final addressBytes =
-      address != null ? Uint8List.fromList(address.codeUnits) : Uint8List(0);
   final buffer = BytesBuilder();
 
   buffer.add(pubkey);
 
   final versionBytes = ByteData(2);
-  versionBytes.setUint16(0, 1, Endian.big);
+  versionBytes.setUint16(0, 2, Endian.big);
   buffer.add(versionBytes.buffer.asUint8List());
 
   buffer.addByte(nicknameBytes.length);
   buffer.add(nicknameBytes);
 
-  final addrLenBytes = ByteData(2);
-  addrLenBytes.setUint16(0, addressBytes.length, Endian.big);
-  buffer.add(addrLenBytes.buffer.asUint8List());
-  if (addressBytes.isNotEmpty) {
-    buffer.add(addressBytes);
+  // Candidate count (1 byte)
+  buffer.addByte(list.length);
+  for (final candidate in list) {
+    final addrBytes = Uint8List.fromList(candidate.codeUnits);
+    final addrLenBytes = ByteData(2);
+    addrLenBytes.setUint16(0, addrBytes.length, Endian.big);
+    buffer.add(addrLenBytes.buffer.asUint8List());
+    buffer.add(addrBytes);
   }
 
   return buffer.toBytes();

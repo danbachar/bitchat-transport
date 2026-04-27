@@ -603,7 +603,7 @@ void main() {
         protocolVersion: 3,
         rssi: -40,
         transport: PeerTransport.udp,
-        udpAddress: '[2001:db8::1]:4001',
+        candidates: ['[2001:db8::1]:4001'],
       );
 
       final result = peersReducer(initial, action);
@@ -652,7 +652,7 @@ void main() {
         protocolVersion: 1,
         rssi: -40,
         transport: PeerTransport.udp,
-        udpAddress: '[2001:db8::1]:4001',
+        candidates: ['[2001:db8::1]:4001'],
         // No BLE device IDs — should preserve existing
       );
 
@@ -672,7 +672,7 @@ void main() {
         protocolVersion: 1,
         rssi: -42,
         transport: PeerTransport.udp,
-        udpAddress: '[2001:db8::3]:4003',
+        candidates: ['[2001:db8::3]:4003'],
       );
 
       final result = peersReducer(PeersState.initial, action);
@@ -693,7 +693,7 @@ void main() {
             connectionState: PeerConnectionState.connected,
             lastSeen: udpSeenAt,
             lastUdpSeen: udpSeenAt,
-            udpAddress: '[2001:db8::4]:4004',
+            udpCandidates: const ['[2001:db8::4]:4004'],
           ),
         },
       );
@@ -860,7 +860,7 @@ void main() {
             nickname: 'Alice',
             connectionState: PeerConnectionState.connected,
             bleCentralDeviceId: 'central-1',
-            udpAddress: '[2001:db8::1]:4001',
+            udpCandidates: ['[2001:db8::1]:4001'],
           ),
         },
       );
@@ -890,7 +890,7 @@ void main() {
             publicKey: pubkey,
             nickname: 'Alice',
             connectionState: PeerConnectionState.connected,
-            udpAddress: '[2001:db8::1]:4001',
+            udpCandidates: ['[2001:db8::1]:4001'],
           ),
         },
       );
@@ -914,7 +914,7 @@ void main() {
             nickname: 'Alice',
             connectionState: PeerConnectionState.connected,
             bleCentralDeviceId: 'central-1',
-            udpAddress: '[2001:db8::1]:4001',
+            udpCandidates: ['[2001:db8::1]:4001'],
           ),
         },
       );
@@ -938,7 +938,7 @@ void main() {
             publicKey: pubkey,
             nickname: 'Alice',
             connectionState: PeerConnectionState.connected,
-            udpAddress: '[2001:db8::1]:4001',
+            udpCandidates: ['[2001:db8::1]:4001'],
           ),
         },
       );
@@ -1089,7 +1089,7 @@ void main() {
   // =========================================================================
 
   group('AssociateUdpAddressAction', () {
-    test('sets udpAddress', () {
+    test('appends address to udpCandidates', () {
       final pubkey = _testPubkey(1);
       final hex = _pubkeyHex(pubkey);
       final initial = PeersState(
@@ -1108,10 +1108,10 @@ void main() {
       final result = peersReducer(initial, action);
 
       final peer = result.peers[hex]!;
-      expect(peer.udpAddress, '[2001:db8::1]:4001');
+      expect(peer.udpCandidates, equals(['[2001:db8::1]:4001']));
     });
 
-    test('clears udpAddress when address is empty', () {
+    test('merges address with existing candidates', () {
       final pubkey = _testPubkey(1);
       final hex = _pubkeyHex(pubkey);
       final initial = PeersState(
@@ -1119,7 +1119,58 @@ void main() {
           hex: PeerState(
             publicKey: pubkey,
             nickname: 'Alice',
-            udpAddress: '[2001:db8::1]:4001',
+            udpCandidates: const ['[2001:db8::1]:4001'],
+          ),
+        },
+      );
+      final action = AssociateUdpAddressAction(
+        publicKey: pubkey,
+        address: '203.0.113.7:4242',
+      );
+
+      final result = peersReducer(initial, action);
+
+      final peer = result.peers[hex]!;
+      expect(
+        peer.udpCandidates,
+        equals(['[2001:db8::1]:4001', '203.0.113.7:4242']),
+      );
+    });
+
+    test('is no-op when address already in candidates', () {
+      final pubkey = _testPubkey(1);
+      final hex = _pubkeyHex(pubkey);
+      const existing = '[2001:db8::1]:4001';
+      final initial = PeersState(
+        peers: {
+          hex: PeerState(
+            publicKey: pubkey,
+            nickname: 'Alice',
+            udpCandidates: const [existing],
+          ),
+        },
+      );
+      final action = AssociateUdpAddressAction(
+        publicKey: pubkey,
+        address: existing,
+      );
+
+      final result = peersReducer(initial, action);
+
+      // Re-adding an already-known address does not change state.
+      expect(result, same(initial));
+    });
+
+    test('is no-op when address is empty', () {
+      final pubkey = _testPubkey(1);
+      final hex = _pubkeyHex(pubkey);
+      const originalAddr = '[2001:db8::1]:4001';
+      final initial = PeersState(
+        peers: {
+          hex: PeerState(
+            publicKey: pubkey,
+            nickname: 'Alice',
+            udpCandidates: const [originalAddr],
           ),
         },
       );
@@ -1130,11 +1181,9 @@ void main() {
 
       final result = peersReducer(initial, action);
 
-      // The reducer constructs PeerState directly (not via copyWith) so it
-      // can actually set nullable fields to null. An empty address clears
-      // the stored udpAddress.
+      // An empty address is a no-op — existing candidates are preserved.
       final peer = result.peers[hex]!;
-      expect(peer.udpAddress, isNull);
+      expect(peer.udpCandidates, equals([originalAddr]));
     });
 
     test('is a no-op for unknown peer', () {
@@ -1220,7 +1269,7 @@ void main() {
             publicKey: pubkey,
             nickname: 'Alice',
             isFriend: true,
-            udpAddress: '[2001:db8::1]:4001',
+            udpCandidates: const ['[2001:db8::1]:4001'],
             // no BLE device IDs
           ),
         },
@@ -1244,7 +1293,7 @@ void main() {
             connectionState: PeerConnectionState.connected,
             isFriend: true,
             bleCentralDeviceId: 'central-1',
-            udpAddress: '[2001:db8::1]:4001',
+            udpCandidates: const ['[2001:db8::1]:4001'],
           ),
         },
       );
@@ -1336,7 +1385,7 @@ void main() {
             isFriend: true,
             bleCentralDeviceId: 'central-1',
             blePeripheralDeviceId: 'peripheral-1',
-            udpAddress: '[2001:db8::1]:4001',
+            udpCandidates: const ['[2001:db8::1]:4001'],
           ),
         },
       );
@@ -1370,7 +1419,7 @@ void main() {
             bleCentralDeviceId: 'central-1',
             blePeripheralDeviceId: 'peripheral-1',
             lastBleSeen: now.subtract(const Duration(minutes: 5)), // stale BLE
-            udpAddress: '[2001:db8::1]:4001',
+            udpCandidates: const ['[2001:db8::1]:4001'],
           ),
         },
       );
@@ -1496,7 +1545,7 @@ void main() {
         publicKey: _testPubkey(1),
         nickname: 'Alice',
         bleCentralDeviceId: 'central-1',
-        udpAddress: '[2001:db8::1]:4001',
+        udpCandidates: const ['[2001:db8::1]:4001'],
       );
       expect(peer.activeTransport, PeerTransport.bleDirect);
     });

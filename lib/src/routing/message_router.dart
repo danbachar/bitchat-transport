@@ -197,12 +197,11 @@ class MessageRouter {
 
     final isNew = _peersState.getPeerByPubkey(pubkey) == null;
 
-    // Use the address from the ANNOUNCE payload only.
+    // Use the candidates from the ANNOUNCE payload, normalized.
     // udpPeerId is the sender's hex pubkey, NOT an ip:port address —
-    // using it as a fallback would corrupt the peer's stored udpAddress
+    // using it as a fallback would corrupt the peer's stored candidates
     // and clear their well-connected status.
-    final udpAddress = _normalizeUdpAddress(data.udpAddress);
-    final linkLocalAddress = _normalizeLinkLocalAddress(data.linkLocalAddress);
+    final candidates = _normalizeCandidates(data.candidates);
 
     // Set the correct BLE device ID field based on role
     String? centralId;
@@ -223,8 +222,7 @@ class MessageRouter {
       transport: transport,
       bleCentralDeviceId: centralId,
       blePeripheralDeviceId: peripheralId,
-      udpAddress: udpAddress,
-      linkLocalAddress: linkLocalAddress,
+      candidates: candidates,
     ));
 
     if (resolvedBleDeviceId != null && resolvedBleRole != null) {
@@ -237,7 +235,7 @@ class MessageRouter {
 
     debugPrint(
         'Peer ${isNew ? "connected" : "updated"}: ${data.nickname} via ${transport.name}'
-        '${data.udpAddress != null ? " addr=${data.udpAddress}" : ""}');
+        '${candidates.isNotEmpty ? " candidates=$candidates" : ""}');
 
     onPeerAnnounced?.call(data, transport, isNew: isNew, udpPeerId: udpPeerId);
   }
@@ -317,29 +315,24 @@ class MessageRouter {
   static String _pubkeyToHex(Uint8List pubkey) =>
       pubkey.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
-  String? _normalizeUdpAddress(String? udpAddress) {
-    if (udpAddress == null || udpAddress.isEmpty) return null;
-
-    final parsed = parseAddressString(udpAddress);
-    if (parsed != null) return parsed.toAddressString();
-
-    debugPrint('Ignoring malformed UDP address from ANNOUNCE: $udpAddress');
-    return null;
-  }
-
-  String? _normalizeLinkLocalAddress(String? udpAddress) {
-    final normalized = _normalizeUdpAddress(udpAddress);
-    if (normalized == null) return null;
-
-    final parsed = parseIpv6AddressString(normalized);
-    if (parsed == null) return null;
-    if (!parsed.ip.isLinkLocal) {
-      debugPrint(
-          'Ignoring non-link-local address in ANNOUNCE link-local field: '
-          '$udpAddress');
-      return null;
+  /// Normalize a list of candidate strings: parse, drop malformed entries,
+  /// canonicalise the textual form, and dedupe while preserving order.
+  List<String> _normalizeCandidates(Iterable<String> raw) {
+    final seen = <String>{};
+    final out = <String>[];
+    for (final addr in raw) {
+      if (addr.isEmpty) continue;
+      final parsed = parseAddressString(addr);
+      if (parsed == null) {
+        debugPrint('Ignoring malformed UDP candidate from ANNOUNCE: $addr');
+        continue;
+      }
+      final normalized = parsed.toAddressString();
+      if (seen.add(normalized)) {
+        out.add(normalized);
+      }
     }
-    return parsed.toAddressString();
+    return out;
   }
 
   // ===== Deduplication API =====
