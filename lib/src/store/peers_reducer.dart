@@ -582,6 +582,23 @@ PeersState peersReducer(PeersState state, dynamic action) {
     return state;
   }
 
+  if (action is PeerRvServersUpdatedAction) {
+    final pubkeyHex = _pubkeyToHex(action.publicKey);
+    final existing = state.peers[pubkeyHex];
+    if (existing == null) return state;
+    final normalized = action.rvServerPubkeyHexes
+        .map((hex) => hex.toLowerCase())
+        .where((hex) => hex.isNotEmpty)
+        .toSet();
+    if (setEquals(existing.knownRvServerPubkeys, normalized)) {
+      return state;
+    }
+    final updated = existing.copyWith(knownRvServerPubkeys: normalized);
+    return state.copyWith(
+      peers: Map.from(state.peers)..[pubkeyHex] = updated,
+    );
+  }
+
   // ===== Friendship Actions =====
 
   if (action is FriendEstablishedAction) {

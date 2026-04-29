@@ -234,6 +234,18 @@ class AssociateUdpAddressAction extends PeerAction {
   });
 }
 
+/// Update the set of rendezvous server pubkeys a peer reaches its peers
+/// through. Driven by the RV_LIST signaling message.
+class PeerRvServersUpdatedAction extends PeerAction {
+  final Uint8List publicKey;
+  final Set<String> rvServerPubkeyHexes;
+
+  PeerRvServersUpdatedAction({
+    required this.publicKey,
+    required this.rvServerPubkeyHexes,
+  });
+}
+
 // ===== Friendship Actions =====
 
 /// A friendship has been established - mark peer as friend

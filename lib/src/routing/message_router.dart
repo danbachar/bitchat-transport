@@ -51,7 +51,14 @@ class MessageRouter {
 
   /// Called when a signaling packet is received.
   /// The coordinator routes this to [SignalingService.processSignaling].
-  void Function(Uint8List senderPubkey, Uint8List payload)? onSignalingReceived;
+  /// [observedIp] / [observedPort] carry the UDP source address observed by
+  /// the transport layer (null for BLE-arrived signaling).
+  void Function(
+    Uint8List senderPubkey,
+    Uint8List payload, {
+    String? observedIp,
+    int? observedPort,
+  })? onSignalingReceived;
 
   /// Called when a verified packet arrives over UDP, providing the sender's
   /// pubkey so the coordinator can map the connection (replacing tempKey-based
@@ -82,6 +89,8 @@ class MessageRouter {
     BleRole? bleRole,
     String? udpPeerId,
     int rssi = -100,
+    String? observedIp,
+    int? observedPort,
   }) async {
     // Verify signature — drop invalid packets
     final isValid = await protocolHandler.verifyPacket(packet);
@@ -147,7 +156,11 @@ class MessageRouter {
       case PacketType.readReceipt:
         _handleReadReceipt(packet);
       case PacketType.signaling:
-        _handleSignaling(packet);
+        _handleSignaling(
+          packet,
+          observedIp: observedIp,
+          observedPort: observedPort,
+        );
     }
   }
 
@@ -286,8 +299,17 @@ class MessageRouter {
     }
   }
 
-  void _handleSignaling(BitchatPacket packet) {
-    onSignalingReceived?.call(packet.senderPubkey, packet.payload);
+  void _handleSignaling(
+    BitchatPacket packet, {
+    String? observedIp,
+    int? observedPort,
+  }) {
+    onSignalingReceived?.call(
+      packet.senderPubkey,
+      packet.payload,
+      observedIp: observedIp,
+      observedPort: observedPort,
+    );
   }
 
   void _handleReadReceipt(BitchatPacket packet) {

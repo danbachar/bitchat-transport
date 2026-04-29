@@ -1136,6 +1136,10 @@ class Bitchat {
     if (added.isNotEmpty && _udpService != null && _udpAvailable) {
       await _syncConfiguredRendezvous(configs: added, reason: 'settings-saved');
     }
+
+    // Friends rely on us to tell them which RV agents to contact when we
+    // disappear. Re-broadcast whenever the list changes.
+    _broadcastRvListToFriends();
   }
 
   void _seedConnectivityState() {
@@ -1327,6 +1331,22 @@ class Bitchat {
           (candidates.isNotEmpty ? candidates.first : null);
       if (friendAddress == null) continue;
       await _connectToFriendViaUdp(friend.pubkeyHex, friendAddress);
+    }
+
+    // Fan out RECONNECT for friends still unreachable. The facilitator(s)
+    // will pair this with the friend's AVAILABLE (which the friend sends
+    // when its keepalive for us expires) and coordinate a hole-punch.
+    final facilitatorCount = store.state.peers.wellConnectedFriends.length +
+        _configuredRendezvousServers().length;
+    if (facilitatorCount == 0) return;
+
+    for (final friend in udpFriends) {
+      if (_udpService?.getPeerIdForPubkey(friend.publicKey) != null) continue;
+      debugPrint(
+        '[reconnect] Fanning out RECONNECT for ${friend.displayName} '
+        'after IP change',
+      );
+      unawaited(_signalingService.fanOutReconnect(friend.publicKey));
     }
   }
 
@@ -2574,11 +2594,12 @@ class Bitchat {
     }
   }
 
-  /// Try to discover a peer's UDP address via friends or the rendezvous server.
+  /// Try to reach a peer by sending RECONNECT to every trusted facilitator.
   ///
-  /// First queries friends for a known address. If found, updates the peer's
-  /// udpAddress in the store so the caller can send normally. If not found,
-  /// requests a hole-punch and waits for the coordinated punch to complete.
+  /// The facilitator(s) match this against the peer's AVAILABLE message
+  /// (which the peer sends when it detects we went silent — see
+  /// [_onUdpPeerDisconnected]) and respond with PUNCH_INITIATE. We then wait
+  /// for the coordinated punch to complete.
   ///
   /// Returns true if a UDP path to the peer was established.
   Future<bool> _discoverPeerViaFriends(PeerState peer) async {
@@ -2589,160 +2610,58 @@ class Bitchat {
     final rendezvousCount = _configuredRendezvousServers().length;
     final facilitatorCount = trustedFriendCount + rendezvousCount;
 
-    debugPrint(
-      '[discover] Trying to reach $name via $facilitatorCount signaling facilitator(s)',
-    );
-
     if (facilitatorCount == 0) {
       debugPrint('[discover] No signaling facilitators available');
       return false;
     }
 
-    // Step 1: Ask all facilitators which ones actually know the peer's address.
-    debugPrint('[discover] Querying friends for $name address...');
-    final candidates = await _signalingService.queryPeerAddressCandidates(
-      pubkeyBytes,
-    );
+    _beginHolePunchAttempt(pubkeyHex);
 
-    if (candidates.isEmpty) {
-      debugPrint(
-        '[discover] No facilitator currently reports an address for '
-        '$name',
-      );
+    final sent = await _signalingService.fanOutReconnect(pubkeyBytes);
+    if (sent == 0) {
+      debugPrint('[discover] Could not reach any facilitator for $name');
+      _failHolePunchAttempt(pubkeyHex, 'Could not reach any facilitator');
+      return false;
+    }
+
+    final completer = _holePunchCompleters[pubkeyHex];
+    if (completer == null) {
+      debugPrint('[discover] Hole-punch state vanished for $name');
       return false;
     }
 
     debugPrint(
-      '[discover] ${candidates.length} facilitator(s) replied for '
-      '$name',
+      '[discover] RECONNECT fanned out for $name ($sent facilitator(s)); '
+      'waiting for PUNCH_INITIATE (timeout: 15s)...',
     );
 
-    // Step 2: Try direct UDP to every unique compatible address we learned.
-    final triedAddresses = <String>{};
-    final facilitatorOrder = <AddressQueryCandidate>[];
-    for (final candidate in candidates) {
-      final address = AddressInfo(
-        InternetAddress(candidate.entry.ip),
-        candidate.entry.port,
-      ).toAddressString();
-      final addr = _parseSupportedUdpAddress(
-        address,
-        context: 'discover',
-        peerLabel: name,
-      );
-      if (addr == null) {
-        continue;
-      }
-      if (_udpService != null && !_udpService!.canDialAddress(addr.ip)) {
-        debugPrint(
-          '[discover] Skipping incompatible UDP address for $name: '
-          '$address',
+    final succeeded = await completer.future.timeout(
+      const Duration(seconds: 15),
+      onTimeout: () {
+        debugPrint('[discover] Hole-punch timed out for $name');
+        _failHolePunchAttempt(
+          pubkeyHex,
+          'Timed out waiting for coordinated hole-punch',
         );
-        continue;
-      }
-
-      final normalized = addr.toAddressString();
-      if (!triedAddresses.add(normalized)) {
-        continue;
-      }
-
-      facilitatorOrder.add(candidate);
-      debugPrint(
-        '[discover] Facilitator ${candidate.responderPubkey.map((b) => b.toRadixString(16).padLeft(2, '0')).join().substring(0, 8)} '
-        'reports $name at $normalized',
-      );
-      store.dispatch(
-        AssociateUdpAddressAction(publicKey: pubkeyBytes, address: normalized),
-      );
-
-      if (_udpService != null) {
-        debugPrint('[discover] Trying direct UDP to $name at $normalized...');
-        final announce = await _createSignedAnnounce(address: udpAddress);
-        if (await _sendViaUdp(pubkeyHex, normalized, announce)) {
-          debugPrint('[discover] Direct UDP to $name succeeded');
-          return true;
-        }
-        debugPrint('[discover] Direct UDP to $name at $normalized failed');
-      }
-    }
-
-    if (facilitatorOrder.isEmpty) {
-      debugPrint(
-        '[discover] No compatible facilitator address remains for '
-        '$name',
-      );
-      return false;
-    }
-
-    // Step 3: Ask facilitators that actually know the target to coordinate
-    // the punch, one at a time until a path is established.
-    for (final candidate in facilitatorOrder) {
-      final facilitatorHex = candidate.responderPubkey
-          .map((b) => b.toRadixString(16).padLeft(2, '0'))
-          .join();
-      debugPrint(
-        '[discover] Requesting coordinated hole-punch to $name via '
-        '${facilitatorHex.substring(0, 8)}...',
-      );
-
-      _beginHolePunchAttempt(pubkeyHex);
-      final sent = await _signalingService.requestHolePunchViaFriend(
-        pubkeyBytes,
-        candidate.responderPubkey,
-      );
-      if (!sent) {
-        debugPrint(
-          '[discover] Could not reach facilitator '
-          '${facilitatorHex.substring(0, 8)}...',
-        );
-        _failHolePunchAttempt(pubkeyHex, 'Could not reach facilitator');
-        continue;
-      }
-
-      final completer = _holePunchCompleters[pubkeyHex];
-      if (completer == null) {
-        debugPrint('[discover] Hole-punch state vanished for $name');
         return false;
-      }
+      },
+    );
 
-      debugPrint(
-        '[discover] Hole-punch requested via '
-        '${facilitatorHex.substring(0, 8)}; waiting for PUNCH_INITIATE '
-        '(timeout: 15s)...',
-      );
-
-      final succeeded = await completer.future.timeout(
-        const Duration(seconds: 15),
-        onTimeout: () {
-          debugPrint(
-            '[discover] Hole-punch timed out for $name via '
-            '${facilitatorHex.substring(0, 8)}',
-          );
-          _failHolePunchAttempt(
-            pubkeyHex,
-            'Timed out waiting for coordinated hole-punch',
-          );
-          return false;
-        },
-      );
-
-      if (succeeded) {
-        debugPrint('[discover] Successfully established path to $name');
-        return true;
-      }
+    if (succeeded) {
+      debugPrint('[discover] Successfully established path to $name');
     }
-
-    return false;
+    return succeeded;
   }
 
   // ===== Internal setup =====
 
-  /// Periodically try to discover unreachable friends via well-connected friends.
+  /// Periodically try to discover unreachable friends via rendezvous facilitators.
   ///
   /// On each announce tick, find friends that we know about but can't currently
-  /// reach via any transport. If we have well-connected friends available
-  /// (reachable via BLE or UDP), ask them to help us find the unreachable ones
-  /// via signaling (ADDR_QUERY → hole-punch coordination).
+  /// reach via any transport. Fan out RECONNECT to all configured rendezvous
+  /// facilitators; the match completes (and the punch begins) only when the
+  /// peer also sends an AVAILABLE message — typically because the peer
+  /// independently detected our disconnect.
   ///
   /// Throttled: each peer is attempted at most once per [_discoveryRetryInterval].
   void _discoverUnreachableFriends() {
@@ -2867,13 +2786,11 @@ class Bitchat {
       }
 
       // When we are well-connected and receive an ANNOUNCE from a friend
-      // with a UDP address, register it in our address table. This enables
-      // us to coordinate hole-punches between friends — answering ADDR_QUERY
-      // and sending PUNCH_INITIATE with known addresses.
+      // with a UDP address, register it in our address table. This is used
+      // by the direct-punch path ([requestDirectPunch]) when we want a
+      // friend already reachable over BLE to start punching toward us.
       //
-      // Only friends are registered. Signaling (ADDR_QUERY, PUNCH_REQUEST,
-      // PUNCH_INITIATE) is a friend-only service — we only coordinate
-      // between peers we trust.
+      // Only friends are registered.
       //
       // UDP: use the observed address (NAT-translated, most reliable).
       // BLE: use the claimed address from the ANNOUNCE payload (no observed
@@ -2993,8 +2910,14 @@ class Bitchat {
     };
 
     // Signaling packet received — delegate to SignalingService.
-    _messageRouter.onSignalingReceived = (senderPubkey, payload) {
-      _signalingService.processSignaling(senderPubkey, payload);
+    _messageRouter.onSignalingReceived =
+        (senderPubkey, payload, {observedIp, observedPort}) {
+      _signalingService.processSignaling(
+        senderPubkey,
+        payload,
+        observedIp: observedIp,
+        observedPort: observedPort,
+      );
     };
   }
 
@@ -3181,10 +3104,15 @@ class Bitchat {
     _udpService!.onUdpDataReceived = (peerId, data) {
       try {
         final packet = BitchatPacket.deserialize(data);
+        // Observed source address: the UDX remote, if known. Used by the
+        // signaling matcher to learn cold-call senders' public addresses.
+        final remote = _udpService!.getRemoteAddress(peerId);
         _messageRouter.processPacket(
           packet,
           transport: PeerTransport.udp,
           udpPeerId: peerId,
+          observedIp: remote?.ip.address,
+          observedPort: remote?.port,
         );
       } catch (e) {
         debugPrint('Failed to deserialize UDP packet from $peerId: $e');
@@ -3196,6 +3124,7 @@ class Bitchat {
       if (event.connected) {
         debugPrint('UDP peer connected: ${event.peerId}');
         store.dispatch(PeerUdpSeenAction(_hexToBytes(event.peerId)));
+        _sendRvListToFriendIfEligible(event.peerId);
 
         final wasPunching = _holePunchTargets.containsKey(event.peerId) ||
             _holePunchLocalReady.contains(event.peerId) ||
@@ -3307,6 +3236,7 @@ class Bitchat {
         } else {
           _clearHolePunchState(event.peerId);
         }
+        _onUdpPeerDisconnected(event.peerId);
       }
       store.dispatch(
         PeerUdpConnectionChangedAction(
@@ -3315,6 +3245,67 @@ class Bitchat {
         ),
       );
     });
+  }
+
+  /// Fired when a UDP stream ended or the ANNOUNCE keepalive timed out.
+  ///
+  /// Per the rendezvous reconnection algorithm, when we detect a friend went
+  /// silent we should fan out AVAILABLE to our trusted facilitators. The peer
+  /// (which presumably had its IP change) will send RECONNECT, the facilitator
+  /// will match the pair, and a coordinated hole-punch follows.
+  /// Send RV_LIST to a friend right after a UDP connection establishes,
+  /// so they can target AVAILABLE at our exact rendezvous servers when our
+  /// IP changes.
+  void _sendRvListToFriendIfEligible(String pubkeyHex) {
+    final peer = _peersState.getPeerByPubkeyHex(pubkeyHex);
+    if (peer == null || !peer.isFriend) return;
+
+    final rvPubkeys = _ownRvServerPubkeys();
+    if (rvPubkeys.isEmpty) return;
+
+    debugPrint(
+      '[rv-list] Sending ${rvPubkeys.length} rendezvous server pubkey(s) to '
+      '${peer.displayName}',
+    );
+    unawaited(_signalingService.sendRvList(peer.publicKey, rvPubkeys));
+  }
+
+  /// Broadcast our current RV list to every UDP-reachable friend. Called
+  /// when the local rendezvous server settings change.
+  void _broadcastRvListToFriends() {
+    final rvPubkeys = _ownRvServerPubkeys();
+    if (rvPubkeys.isEmpty || _udpService == null) return;
+    for (final friend in _peersState.friends) {
+      if (_udpService!.getPeerIdForPubkey(friend.publicKey) == null) continue;
+      debugPrint(
+        '[rv-list] Re-broadcasting RV list to ${friend.displayName} '
+        '(settings changed)',
+      );
+      unawaited(_signalingService.sendRvList(friend.publicKey, rvPubkeys));
+    }
+  }
+
+  List<Uint8List> _ownRvServerPubkeys() {
+    return [
+      for (final config in _configuredRendezvousServers()) config.pubkey,
+    ];
+  }
+
+  void _onUdpPeerDisconnected(String pubkeyHex) {
+    final peer = _peersState.getPeerByPubkeyHex(pubkeyHex);
+    if (peer == null || !peer.isFriend) return;
+
+    // Don't fire the application-level onPeerDisconnected here — the peer
+    // may still be reachable via BLE, and BLE/UDP are independent transports.
+
+    final facilitatorCount = store.state.peers.wellConnectedFriends.length +
+        _configuredRendezvousServers().length;
+    if (facilitatorCount == 0) return;
+
+    debugPrint(
+      '[reconnect] UDP path to ${peer.displayName} dropped — fanning out AVAILABLE',
+    );
+    unawaited(_signalingService.fanOutAvailable(peer.publicKey));
   }
 
   /// Clean up resources
@@ -3444,6 +3435,7 @@ class Bitchat {
           )
         : await _createSignedAnnounce();
 
+    debugPrint('[ble-announce] payload size=${announce.length}');
     final sent = await _bleService!.sendToPeer(deviceId, announce);
     if (sent) {
       if (isFriend) {

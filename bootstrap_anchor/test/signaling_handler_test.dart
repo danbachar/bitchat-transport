@@ -79,15 +79,15 @@ void main() {
     late SignalingCodec codec;
     late SignalingHandler handler;
     late List<_SentSignal> sentSignals;
-    late Uint8List requesterPubkey;
-    late Uint8List targetPubkey;
+    late Uint8List aPubkey;
+    late Uint8List bPubkey;
 
     setUp(() async {
       addressTable = AddressTable();
       peerTable = PeerTable();
       codec = const SignalingCodec();
-      requesterPubkey = _pubkey(1);
-      targetPubkey = _pubkey(2);
+      aPubkey = _pubkey(1);
+      bPubkey = _pubkey(2);
       handler = SignalingHandler(
         protocol: await _createProtocol(),
         peerTable: peerTable,
@@ -100,18 +100,14 @@ void main() {
         return true;
       };
 
-      peerTable.addVerified(_hex(requesterPubkey), nickname: 'requester');
-      peerTable.addVerified(_hex(targetPubkey), nickname: 'target');
+      peerTable.addVerified(_hex(aPubkey), nickname: 'A');
+      peerTable.addVerified(_hex(bPubkey), nickname: 'B');
     });
 
     test('processAnnounce reflects the observed address back', () {
-      // The signaling handler no longer writes address-table entries itself —
-      // those are owned by the anchor server's live-connection tracking.
-      // processAnnounce is now only responsible for peer-table bookkeeping
-      // and sending an AddrReflect to the peer.
       final announce = AnnounceData(
-        publicKey: requesterPubkey,
-        nickname: 'requester',
+        publicKey: aPubkey,
+        nickname: 'A',
         protocolVersion: 1,
         udpAddress: '[2001:db8::99]:7000',
       );
@@ -123,66 +119,142 @@ void main() {
       );
 
       expect(
-        addressTable.lookup(_hex(requesterPubkey)),
+        addressTable.lookup(_hex(aPubkey)),
         isNull,
         reason: 'processAnnounce must not touch the address table',
       );
 
       expect(sentSignals, hasLength(1));
-      expect(sentSignals.single.recipient, equals(requesterPubkey));
+      expect(sentSignals.single.recipient, equals(aPubkey));
       final reflect = sentSignals.single.message as AddrReflectMessage;
       expect(reflect.ip, equals('2001:db8::10'));
       expect(reflect.port, equals(7001));
     });
 
-    test('addr query responds with an address matching requester family', () {
-      final targetHex = _hex(targetPubkey);
-      addressTable.register(targetHex, '2001:db8::20', 9000);
-      addressTable.register(targetHex, '203.0.113.20', 9001);
+    test(
+      'first request is parked until counterpart arrives, then both '
+      'sides receive a PunchInitiate',
+      () {
+        // A (whose IP changed) sends RECONNECT first.
+        handler.processSignaling(
+          aPubkey,
+          codec.encode(ReconnectMessage(peerPubkey: bPubkey)),
+          observedIp: '198.51.100.10',
+          observedPort: 7000,
+        );
+        expect(sentSignals, isEmpty,
+            reason: 'no counterpart yet — server must park the request');
+        expect(
+          addressTable.lookup(_hex(aPubkey)),
+          isNotNull,
+          reason: 'sender address recorded from observed source',
+        );
+
+        // B (who detected A went silent) sends AVAILABLE — match!
+        handler.processSignaling(
+          bPubkey,
+          codec.encode(AvailableMessage(peerPubkey: aPubkey)),
+          observedIp: '203.0.113.20',
+          observedPort: 9001,
+        );
+
+        expect(sentSignals, hasLength(2),
+            reason: 'both sides must receive a PunchInitiate');
+
+        final toA = sentSignals.firstWhere((s) => s.recipient == aPubkey);
+        final initiateToA = toA.message as PunchInitiateMessage;
+        expect(initiateToA.peerPubkey, equals(bPubkey));
+        expect(initiateToA.ip, equals('203.0.113.20'));
+        expect(initiateToA.port, equals(9001));
+
+        final toB = sentSignals.firstWhere((s) => s.recipient == bPubkey);
+        final initiateToB = toB.message as PunchInitiateMessage;
+        expect(initiateToB.peerPubkey, equals(aPubkey));
+        expect(initiateToB.ip, equals('198.51.100.10'));
+        expect(initiateToB.port, equals(7000));
+      },
+    );
+
+    test('matching is symmetric — AVAILABLE arriving first also works', () {
+      handler.processSignaling(
+        bPubkey,
+        codec.encode(AvailableMessage(peerPubkey: aPubkey)),
+        observedIp: '203.0.113.20',
+        observedPort: 9001,
+      );
+      expect(sentSignals, isEmpty);
 
       handler.processSignaling(
-        requesterPubkey,
-        codec.encode(AddrQueryMessage(targetPubkey: targetPubkey)),
+        aPubkey,
+        codec.encode(ReconnectMessage(peerPubkey: bPubkey)),
         observedIp: '198.51.100.10',
         observedPort: 7000,
       );
 
-      expect(sentSignals, hasLength(1));
-      expect(sentSignals.single.recipient, equals(requesterPubkey));
-      final ipv4Response = sentSignals.single.message as AddrResponseMessage;
-      expect(ipv4Response.ip, equals('203.0.113.20'));
-      expect(ipv4Response.port, equals(9001));
+      expect(sentSignals, hasLength(2));
+    });
 
+    test('forwards PUNCH_READY to the counterpart after coordination', () {
+      handler.processSignaling(
+        aPubkey,
+        codec.encode(ReconnectMessage(peerPubkey: bPubkey)),
+        observedIp: '198.51.100.10',
+        observedPort: 7000,
+      );
+      handler.processSignaling(
+        bPubkey,
+        codec.encode(AvailableMessage(peerPubkey: aPubkey)),
+        observedIp: '203.0.113.20',
+        observedPort: 9001,
+      );
       sentSignals.clear();
 
       handler.processSignaling(
-        requesterPubkey,
-        codec.encode(AddrQueryMessage(targetPubkey: targetPubkey)),
-        observedIp: '2001:db8::10',
-        observedPort: 7000,
-      );
-
-      expect(sentSignals, hasLength(1));
-      expect(sentSignals.single.recipient, equals(requesterPubkey));
-      final ipv6Response = sentSignals.single.message as AddrResponseMessage;
-      expect(ipv6Response.ip, equals('2001:db8::20'));
-      expect(ipv6Response.port, equals(9000));
-    });
-
-    test('punch request only coordinates peers on the same family', () {
-      final requesterHex = _hex(requesterPubkey);
-      final targetHex = _hex(targetPubkey);
-
-      addressTable.register(requesterHex, '198.51.100.10', 7000);
-      addressTable.register(targetHex, '2001:db8::20', 9000);
-
-      handler.processSignaling(
-        requesterPubkey,
-        codec.encode(PunchRequestMessage(targetPubkey: targetPubkey)),
+        aPubkey,
+        codec.encode(PunchReadyMessage(peerPubkey: bPubkey)),
         observedIp: '198.51.100.10',
         observedPort: 7000,
       );
 
+      expect(sentSignals, hasLength(1));
+      expect(sentSignals.single.recipient, equals(bPubkey));
+      expect(sentSignals.single.message, isA<PunchReadyMessage>());
+    });
+
+    test('drops requests with sender targeting itself', () {
+      handler.processSignaling(
+        aPubkey,
+        codec.encode(ReconnectMessage(peerPubkey: aPubkey)),
+        observedIp: '198.51.100.10',
+        observedPort: 7000,
+      );
+      expect(sentSignals, isEmpty);
+    });
+
+    test('drops duplicate coordination attempts inside the cooldown window',
+        () {
+      handler.processSignaling(
+        aPubkey,
+        codec.encode(ReconnectMessage(peerPubkey: bPubkey)),
+        observedIp: '198.51.100.10',
+        observedPort: 7000,
+      );
+      handler.processSignaling(
+        bPubkey,
+        codec.encode(AvailableMessage(peerPubkey: aPubkey)),
+        observedIp: '203.0.113.20',
+        observedPort: 9001,
+      );
+      expect(sentSignals, hasLength(2));
+      sentSignals.clear();
+
+      // Retry immediately — still inside cooldown. Server should drop it.
+      handler.processSignaling(
+        aPubkey,
+        codec.encode(ReconnectMessage(peerPubkey: bPubkey)),
+        observedIp: '198.51.100.11',
+        observedPort: 7001,
+      );
       expect(sentSignals, isEmpty);
     });
   });

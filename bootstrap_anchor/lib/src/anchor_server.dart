@@ -754,13 +754,6 @@ class AnchorServer {
     try {
       final message = _codec.decode(signalingPayload);
       return switch (message) {
-        AddrQueryMessage() =>
-          'addrQuery target=${_shortHex(_pubkeyToHex(message.targetPubkey))}',
-        AddrResponseMessage() =>
-          'addrResponse target=${_shortHex(_pubkeyToHex(message.targetPubkey))} '
-              '${message.found ? "addr=${message.ip}:${message.port}" : "not-found"}',
-        PunchRequestMessage() =>
-          'punchRequest target=${_shortHex(_pubkeyToHex(message.targetPubkey))}',
         PunchInitiateMessage() =>
           'punchInitiate peer=${_shortHex(_pubkeyToHex(message.peerPubkey))} '
               'addr=${message.ip}:${message.port}',
@@ -768,6 +761,11 @@ class AnchorServer {
           'punchReady peer=${_shortHex(_pubkeyToHex(message.peerPubkey))}',
         AddrReflectMessage() =>
           'addrReflect addr=${message.ip}:${message.port}',
+        ReconnectMessage() =>
+          'reconnect peer=${_shortHex(_pubkeyToHex(message.peerPubkey))}',
+        AvailableMessage() =>
+          'available peer=${_shortHex(_pubkeyToHex(message.peerPubkey))}',
+        RvListMessage() => 'rvList count=${message.rvPubkeys.length}',
       };
     } catch (e) {
       return 'signaling-decode-failed payload=${signalingPayload.length}B error=$e';

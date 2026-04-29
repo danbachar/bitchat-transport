@@ -2,16 +2,16 @@ import 'dart:typed_data';
 
 /// Signaling message types — identical to the client-side SignalingType.
 ///
-/// Note: friendsSync (0x08) is no longer used in the spec-aligned model.
-/// The server still recognizes the byte value to log a clean rejection,
-/// but it has no corresponding message class.
+/// Wire byte values are stable; gaps reflect deprecated message types
+/// (ADDR_QUERY/ADDR_RESPONSE/PUNCH_REQUEST were removed when the rendezvous
+/// flow switched to RECONNECT/AVAILABLE matching).
 enum SignalingType {
-  addrQuery(0x02),
-  addrResponse(0x03),
-  punchRequest(0x04),
   punchInitiate(0x05),
   punchReady(0x06),
-  addrReflect(0x07);
+  addrReflect(0x07),
+  reconnect(0x08),
+  available(0x09),
+  rvList(0x0a);
 
   final int value;
   const SignalingType(this.value);
@@ -29,47 +29,6 @@ enum SignalingType {
 
 sealed class SignalingMessage {
   SignalingType get type;
-}
-
-class AddrQueryMessage extends SignalingMessage {
-  @override
-  SignalingType get type => SignalingType.addrQuery;
-  final Uint8List targetPubkey;
-  AddrQueryMessage({required this.targetPubkey});
-}
-
-class AddrResponseMessage extends SignalingMessage {
-  @override
-  SignalingType get type => SignalingType.addrResponse;
-  final Uint8List targetPubkey;
-  final List<SignalingAddressCandidate> candidates;
-  String? get ip => candidates.isEmpty ? null : candidates.first.ip;
-  int? get port => candidates.isEmpty ? null : candidates.first.port;
-  bool get found => candidates.isNotEmpty;
-  AddrResponseMessage({
-    required this.targetPubkey,
-    String? ip,
-    int? port,
-    List<SignalingAddressCandidate> candidates = const [],
-  }) : candidates = candidates.isNotEmpty
-            ? candidates
-            : (ip != null && port != null
-                ? [SignalingAddressCandidate(ip: ip, port: port)]
-                : const []);
-}
-
-class SignalingAddressCandidate {
-  final String ip;
-  final int port;
-
-  const SignalingAddressCandidate({required this.ip, required this.port});
-}
-
-class PunchRequestMessage extends SignalingMessage {
-  @override
-  SignalingType get type => SignalingType.punchRequest;
-  final Uint8List targetPubkey;
-  PunchRequestMessage({required this.targetPubkey});
 }
 
 class PunchInitiateMessage extends SignalingMessage {
@@ -97,6 +56,27 @@ class AddrReflectMessage extends SignalingMessage {
   AddrReflectMessage({required this.ip, required this.port});
 }
 
+class ReconnectMessage extends SignalingMessage {
+  @override
+  SignalingType get type => SignalingType.reconnect;
+  final Uint8List peerPubkey;
+  ReconnectMessage({required this.peerPubkey});
+}
+
+class AvailableMessage extends SignalingMessage {
+  @override
+  SignalingType get type => SignalingType.available;
+  final Uint8List peerPubkey;
+  AvailableMessage({required this.peerPubkey});
+}
+
+class RvListMessage extends SignalingMessage {
+  @override
+  SignalingType get type => SignalingType.rvList;
+  final List<Uint8List> rvPubkeys;
+  RvListMessage({required this.rvPubkeys});
+}
+
 // ===== Codec =====
 
 /// Binary encoder/decoder for signaling messages.
@@ -105,12 +85,12 @@ class SignalingCodec {
 
   Uint8List encode(SignalingMessage msg) {
     return switch (msg) {
-      AddrQueryMessage() => _encodeAddrQuery(msg),
-      AddrResponseMessage() => _encodeAddrResponse(msg),
-      PunchRequestMessage() => _encodePunchRequest(msg),
       PunchInitiateMessage() => _encodePunchInitiate(msg),
       PunchReadyMessage() => _encodePunchReady(msg),
       AddrReflectMessage() => _encodeAddrReflect(msg),
+      ReconnectMessage() => _encodeReconnect(msg),
+      AvailableMessage() => _encodeAvailable(msg),
+      RvListMessage() => _encodeRvList(msg),
     };
   }
 
@@ -122,44 +102,16 @@ class SignalingCodec {
     final payload = Uint8List.sublistView(data, 1);
 
     return switch (type) {
-      SignalingType.addrQuery => _decodeAddrQuery(payload),
-      SignalingType.addrResponse => _decodeAddrResponse(payload),
-      SignalingType.punchRequest => _decodePunchRequest(payload),
       SignalingType.punchInitiate => _decodePunchInitiate(payload),
       SignalingType.punchReady => _decodePunchReady(payload),
       SignalingType.addrReflect => _decodeAddrReflect(payload),
+      SignalingType.reconnect => _decodeReconnect(payload),
+      SignalingType.available => _decodeAvailable(payload),
+      SignalingType.rvList => _decodeRvList(payload),
     };
   }
 
   // ===== Encoding =====
-
-  Uint8List _encodeAddrQuery(AddrQueryMessage msg) {
-    final buffer = BytesBuilder();
-    buffer.addByte(SignalingType.addrQuery.value);
-    buffer.add(msg.targetPubkey);
-    return buffer.toBytes();
-  }
-
-  Uint8List _encodeAddrResponse(AddrResponseMessage msg) {
-    final buffer = BytesBuilder();
-    buffer.addByte(SignalingType.addrResponse.value);
-    buffer.add(msg.targetPubkey);
-    _writeUint16(buffer, msg.candidates.length);
-    for (final candidate in msg.candidates) {
-      final candidateIpBytes = Uint8List.fromList(candidate.ip.codeUnits);
-      _writeUint16(buffer, candidateIpBytes.length);
-      buffer.add(candidateIpBytes);
-      _writeUint16(buffer, candidate.port);
-    }
-    return buffer.toBytes();
-  }
-
-  Uint8List _encodePunchRequest(PunchRequestMessage msg) {
-    final buffer = BytesBuilder();
-    buffer.addByte(SignalingType.punchRequest.value);
-    buffer.add(msg.targetPubkey);
-    return buffer.toBytes();
-  }
 
   Uint8List _encodePunchInitiate(PunchInitiateMessage msg) {
     final buffer = BytesBuilder();
@@ -189,57 +141,31 @@ class SignalingCodec {
     return buffer.toBytes();
   }
 
+  Uint8List _encodeReconnect(ReconnectMessage msg) {
+    final buffer = BytesBuilder();
+    buffer.addByte(SignalingType.reconnect.value);
+    buffer.add(msg.peerPubkey);
+    return buffer.toBytes();
+  }
+
+  Uint8List _encodeAvailable(AvailableMessage msg) {
+    final buffer = BytesBuilder();
+    buffer.addByte(SignalingType.available.value);
+    buffer.add(msg.peerPubkey);
+    return buffer.toBytes();
+  }
+
+  Uint8List _encodeRvList(RvListMessage msg) {
+    final buffer = BytesBuilder();
+    buffer.addByte(SignalingType.rvList.value);
+    _writeUint16(buffer, msg.rvPubkeys.length);
+    for (final pubkey in msg.rvPubkeys) {
+      buffer.add(pubkey);
+    }
+    return buffer.toBytes();
+  }
+
   // ===== Decoding =====
-
-  AddrQueryMessage _decodeAddrQuery(Uint8List data) {
-    if (data.length < 32) {
-      throw const FormatException('AddrQuery payload too short');
-    }
-    return AddrQueryMessage(
-        targetPubkey: Uint8List.fromList(data.sublist(0, 32)));
-  }
-
-  AddrResponseMessage _decodeAddrResponse(Uint8List data) {
-    if (data.length < 34) {
-      throw const FormatException('AddrResponse payload too short');
-    }
-    final targetPubkey = Uint8List.fromList(data.sublist(0, 32));
-    var offset = 32;
-    final candidateCount = _readUint16(data, offset);
-    offset += 2;
-
-    final candidates = <SignalingAddressCandidate>[];
-    for (var i = 0; i < candidateCount; i++) {
-      if (offset + 2 > data.length) {
-        throw const FormatException('AddrResponse candidate length missing');
-      }
-      final candidateIpLen = _readUint16(data, offset);
-      offset += 2;
-      if (offset + candidateIpLen + 2 > data.length) {
-        throw const FormatException('AddrResponse candidate truncated');
-      }
-      final candidateIp =
-          String.fromCharCodes(data.sublist(offset, offset + candidateIpLen));
-      offset += candidateIpLen;
-      final candidatePort = _readUint16(data, offset);
-      offset += 2;
-      candidates.add(
-        SignalingAddressCandidate(ip: candidateIp, port: candidatePort),
-      );
-    }
-    return AddrResponseMessage(
-      targetPubkey: targetPubkey,
-      candidates: candidates,
-    );
-  }
-
-  PunchRequestMessage _decodePunchRequest(Uint8List data) {
-    if (data.length < 32) {
-      throw const FormatException('PunchRequest payload too short');
-    }
-    return PunchRequestMessage(
-        targetPubkey: Uint8List.fromList(data.sublist(0, 32)));
-  }
 
   PunchInitiateMessage _decodePunchInitiate(Uint8List data) {
     if (data.length < 36) {
@@ -271,6 +197,39 @@ class SignalingCodec {
     offset += ipLen;
     final port = _readUint16(data, offset);
     return AddrReflectMessage(ip: ip, port: port);
+  }
+
+  ReconnectMessage _decodeReconnect(Uint8List data) {
+    if (data.length < 32) {
+      throw const FormatException('Reconnect payload too short');
+    }
+    return ReconnectMessage(
+        peerPubkey: Uint8List.fromList(data.sublist(0, 32)));
+  }
+
+  AvailableMessage _decodeAvailable(Uint8List data) {
+    if (data.length < 32) {
+      throw const FormatException('Available payload too short');
+    }
+    return AvailableMessage(
+        peerPubkey: Uint8List.fromList(data.sublist(0, 32)));
+  }
+
+  RvListMessage _decodeRvList(Uint8List data) {
+    if (data.length < 2) {
+      throw const FormatException('RvList payload too short');
+    }
+    final count = _readUint16(data, 0);
+    final expected = 2 + count * 32;
+    if (data.length < expected) {
+      throw const FormatException('RvList payload truncated');
+    }
+    final pubkeys = <Uint8List>[];
+    for (var i = 0; i < count; i++) {
+      final start = 2 + i * 32;
+      pubkeys.add(Uint8List.fromList(data.sublist(start, start + 32)));
+    }
+    return RvListMessage(rvPubkeys: pubkeys);
   }
 
   // ===== Helpers =====
