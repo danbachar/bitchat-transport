@@ -97,6 +97,31 @@ AddressInfo? parseIpv6AddressString(String addr) {
 bool isIpv6AddressString(String addrString) =>
     parseIpv6AddressString(addrString) != null;
 
+/// Normalize a collection of address strings, dropping malformed entries
+/// and preserving first-seen order.
+Set<String> normalizeAddressStrings(Iterable<String?> addresses) {
+  final normalized = <String>{};
+  for (final address in addresses) {
+    if (address == null || address.isEmpty) continue;
+    final parsed = parseAddressString(address);
+    if (parsed == null) continue;
+    normalized.add(parsed.toAddressString());
+  }
+  return normalized;
+}
+
+/// Parse a collection of address strings, dropping malformed entries.
+Set<AddressInfo> parseAddressCandidates(Iterable<String> addresses) {
+  final parsed = <AddressInfo>{};
+  for (final address in addresses) {
+    final candidate = parseAddressString(address);
+    if (candidate != null) {
+      parsed.add(candidate);
+    }
+  }
+  return parsed;
+}
+
 /// Check if an IP address is a globally routable IPv4 address.
 ///
 /// Excludes:

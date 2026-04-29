@@ -50,3 +50,15 @@ class NetworkConnectionTypeUpdatedAction extends TransportAction {
 
   NetworkConnectionTypeUpdatedAction(this.connectionType);
 }
+
+/// Observed unsolicited inbound traffic at our [TransportsState.publicAddress]
+/// — i.e. a peer successfully connected to us via UDP without a prior
+/// hole-punch coordination. This is the proof that promotes us to
+/// "well-connected".
+class UnsolicitedInboundObservedAction extends TransportAction {
+  /// When the inbound was observed (default: now).
+  final DateTime observedAt;
+
+  UnsolicitedInboundObservedAction({DateTime? observedAt})
+      : observedAt = observedAt ?? DateTime.now();
+}

@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import '../store/app_state.dart';
 import '../store/signaling_actions.dart';
 import '../transport/address_utils.dart';
+import '../transport/connection_service.dart';
 import 'address_table.dart';
 import 'signaling_codec.dart';
 
@@ -57,6 +58,7 @@ class _PendingAddressQuery {
 class SignalingService {
   final Store<AppState> store;
   final SignalingCodec codec;
+  final UdpConnectionService connectionService;
 
   /// Address table — only meaningful when we are well-connected.
   /// Always allocated so we don't need null checks; just empty when not used.
@@ -79,13 +81,13 @@ class SignalingService {
   /// The coordinator wraps the payload in a BitchatPacket(type: signaling),
   /// signs it, and sends it via the best available transport.
   Future<bool> Function(Uint8List recipientPubkey, Uint8List signalingPayload)?
-  sendSignaling;
+      sendSignaling;
 
   /// Send a signaling payload only over an already-live direct control path.
   /// Used for peer-to-peer punch coordination where falling back to UDP would
   /// re-enter the very path we are trying to establish.
   Future<bool> Function(Uint8List recipientPubkey, Uint8List signalingPayload)?
-  sendDirectSignaling;
+      sendDirectSignaling;
 
   /// Fired when a well-connected friend or direct peer tells us to start
   /// hole-punching. [readyRecipientPubkey] is where we should send PUNCH_READY
@@ -95,8 +97,7 @@ class SignalingService {
     String ip,
     int port,
     Uint8List readyRecipientPubkey,
-  )?
-  onPunchInitiate;
+  )? onPunchInitiate;
 
   /// Fired when a hole-punch completes and we should connect to the peer.
   /// (Triggered by PUNCH_READY from the other side via the friend.)
@@ -106,7 +107,11 @@ class SignalingService {
   /// The coordinator should update its public address with this value.
   void Function(String ip, int port)? onAddrReflected;
 
-  SignalingService({required this.store, this.codec = const SignalingCodec()}) {
+  SignalingService({
+    required this.store,
+    this.codec = const SignalingCodec(),
+    this.connectionService = const UdpConnectionService(),
+  }) {
     // Clean up stale address table entries every 60 seconds.
     _staleCleanupTimer = Timer.periodic(
       const Duration(seconds: 60),
@@ -289,8 +294,7 @@ class SignalingService {
       return;
     }
 
-    final senderLabel =
-        senderPeer?.displayName ??
+    final senderLabel = senderPeer?.displayName ??
         'facilitator ${senderHex.substring(0, 8)}...';
     debugPrint('Received signaling from $senderLabel: $msg');
 
@@ -326,53 +330,45 @@ class SignalingService {
   void processAnnounceFromFriend(
     Uint8List senderPubkey, {
     String? claimedAddress,
+    Iterable<String> claimedAddresses = const [],
     String? observedIp,
     int? observedPort,
   }) {
     final senderHex = _pubkeyToHex(senderPubkey);
 
-    // Parse claimed address from ANNOUNCE payload
-    String? claimedIp;
-    int? claimedPort;
-    if (claimedAddress != null && claimedAddress.isNotEmpty) {
-      // Parse ip:port or [ip]:port format
-      final parts = _parseAddress(claimedAddress);
-      if (parts != null) {
-        claimedIp = parts.ip;
-        claimedPort = parts.port;
-      }
+    final normalizedClaimed = normalizeAddressStrings([
+      claimedAddress,
+      ...claimedAddresses,
+    ]);
+
+    for (final address in normalizedClaimed) {
+      final parts = _parseAddress(address);
+      if (parts == null) continue;
+      addressTable.register(senderHex, parts.ip, parts.port);
     }
 
-    // Use the observed address (from the UDX connection) when available.
-    // This is the real NAT-translated address — the claimed address may
-    // have an incorrect port (cone NAT port assumption).
-    final effectiveIp = observedIp ?? claimedIp;
-    final effectivePort = observedPort ?? claimedPort;
-
-    if (effectiveIp == null || effectivePort == null) return;
-
-    if (observedIp != null &&
-        observedPort != null &&
-        claimedIp != null &&
-        claimedPort != null) {
-      if (claimedIp != observedIp || claimedPort != observedPort) {
+    if (observedIp != null && observedPort != null) {
+      final observedAddress = AddressInfo(
+        InternetAddress(observedIp),
+        observedPort,
+      ).toAddressString();
+      final hasClaimedObserved = normalizedClaimed.contains(observedAddress);
+      if (normalizedClaimed.isNotEmpty && !hasClaimedObserved) {
         debugPrint(
           'Address mismatch for ${senderHex.substring(0, 8)}...: '
-          'claimed $claimedIp:$claimedPort, observed $observedIp:$observedPort — using observed',
+          'claimed $normalizedClaimed, observed $observedIp:$observedPort — adding observed',
         );
       }
+      addressTable.register(senderHex, observedIp, observedPort);
     }
 
-    if (InternetAddress.tryParse(effectiveIp) == null) {
+    final registered = addressTable.lookupAll(senderHex);
+    if (registered.isNotEmpty) {
       debugPrint(
-        'Ignoring malformed friend address for '
-        '${senderHex.substring(0, 8)}...: $effectiveIp:$effectivePort',
+        'Address registered via ANNOUNCE: '
+        '${senderHex.substring(0, 8)}... → '
+        '${registered.map((entry) => "${entry.ip}:${entry.port}").join(", ")}',
       );
-    } else {
-      debugPrint(
-        'Address registered via ANNOUNCE: ${senderHex.substring(0, 8)}... → $effectiveIp:$effectivePort',
-      );
-      addressTable.register(senderHex, effectiveIp, effectivePort);
     }
 
     // Reflect the observed address back to the sender so they can learn
@@ -414,20 +410,22 @@ class SignalingService {
   /// Only responds if we're well-connected and have the entry.
   void _handleAddrQuery(Uint8List senderPubkey, AddrQueryMessage msg) {
     final targetHex = _pubkeyToHex(msg.targetPubkey);
-    final entry = _lookupReachableFriendAddress(targetHex);
+    final entries = _lookupReachableFriendAddresses(targetHex);
 
     // Always respond — even "not found" — so the querier doesn't hang.
     final response = AddrResponseMessage(
       targetPubkey: msg.targetPubkey,
-      ip: entry?.ip,
-      port: entry?.port,
+      candidates: [
+        for (final entry in entries)
+          SignalingAddressCandidate(ip: entry.ip, port: entry.port),
+      ],
     );
     final payload = codec.encode(response);
     sendSignaling?.call(senderPubkey, payload);
 
     debugPrint(
       'Responded to addr query for ${targetHex.substring(0, 8)}...: '
-      '${entry != null ? "${entry.ip}:${entry.port}" : "not found"}',
+      '${entries.isNotEmpty ? entries.map((entry) => "${entry.ip}:${entry.port}").join(", ") : "not found"}',
     );
   }
 
@@ -451,26 +449,42 @@ class SignalingService {
     query.pendingResponderHexes.remove(senderHex);
 
     if (msg.found) {
-      if (InternetAddress.tryParse(msg.ip!) == null) {
+      final validEntries = <AddressEntry>[];
+      for (final candidate in msg.candidates) {
+        if (InternetAddress.tryParse(candidate.ip) == null) {
+          debugPrint(
+            'Ignoring malformed addr response for '
+            '${targetHex.substring(0, 8)}...: '
+            '${candidate.ip}:${candidate.port}. The IP could not be parsed.',
+          );
+          continue;
+        }
+        validEntries.add(
+          AddressEntry(
+            ip: candidate.ip,
+            port: candidate.port,
+            registeredAt: DateTime.now(),
+          ),
+        );
+      }
+
+      if (validEntries.isEmpty) {
         debugPrint(
           'Ignoring malformed addr response for '
-          '${targetHex.substring(0, 8)}...: ${msg.ip}:${msg.port}. '
-          'The IP could not be parsed.',
+          '${targetHex.substring(0, 8)}...: no usable candidates.',
         );
       } else {
-        final entry = AddressEntry(
-          ip: msg.ip!,
-          port: msg.port!,
-          registeredAt: DateTime.now(),
-        );
-        query.positiveResponses.add(
-          AddressQueryCandidate(responderPubkey: senderPubkey, entry: entry),
-        );
+        for (final entry in validEntries) {
+          query.positiveResponses.add(
+            AddressQueryCandidate(responderPubkey: senderPubkey, entry: entry),
+          );
+        }
         if (!query.firstMatch.isCompleted) {
           debugPrint(
-            'Got address for ${targetHex.substring(0, 8)}...: ${msg.ip}:${msg.port}',
+            'Got address for ${targetHex.substring(0, 8)}...: '
+            '${validEntries.map((entry) => "${entry.ip}:${entry.port}").join(", ")}',
           );
-          query.firstMatch.complete(entry);
+          query.firstMatch.complete(validEntries.first);
         }
       }
     } else {
@@ -506,22 +520,47 @@ class SignalingService {
       return;
     }
 
-    // Both must have registered addresses.
-    final requesterAddr = _lookupReachableFriendAddress(requesterHex);
-    final targetAddr = _lookupReachableFriendAddress(targetHex);
+    // Both must have registered compatible address candidates.
+    final requesterAddresses = _lookupReachableFriendAddresses(requesterHex);
+    final targetAddresses = _lookupReachableFriendAddresses(targetHex);
 
-    if (requesterAddr == null) {
+    if (requesterAddresses.isEmpty) {
       debugPrint(
         'Punch request from ${requesterHex.substring(0, 8)}... but they have no registered address',
       );
       return;
     }
-    if (targetAddr == null) {
+    if (targetAddresses.isEmpty) {
       debugPrint(
         'Punch request for ${targetHex.substring(0, 8)}... but they have no registered address',
       );
       return;
     }
+
+    final pair = connectionService.selectBestPair(
+      localCandidates: requesterAddresses
+          .map((entry) => AddressInfo(InternetAddress(entry.ip), entry.port)),
+      remoteCandidates: targetAddresses
+          .map((entry) => AddressInfo(InternetAddress(entry.ip), entry.port)),
+    );
+    if (pair == null) {
+      debugPrint(
+        'Punch request for ${targetHex.substring(0, 8)}... has no compatible '
+        'candidate pair with ${requesterHex.substring(0, 8)}...',
+      );
+      return;
+    }
+
+    final requesterAddr = AddressEntry(
+      ip: pair.local.ip.address,
+      port: pair.local.port,
+      registeredAt: DateTime.now(),
+    );
+    final targetAddr = AddressEntry(
+      ip: pair.remote.ip.address,
+      port: pair.remote.port,
+      registeredAt: DateTime.now(),
+    );
 
     debugPrint(
       'Coordinating hole-punch: '
@@ -620,44 +659,56 @@ class SignalingService {
   static String _pubkeyToHex(Uint8List pubkey) =>
       pubkey.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
-  /// Look up a friend's address, preferring the signaling address table.
+  /// Look up a friend's addresses, preferring the signaling address table.
   ///
   /// The address table is intentionally volatile and can drift during BLE/UDP
   /// handoffs or after app restarts. When it misses, fall back to the trusted
   /// peer state in Redux so signaling can still answer queries and coordinate
   /// punches using the same udpAddress the rest of the app already relies on.
-  AddressEntry? _lookupReachableFriendAddress(String pubkeyHex) {
-    final tableEntry = addressTable.lookup(pubkeyHex);
-    if (tableEntry != null) {
-      if (InternetAddress.tryParse(tableEntry.ip) == null) {
+  List<AddressEntry> _lookupReachableFriendAddresses(String pubkeyHex) {
+    final tableEntries = addressTable.lookupAll(pubkeyHex);
+    final validTableEntries = <AddressEntry>[];
+    for (final entry in tableEntries) {
+      if (InternetAddress.tryParse(entry.ip) == null) {
         debugPrint(
           'Ignoring malformed address table entry for '
-          '${pubkeyHex.substring(0, 8)}...: ${tableEntry.ip}:${tableEntry.port}',
+          '${pubkeyHex.substring(0, 8)}...: ${entry.ip}:${entry.port}',
         );
-        return null;
+        continue;
       }
-      return tableEntry;
+      validTableEntries.add(entry);
+    }
+    if (validTableEntries.isNotEmpty) {
+      return validTableEntries;
     }
 
     final peer = store.state.peers.getPeerByPubkeyHex(pubkeyHex);
-    if (peer == null || !peer.isFriend) return null;
+    if (peer == null || !peer.isFriend) return const [];
 
-    final udpAddress = peer.udpAddress;
-    if (udpAddress == null || udpAddress.isEmpty) return null;
+    final candidates = peer.allUdpAddressCandidates;
+    if (candidates.isEmpty) return const [];
 
-    final parsed = parseAddressString(udpAddress);
-    if (parsed == null) return null;
+    final entries = <AddressEntry>[];
+    for (final candidate in candidates) {
+      final parsed = parseAddressString(candidate);
+      if (parsed == null) continue;
+      entries.add(
+        AddressEntry(
+          ip: parsed.ip.address,
+          port: parsed.port,
+          registeredAt: DateTime.now(),
+        ),
+      );
+    }
+    if (entries.isEmpty) return const [];
 
     debugPrint(
       'Address table miss for ${pubkeyHex.substring(0, 8)}...; '
-      'falling back to peer state ${parsed.toAddressString()}',
+      'falling back to peer state '
+      '${entries.map((entry) => "${entry.ip}:${entry.port}").join(", ")}',
     );
 
-    return AddressEntry(
-      ip: parsed.ip.address,
-      port: parsed.port,
-      registeredAt: DateTime.now(),
-    );
+    return entries;
   }
 
   _PendingAddressQuery? _ensurePendingAddressQuery(

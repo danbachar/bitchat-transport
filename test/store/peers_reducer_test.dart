@@ -213,7 +213,9 @@ void main() {
   // =========================================================================
 
   group('BleDeviceConnectionFailedAction', () {
-    test('sets isConnecting=false, isConnected=false, sets lastError and backoff', () {
+    test(
+        'sets isConnecting=false, isConnected=false, sets lastError and backoff',
+        () {
       final now = DateTime.now();
       final initial = PeersState(
         discoveredBlePeers: {
@@ -550,37 +552,43 @@ void main() {
       expect(peer.bleDeviceId, 'ble-peripheral-1'); // fallback to peripheral
     });
 
-    test('preserves both BLE IDs on sequential ANNOUNCEs from different roles', () {
+    test('preserves both BLE IDs on sequential ANNOUNCEs from different roles',
+        () {
       final pubkey = _testPubkey(1);
       final hex = _pubkeyHex(pubkey);
 
       // First: central ANNOUNCE
-      var state = peersReducer(PeersState.initial, PeerAnnounceReceivedAction(
-        publicKey: pubkey,
-        nickname: 'Alice',
-        protocolVersion: 1,
-        rssi: -55,
-        transport: PeerTransport.bleDirect,
-        bleCentralDeviceId: 'central-id',
-      ));
+      var state = peersReducer(
+          PeersState.initial,
+          PeerAnnounceReceivedAction(
+            publicKey: pubkey,
+            nickname: 'Alice',
+            protocolVersion: 1,
+            rssi: -55,
+            transport: PeerTransport.bleDirect,
+            bleCentralDeviceId: 'central-id',
+          ));
 
       expect(state.peers[hex]!.bleCentralDeviceId, 'central-id');
       expect(state.peers[hex]!.blePeripheralDeviceId, isNull);
 
       // Second: peripheral ANNOUNCE — should NOT overwrite central
-      state = peersReducer(state, PeerAnnounceReceivedAction(
-        publicKey: pubkey,
-        nickname: 'Alice',
-        protocolVersion: 1,
-        rssi: -50,
-        transport: PeerTransport.bleDirect,
-        blePeripheralDeviceId: 'peripheral-id',
-      ));
+      state = peersReducer(
+          state,
+          PeerAnnounceReceivedAction(
+            publicKey: pubkey,
+            nickname: 'Alice',
+            protocolVersion: 1,
+            rssi: -50,
+            transport: PeerTransport.bleDirect,
+            blePeripheralDeviceId: 'peripheral-id',
+          ));
 
       final peer = state.peers[hex]!;
       expect(peer.bleCentralDeviceId, 'central-id');
       expect(peer.blePeripheralDeviceId, 'peripheral-id');
-      expect(peer.bleDeviceId, 'central-id'); // convenience getter prefers central
+      expect(
+          peer.bleDeviceId, 'central-id'); // convenience getter prefers central
     });
 
     test('updates existing peer', () {
@@ -818,7 +826,8 @@ void main() {
           ),
         },
       );
-      final action = PeerBleDisconnectedAction(pubkey, role: BleRole.peripheral);
+      final action =
+          PeerBleDisconnectedAction(pubkey, role: BleRole.peripheral);
 
       final result = peersReducer(initial, action);
 
@@ -850,7 +859,7 @@ void main() {
       expect(peer.bleCentralDeviceId, isNull);
     });
 
-    test('keeps connected if has UDP address', () {
+    test('keeps connected if has live UDP connection', () {
       final pubkey = _testPubkey(1);
       final hex = _pubkeyHex(pubkey);
       final initial = PeersState(
@@ -861,6 +870,7 @@ void main() {
             connectionState: PeerConnectionState.connected,
             bleCentralDeviceId: 'central-1',
             udpAddress: '[2001:db8::1]:4001',
+            hasLiveUdpConnection: true,
           ),
         },
       );
@@ -873,6 +883,7 @@ void main() {
       expect(peer.bleCentralDeviceId, isNull);
       expect(peer.blePeripheralDeviceId, isNull);
       expect(peer.udpAddress, '[2001:db8::1]:4001');
+      expect(peer.hasLiveUdpConnection, isTrue);
     });
   });
 
@@ -1130,14 +1141,11 @@ void main() {
 
       final result = peersReducer(initial, action);
 
-      // When address is empty, copyWith with null keeps old value for
-      // udpAddress. The reducer passes: udpAddress: action.address.isEmpty ? null : action.address
-      // But copyWith(udpAddress: null) preserves old value due to ?? semantics.
-      // This documents the actual behavior of the reducer.
+      // The reducer constructs PeerState directly (not via copyWith) so it
+      // can actually set nullable fields to null. An empty address clears
+      // the stored udpAddress.
       final peer = result.peers[hex]!;
-      // The reducer uses copyWith which can't clear nullable fields to null.
-      // So the old udpAddress is preserved. This is a known copyWith limitation.
-      expect(peer.udpAddress, '[2001:db8::1]:4001');
+      expect(peer.udpAddress, isNull);
     });
 
     test('is a no-op for unknown peer', () {
@@ -1236,7 +1244,8 @@ void main() {
       expect(result.peers, isEmpty);
     });
 
-    test('clears isFriend and UDP fields but keeps peer if has BLE central', () {
+    test('clears isFriend and UDP fields but keeps peer if has BLE central',
+        () {
       final pubkey = _testPubkey(1);
       final hex = _pubkeyHex(pubkey);
       final initial = PeersState(
@@ -1387,6 +1396,35 @@ void main() {
       expect(peer.blePeripheralDeviceId, isNull);
       // But peer stays connected via UDP
       expect(peer.connectionState, PeerConnectionState.connected);
+      expect(peer.udpAddress, '[2001:db8::1]:4001');
+    });
+
+    test('clears BLE IDs with no lastBleSeen timestamp', () {
+      final pubkey = _testPubkey(1);
+      final hex = _pubkeyHex(pubkey);
+      final now = DateTime.now();
+      final initial = PeersState(
+        peers: {
+          hex: PeerState(
+            publicKey: pubkey,
+            nickname: 'Alice',
+            connectionState: PeerConnectionState.connected,
+            lastSeen: now,
+            bleCentralDeviceId: 'central-from-udp-announce',
+            udpAddress: '[2001:db8::1]:4001',
+            hasLiveUdpConnection: true,
+          ),
+        },
+      );
+      final action = StalePeersRemovedAction(const Duration(minutes: 2));
+
+      final result = peersReducer(initial, action);
+
+      final peer = result.peers[hex]!;
+      expect(peer.bleCentralDeviceId, isNull);
+      expect(peer.blePeripheralDeviceId, isNull);
+      expect(peer.connectionState, PeerConnectionState.connected);
+      expect(peer.hasLiveUdpConnection, isTrue);
       expect(peer.udpAddress, '[2001:db8::1]:4001');
     });
 

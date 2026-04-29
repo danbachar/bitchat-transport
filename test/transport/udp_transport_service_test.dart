@@ -55,6 +55,7 @@ void main() {
           identity: identity,
           store: store,
           protocolHandler: protocolHandler,
+          connectHandshakeTimeout: const Duration(milliseconds: 100),
         );
         expect(service.state, equals(TransportState.uninitialized));
         expect(service.rawSocket, isNull);
@@ -67,6 +68,7 @@ void main() {
           identity: identity,
           store: store,
           protocolHandler: protocolHandler,
+          connectHandshakeTimeout: const Duration(milliseconds: 100),
         );
 
         final result = await service.initialize();
@@ -82,9 +84,7 @@ void main() {
         await service.dispose();
       });
 
-      test('initialize rejects IPv4 addresses even on loopback', () async {
-        // The transport is IPv6-only. IPv4 addresses must never be dialable,
-        // regardless of whether they are loopback.
+      test('initialize supports IPv4 and IPv6 when sockets bind', () async {
         final service = UdpTransportService(
           identity: identity,
           store: store,
@@ -92,8 +92,9 @@ void main() {
         );
         await service.initialize();
 
-        expect(service.activeAddressType, equals(InternetAddressType.IPv6));
-        expect(service.canDialAddress(InternetAddress.loopbackIPv4), isFalse);
+        expect(service.activeAddressTypes, contains(InternetAddressType.IPv6));
+        expect(service.activeAddressTypes, contains(InternetAddressType.IPv4));
+        expect(service.canDialAddress(InternetAddress.loopbackIPv4), isTrue);
         expect(service.canDialAddress(InternetAddress.loopbackIPv6), isTrue);
 
         await service.dispose();
@@ -266,13 +267,13 @@ void main() {
         await service.dispose();
       });
 
-      test('connectToPeer returns false for IPv4 addresses', () async {
-        // The transport is IPv6-only. An IPv4 target means the peer is
-        // unreachable from our perspective, regardless of the target.
+      test('connectToPeer returns false for unreachable IPv4 endpoint',
+          () async {
         final service = UdpTransportService(
           identity: identity,
           store: store,
           protocolHandler: protocolHandler,
+          connectHandshakeTimeout: const Duration(milliseconds: 100),
         );
         await service.initialize();
         service.startMultiplexer();
@@ -287,7 +288,7 @@ void main() {
         expect(service.connectedCount, equals(0));
         expect(
           service.lastConnectFailureKind,
-          equals(UdpConnectFailureKind.networkUnreachable),
+          isNotNull,
         );
 
         await service.dispose();
@@ -417,6 +418,60 @@ void main() {
         expect(received, equals(testData));
 
         // Cleanup
+        await alice.dispose();
+        await bob.dispose();
+      }, timeout: const Timeout(Duration(seconds: 10)));
+
+      test('two services can connect and exchange data over IPv4 loopback',
+          () async {
+        final aliceIdentity = await _createTestIdentity('Alice');
+        final bobIdentity = await _createTestIdentity('Bob');
+        final aliceStore = _createTestStore();
+        final bobStore = _createTestStore();
+        final aliceProto = ProtocolHandler(identity: aliceIdentity);
+        final bobProto = ProtocolHandler(identity: bobIdentity);
+
+        final alice = UdpTransportService(
+          identity: aliceIdentity,
+          store: aliceStore,
+          protocolHandler: aliceProto,
+        );
+        final bob = UdpTransportService(
+          identity: bobIdentity,
+          store: bobStore,
+          protocolHandler: bobProto,
+        );
+
+        await alice.initialize();
+        await bob.initialize();
+        alice.startMultiplexer();
+        bob.startMultiplexer();
+
+        final bobReceived = Completer<Uint8List>();
+        bob.onUdpDataReceived = (peerId, data) {
+          if (!bobReceived.isCompleted) {
+            bobReceived.complete(data);
+          }
+        };
+
+        final bobPubkeyHex = bobIdentity.publicKey
+            .map((b) => b.toRadixString(16).padLeft(2, '0'))
+            .join();
+
+        final connected = await alice.connectToPeer(
+          bobPubkeyHex,
+          InternetAddress.loopbackIPv4,
+          bob.localPortForAddressType(InternetAddressType.IPv4)!,
+        );
+
+        expect(connected, isTrue);
+        final testData = Uint8List.fromList([4, 3, 2, 1]);
+        expect(await alice.sendToPeer(bobPubkeyHex, testData), isTrue);
+        expect(
+          await bobReceived.future.timeout(const Duration(seconds: 5)),
+          equals(testData),
+        );
+
         await alice.dispose();
         await bob.dispose();
       }, timeout: const Timeout(Duration(seconds: 10)));

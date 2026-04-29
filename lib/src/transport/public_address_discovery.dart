@@ -8,45 +8,54 @@ import 'address_utils.dart';
 /// Discovers our public-facing UDP address and combines it with the local
 /// UDP port to form the address we advertise to friends.
 ///
-/// The transport is IPv6-only: if the device has no public IPv6, we treat
-/// it as "no Internet" for our purposes. The discovered address is included
-/// in ANNOUNCE messages so peers and rendezvous servers know where to reach
-/// us.
+/// Discovers public IPv6 and IPv4 candidates. The discovered addresses are
+/// included in ANNOUNCE messages so peers and rendezvous servers know where
+/// to reach us.
 class PublicAddressDiscovery {
-  /// Cached public IPv6 (refreshed periodically).
-  InternetAddress? _cachedPublicIp;
-
-  /// When the cache was last refreshed.
-  DateTime? _cacheTime;
+  final Map<InternetAddressType, InternetAddress> _cachedPublicIps = {};
+  final Map<InternetAddressType, DateTime> _cacheTimes = {};
 
   /// Cache duration (public IP doesn't change often).
   static const Duration cacheDuration = Duration(minutes: 5);
 
-  /// The best public IPv6 we know of — also exposed for UI purposes on
-  /// devices that can't actually use UDP to the open Internet.
-  InternetAddress? get bestPublicIp => _cachedPublicIp;
+  /// The best public IP we know of, preferring IPv6 for display.
+  InternetAddress? get bestPublicIp =>
+      _cachedPublicIps[InternetAddressType.IPv6] ??
+      _cachedPublicIps[InternetAddressType.IPv4];
 
-  /// Discover our public IPv6 address.
+  /// Discover our public address for [type].
   ///
-  /// Returns null if the device has no IPv6 route at all — IPv4 is
-  /// intentionally not queried. Result is cached for [cacheDuration] to
-  /// avoid excessive lookups.
-  Future<InternetAddress?> discoverPublicIp() async {
-    if (_cachedPublicIp != null &&
-        _cacheTime != null &&
-        DateTime.now().difference(_cacheTime!) < cacheDuration) {
-      return _cachedPublicIp;
+  /// Result is cached for [cacheDuration] to avoid excessive lookups.
+  Future<InternetAddress?> discoverPublicIp({
+    InternetAddressType type = InternetAddressType.IPv6,
+  }) async {
+    final cached = _cachedPublicIps[type];
+    final cacheTime = _cacheTimes[type];
+    if (cached != null &&
+        cacheTime != null &&
+        DateTime.now().difference(cacheTime) < cacheDuration) {
+      return cached;
     }
 
-    final discovered = await _fetchPublicIp('https://ipv6.seeip.org');
-    if (discovered == null || discovered.type != InternetAddressType.IPv6) {
-      debugPrint('No public IPv6 address available for UDP transport');
+    final url = type == InternetAddressType.IPv6
+        ? 'https://ipv6.seeip.org'
+        : 'https://ipv4.seeip.org';
+    final discovered = await _fetchPublicIp(url);
+    if (discovered == null || discovered.type != type) {
+      debugPrint(
+        'No public ${type == InternetAddressType.IPv6 ? "IPv6" : "IPv4"} '
+        'address available for UDP transport',
+      );
       return null;
     }
 
-    _cachedPublicIp = discovered;
-    _cacheTime = DateTime.now();
-    debugPrint('Discovered public IPv6: ${discovered.address}');
+    _cachedPublicIps[type] = discovered;
+    _cacheTimes[type] = DateTime.now();
+    debugPrint(
+      'Discovered public '
+      '${type == InternetAddressType.IPv6 ? "IPv6" : "IPv4"}: '
+      '${discovered.address}',
+    );
     return discovered;
   }
 
@@ -82,11 +91,14 @@ class PublicAddressDiscovery {
     }
   }
 
-  /// Get our public address string `[ipv6]:port`.
+  /// Get our public address string for [type].
   ///
-  /// Returns null if no public IPv6 is available.
-  Future<String?> getPublicAddress(int localPort) async {
-    final ip = await discoverPublicIp();
+  /// Returns null if no public address is available for the family.
+  Future<String?> getPublicAddress(
+    int localPort, {
+    InternetAddressType type = InternetAddressType.IPv6,
+  }) async {
+    final ip = await discoverPublicIp(type: type);
     if (ip == null) return null;
     return AddressInfo(ip, localPort).toAddressString();
   }
@@ -122,7 +134,7 @@ class PublicAddressDiscovery {
 
   /// Invalidate the cached public IP (e.g. on network change).
   void invalidateCache() {
-    _cachedPublicIp = null;
-    _cacheTime = null;
+    _cachedPublicIps.clear();
+    _cacheTimes.clear();
   }
 }

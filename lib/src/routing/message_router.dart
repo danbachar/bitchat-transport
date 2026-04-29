@@ -166,32 +166,30 @@ class MessageRouter {
 
     int effectiveRssi = rssi;
 
-    // Resolve bleDeviceId from discovered BLE peers.
-    // Works for ALL transports: if the peer is nearby via BLE, we find their
-    // bleDeviceId by matching their service UUID (derived from pubkey).
-    // If the peer is NOT nearby, bleDeviceId stays null — correct behavior.
-    String? resolvedBleDeviceId = bleDeviceId;
-    BleRole? resolvedBleRole = bleRole;
+    // Resolve BLE metadata only for packets that actually arrived over BLE.
+    // UDP ANNOUNCEs can coincide with stale scan results; treating those as a
+    // live BLE path makes UDP-only friends appear in the Nearby/Connected list.
+    final isBleAnnounce = transport == PeerTransport.bleDirect;
+    String? resolvedBleDeviceId = isBleAnnounce ? bleDeviceId : null;
+    BleRole? resolvedBleRole = isBleAnnounce ? bleRole : null;
     DiscoveredPeerState? discoveredPeer;
-    if (bleDeviceId != null) {
+    if (isBleAnnounce && bleDeviceId != null) {
       discoveredPeer = _peersState.getDiscoveredBlePeer(bleDeviceId);
     }
-    if (discoveredPeer == null) {
+    if (isBleAnnounce && discoveredPeer == null) {
       final theirServiceUuid = BitchatIdentity.deriveServiceUuid(pubkey);
       discoveredPeer =
           _peersState.findDiscoveredBlePeerByServiceUuid(theirServiceUuid);
       if (discoveredPeer != null && bleDeviceId == null) {
         // Only use scan-discovered device ID when no transport-provided ID exists.
-        // This handles non-BLE transports (e.g., UDP) where the peer is also
-        // nearby via BLE. When bleDeviceId IS provided (BLE transport), we keep it
-        // because Android MAC randomization means the scan-discovered MAC may differ
-        // from the actual connected MAC.
+        // When bleDeviceId IS provided, keep it because Android MAC randomization
+        // means the scan-discovered MAC may differ from the actual connected MAC.
         resolvedBleDeviceId = discoveredPeer.transportId;
         // If we found via scan, that means our central discovered them
         resolvedBleRole ??= BleRole.central;
       }
     }
-    if (discoveredPeer != null) {
+    if (isBleAnnounce && discoveredPeer != null) {
       effectiveRssi = discoveredPeer.rssi;
     }
 
@@ -203,6 +201,11 @@ class MessageRouter {
     // and clear their well-connected status.
     final udpAddress = _normalizeUdpAddress(data.udpAddress);
     final linkLocalAddress = _normalizeLinkLocalAddress(data.linkLocalAddress);
+    final udpAddressCandidates = _normalizeUdpAddressCandidates([
+      ...data.addressCandidates,
+      udpAddress,
+      linkLocalAddress,
+    ]);
 
     // Set the correct BLE device ID field based on role
     String? centralId;
@@ -225,6 +228,7 @@ class MessageRouter {
       blePeripheralDeviceId: peripheralId,
       udpAddress: udpAddress,
       linkLocalAddress: linkLocalAddress,
+      udpAddressCandidates: udpAddressCandidates,
     ));
 
     if (resolvedBleDeviceId != null && resolvedBleRole != null) {
@@ -238,6 +242,8 @@ class MessageRouter {
     debugPrint(
         'Peer ${isNew ? "connected" : "updated"}: ${data.nickname} via ${transport.name}'
         '${data.udpAddress != null ? " addr=${data.udpAddress}" : ""}');
+
+    debugPrint('Peer announced!');
 
     onPeerAnnounced?.call(data, transport, isNew: isNew, udpPeerId: udpPeerId);
   }
@@ -325,6 +331,17 @@ class MessageRouter {
 
     debugPrint('Ignoring malformed UDP address from ANNOUNCE: $udpAddress');
     return null;
+  }
+
+  Set<String> _normalizeUdpAddressCandidates(Iterable<String?> addresses) {
+    final normalized = <String>{};
+    for (final address in addresses) {
+      final parsed = _normalizeUdpAddress(address);
+      if (parsed != null) {
+        normalized.add(parsed);
+      }
+    }
+    return normalized;
   }
 
   String? _normalizeLinkLocalAddress(String? udpAddress) {

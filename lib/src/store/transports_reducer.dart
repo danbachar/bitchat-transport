@@ -25,7 +25,12 @@ TransportsState transportsReducer(
     if (action.publicAddress == null) {
       return state.clearPublicAddress();
     }
-    return state.copyWith(publicAddress: action.publicAddress);
+    if (action.publicAddress == state.publicAddress) {
+      return state;
+    }
+    // Address changed — invalidate prior reachability proof, since it was
+    // bound to the previous address/network path.
+    return state.withNewPublicAddress(action.publicAddress!);
   }
 
   if (action is PublicIpUpdatedAction) {
@@ -38,6 +43,12 @@ TransportsState transportsReducer(
 
   if (action is NetworkConnectionTypeUpdatedAction) {
     return state.copyWith(networkConnectionType: action.connectionType);
+  }
+
+  if (action is UnsolicitedInboundObservedAction) {
+    // Only meaningful if we have a public address to bind the proof to.
+    if (state.publicAddress == null) return state;
+    return state.copyWith(lastUnsolicitedInboundAt: action.observedAt);
   }
 
   return state;

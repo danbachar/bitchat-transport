@@ -19,7 +19,8 @@ enum SignalingType {
   static SignalingType fromValue(int value) {
     return SignalingType.values.firstWhere(
       (t) => t.value == value,
-      orElse: () => throw ArgumentError('Unknown signaling type: 0x${value.toRadixString(16)}'),
+      orElse: () => throw ArgumentError(
+          'Unknown signaling type: 0x${value.toRadixString(16)}'),
     );
   }
 }
@@ -41,10 +42,27 @@ class AddrResponseMessage extends SignalingMessage {
   @override
   SignalingType get type => SignalingType.addrResponse;
   final Uint8List targetPubkey;
-  final String? ip;
-  final int? port;
-  bool get found => ip != null && port != null;
-  AddrResponseMessage({required this.targetPubkey, this.ip, this.port});
+  final List<SignalingAddressCandidate> candidates;
+  String? get ip => candidates.isEmpty ? null : candidates.first.ip;
+  int? get port => candidates.isEmpty ? null : candidates.first.port;
+  bool get found => candidates.isNotEmpty;
+  AddrResponseMessage({
+    required this.targetPubkey,
+    String? ip,
+    int? port,
+    List<SignalingAddressCandidate> candidates = const [],
+  }) : candidates = candidates.isNotEmpty
+            ? candidates
+            : (ip != null && port != null
+                ? [SignalingAddressCandidate(ip: ip, port: port)]
+                : const []);
+}
+
+class SignalingAddressCandidate {
+  final String ip;
+  final int port;
+
+  const SignalingAddressCandidate({required this.ip, required this.port});
 }
 
 class PunchRequestMessage extends SignalingMessage {
@@ -82,7 +100,6 @@ class AddrReflectMessage extends SignalingMessage {
 // ===== Codec =====
 
 /// Binary encoder/decoder for signaling messages.
-/// Wire-compatible with the Flutter client's SignalingCodec.
 class SignalingCodec {
   const SignalingCodec();
 
@@ -127,12 +144,12 @@ class SignalingCodec {
     final buffer = BytesBuilder();
     buffer.addByte(SignalingType.addrResponse.value);
     buffer.add(msg.targetPubkey);
-    buffer.addByte(msg.found ? 1 : 0);
-    if (msg.found) {
-      final ipBytes = Uint8List.fromList(msg.ip!.codeUnits);
-      _writeUint16(buffer, ipBytes.length);
-      buffer.add(ipBytes);
-      _writeUint16(buffer, msg.port!);
+    _writeUint16(buffer, msg.candidates.length);
+    for (final candidate in msg.candidates) {
+      final candidateIpBytes = Uint8List.fromList(candidate.ip.codeUnits);
+      _writeUint16(buffer, candidateIpBytes.length);
+      buffer.add(candidateIpBytes);
+      _writeUint16(buffer, candidate.port);
     }
     return buffer.toBytes();
   }
@@ -183,21 +200,37 @@ class SignalingCodec {
   }
 
   AddrResponseMessage _decodeAddrResponse(Uint8List data) {
-    if (data.length < 33) {
+    if (data.length < 34) {
       throw const FormatException('AddrResponse payload too short');
     }
     final targetPubkey = Uint8List.fromList(data.sublist(0, 32));
-    final found = data[32] != 0;
-    if (!found) {
-      return AddrResponseMessage(targetPubkey: targetPubkey);
-    }
-    var offset = 33;
-    final ipLen = _readUint16(data, offset);
+    var offset = 32;
+    final candidateCount = _readUint16(data, offset);
     offset += 2;
-    final ip = String.fromCharCodes(data.sublist(offset, offset + ipLen));
-    offset += ipLen;
-    final port = _readUint16(data, offset);
-    return AddrResponseMessage(targetPubkey: targetPubkey, ip: ip, port: port);
+
+    final candidates = <SignalingAddressCandidate>[];
+    for (var i = 0; i < candidateCount; i++) {
+      if (offset + 2 > data.length) {
+        throw const FormatException('AddrResponse candidate length missing');
+      }
+      final candidateIpLen = _readUint16(data, offset);
+      offset += 2;
+      if (offset + candidateIpLen + 2 > data.length) {
+        throw const FormatException('AddrResponse candidate truncated');
+      }
+      final candidateIp =
+          String.fromCharCodes(data.sublist(offset, offset + candidateIpLen));
+      offset += candidateIpLen;
+      final candidatePort = _readUint16(data, offset);
+      offset += 2;
+      candidates.add(
+        SignalingAddressCandidate(ip: candidateIp, port: candidatePort),
+      );
+    }
+    return AddrResponseMessage(
+      targetPubkey: targetPubkey,
+      candidates: candidates,
+    );
   }
 
   PunchRequestMessage _decodePunchRequest(Uint8List data) {
