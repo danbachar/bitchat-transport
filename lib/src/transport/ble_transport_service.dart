@@ -391,9 +391,9 @@ class BleTransportService extends TransportService {
 
     if (!isNew && (existing.isConnected || existing.isConnecting)) return;
 
-    // Check if we're in backoff period or explicitly blacklisted
-    if (existing != null && (existing.isInBackoff || existing.isBlacklisted)) {
-      return; // Skip connection attempt
+    // Check if we're in backoff period
+    if (existing != null && existing.isInBackoff) {
+      return; // Skip connection attempt — still in backoff
     }
 
     // Skip if we're already connected to or connecting to this peer under a
@@ -457,11 +457,6 @@ class BleTransportService extends TransportService {
 
   /// Automatically connect to a discovered peer and send ANNOUNCE
   Future<bool> _autoConnectToPeer(String deviceId) async {
-    return connectToDevice(deviceId, isManual: false);
-  }
-
-  /// Connect to a discovered peer manually or automatically and send ANNOUNCE
-  Future<bool> connectToDevice(String deviceId, {bool isManual = true}) async {
     // Skip if already connected
     if (_isConnected(deviceId)) {
       return false;
@@ -474,13 +469,11 @@ class BleTransportService extends TransportService {
     }
 
     // Limit concurrent connection attempts to avoid starving the BLE stack.
-    if (!isManual) {
-      final connectingCount = _peersState.discoveredBlePeersList
-          .where((d) => d.isConnecting)
-          .length;
-      if (connectingCount >= _maxConcurrentConnections) {
-        return false;
-      }
+    final connectingCount = _peersState.discoveredBlePeersList
+        .where((d) => d.isConnecting)
+        .length;
+    if (connectingCount >= _maxConcurrentConnections) {
+      return false;
     }
 
     // Mark as connecting in store
@@ -503,11 +496,6 @@ class BleTransportService extends TransportService {
           BleDeviceConnectionFailedAction(deviceId, error: e.toString()));
       return false;
     }
-  }
-
-  /// Disconnect manually from a peer
-  Future<void> disconnectFromDevice(String deviceId) async {
-    await _central.disconnectFromDevice(deviceId);
   }
 
   void _handleConnectionChange(String deviceId, bool connected,
