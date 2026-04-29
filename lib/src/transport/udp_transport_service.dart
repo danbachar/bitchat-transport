@@ -67,15 +67,17 @@ class UdpTransportService extends TransportService {
 
   // --- Socket and UDX state ---
 
-  /// The raw UDP socket. We own it — UDX wraps it but doesn't create it.
+  /// Preferred raw UDP socket. We own it — UDX wraps it but doesn't create it.
   RawDatagramSocket? _rawSocket;
+
+  /// Raw UDP sockets by address family.
+  final Map<InternetAddressType, RawDatagramSocket> _rawSockets = {};
 
   /// UDX factory instance
   UDX? _udx;
 
-  /// Multiplexer: routes incoming UDP packets to UDX connections by Connection ID.
-  /// Created in [startMultiplexer], null until then.
-  UDXMultiplexer? _multiplexer;
+  /// Multiplexers by address family.
+  final Map<InternetAddressType, UDXMultiplexer> _multiplexers = {};
 
   /// Current transport state
   TransportState _state = TransportState.uninitialized;
@@ -83,6 +85,7 @@ class UdpTransportService extends TransportService {
   /// Our bound local port (available after [initialize])
   int? _localPort;
   InternetAddressType? _activeAddressType;
+  final Map<InternetAddressType, int> _localPorts = {};
 
   // --- Peer connections ---
 
@@ -105,7 +108,8 @@ class UdpTransportService extends TransportService {
 
   // --- Subscriptions ---
 
-  StreamSubscription? _multiplexerConnectionsSub;
+  final Map<InternetAddressType, StreamSubscription>
+      _multiplexerConnectionsSubs = {};
 
   // --- Public callbacks ---
 
@@ -131,16 +135,27 @@ class UdpTransportService extends TransportService {
   /// Only use for raw sends; DO NOT read from this after [startMultiplexer].
   RawDatagramSocket? get rawSocket => _rawSocket;
 
+  /// Raw UDP sockets keyed by IP family.
+  Map<InternetAddressType, RawDatagramSocket> get rawSocketsByType =>
+      Map.unmodifiable(_rawSockets);
+
   /// Our bound port (available after [initialize])
   int? get localPort => _localPort;
 
-  /// The active IP family for the bound UDP socket.
+  /// Bound local port for [type], if that family initialized successfully.
+  int? localPortForAddressType(InternetAddressType type) => _localPorts[type];
+
+  /// The preferred active IP family for the bound UDP socket.
   InternetAddressType? get activeAddressType => _activeAddressType;
+
+  /// Every active IP family with a bound UDP socket.
+  Set<InternetAddressType> get activeAddressTypes =>
+      Set.unmodifiable(_rawSockets.keys);
 
   /// Whether we currently have a usable local route for the active family.
   ///
-  /// True once we've bound an IPv6 UDP socket. We don't enumerate interfaces
-  /// to "verify" IPv6 reachability — that was unreliable on multi-homed
+  /// True once we've bound at least one UDP socket. We don't enumerate
+  /// interfaces to "verify" reachability — that was unreliable on multi-homed
   /// devices (e.g. the first non-link-local address from NetworkInterface.list
   /// wasn't always the one the kernel actually uses for outbound traffic).
   /// The canonical "can we be reached" answer comes from the reflected
@@ -151,7 +166,7 @@ class UdpTransportService extends TransportService {
   UdpConnectFailureKind? get lastConnectFailureKind => _lastConnectFailureKind;
 
   /// Whether the UDX multiplexer is active (accepting streams)
-  bool get isMultiplexerActive => _multiplexer != null;
+  bool get isMultiplexerActive => _multiplexers.isNotEmpty;
 
   // ===== TransportService Implementation =====
 
@@ -195,22 +210,27 @@ class UdpTransportService extends TransportService {
     debugPrint('Initializing UDP transport');
 
     try {
-      // IPv6-only transport. We bind to `::` and trust that if the kernel
-      // lets us bind, the device is IPv6-capable. The authoritative answer
-      // to "what address can peers reach us at" comes from public address
-      // reflection over signaling — not from enumerating local interfaces.
-      final socket =
-          await RawDatagramSocket.bind(InternetAddress.anyIPv6, 0);
-      _rawSocket = socket;
-      _localPort = socket.port;
-      _activeAddressType = InternetAddressType.IPv6;
+      await _bindFamily(InternetAddressType.IPv6);
+      await _bindFamily(InternetAddressType.IPv4);
+
+      if (_rawSockets.isEmpty) {
+        debugPrint('Failed to bind any UDP socket');
+        _setState(TransportState.error);
+        return false;
+      }
+
+      _refreshPreferredSocket();
       _udx = UDX();
 
       _setState(TransportState.ready);
-      debugPrint('UDP transport bound on port $_localPort (IPv6)');
+      final bindings = _rawSockets.entries
+          .map((entry) =>
+              '${entry.key == InternetAddressType.IPv6 ? "IPv6" : "IPv4"}:${entry.value.port}')
+          .join(', ');
+      debugPrint('UDP transport bound ($bindings)');
       return true;
     } catch (e) {
-      debugPrint('Failed to bind IPv6 UDP socket: $e');
+      debugPrint('Failed to initialize UDP sockets: $e');
       _setState(TransportState.error);
       return false;
     }
@@ -228,34 +248,46 @@ class UdpTransportService extends TransportService {
   /// - Immediately after [initialize] if well-connected (no NAT)
   /// - After hole-punch succeeds if behind NAT
   void startMultiplexer() {
-    if (_multiplexer != null) {
+    if (_multiplexers.length == _rawSockets.length &&
+        _multiplexers.isNotEmpty) {
       debugPrint('Multiplexer already started');
       return;
     }
-    if (_rawSocket == null) {
+    if (_rawSockets.isEmpty) {
       debugPrint(
           'Cannot start multiplexer: socket not bound. Call initialize() first.');
       return;
     }
 
-    _multiplexer = UDXMultiplexer(_rawSocket!);
+    for (final entry in _rawSockets.entries) {
+      final family = entry.key;
+      if (_multiplexers.containsKey(family)) continue;
 
-    // Handle non-UDX packets (raw UDP fallback for when UDX handshake fails)
-    _multiplexer!.onRawPacket = _handleRawPacket;
+      final multiplexer = UDXMultiplexer(entry.value);
+      _multiplexers[family] = multiplexer;
 
-    // Listen for incoming connections from remote peers
-    _multiplexerConnectionsSub =
-        _multiplexer!.connections.listen(_handleIncomingConnection);
+      // Handle non-UDX packets (raw UDP fallback for when UDX handshake fails)
+      multiplexer.onRawPacket = _handleRawPacket;
+
+      // Listen for incoming connections from remote peers
+      _multiplexerConnectionsSubs[family] =
+          multiplexer.connections.listen(_handleIncomingConnection);
+    }
+
+    _refreshPreferredSocket();
 
     _setState(TransportState.active);
-    debugPrint('UDX multiplexer started on port $_localPort');
+    debugPrint(
+      'UDX multiplexers started on '
+      '${_multiplexers.keys.map((family) => family == InternetAddressType.IPv6 ? "IPv6" : "IPv4").join(", ")}',
+    );
   }
 
   @override
   Future<void> start() async {
     // For compatibility with TransportService interface.
     // If multiplexer isn't started yet, start it now.
-    if (_multiplexer == null && _rawSocket != null) {
+    if (_multiplexers.isEmpty && _rawSockets.isNotEmpty) {
       startMultiplexer();
     } else if (_state == TransportState.ready) {
       _setState(TransportState.active);
@@ -277,9 +309,11 @@ class UdpTransportService extends TransportService {
       }
     }
 
-    // Cancel multiplexer subscription
-    await _multiplexerConnectionsSub?.cancel();
-    _multiplexerConnectionsSub = null;
+    // Cancel multiplexer subscriptions
+    for (final sub in _multiplexerConnectionsSubs.values) {
+      await sub.cancel();
+    }
+    _multiplexerConnectionsSubs.clear();
 
     // Clear connection tracking maps
     _tempKeyToPubkey.clear();
@@ -288,7 +322,7 @@ class UdpTransportService extends TransportService {
 
     // We don't close the raw socket here — it might be reused.
     // The multiplexer is discarded; a new one can be created.
-    _multiplexer = null;
+    _multiplexers.clear();
 
     if (_state == TransportState.active) {
       _setState(TransportState.ready);
@@ -301,8 +335,12 @@ class UdpTransportService extends TransportService {
     debugPrint('Disposing UDP transport');
     await stop();
 
-    // Close the raw socket
-    _rawSocket?.close();
+    // Close the raw sockets
+    for (final socket in _rawSockets.values) {
+      socket.close();
+    }
+    _rawSockets.clear();
+    _localPorts.clear();
     _rawSocket = null;
     _udx = null;
     _localPort = null;
@@ -327,9 +365,11 @@ class UdpTransportService extends TransportService {
       String pubkeyHex, InternetAddress addr, int port) async {
     _lastConnectFailureKind = null;
 
-    if (_multiplexer == null) {
+    final multiplexer = _multiplexers[addr.type];
+    if (multiplexer == null) {
       debugPrint(
-          'Cannot connect: multiplexer not started. Call startMultiplexer() first.');
+          'Cannot connect: ${addr.type == InternetAddressType.IPv6 ? "IPv6" : "IPv4"} '
+          'multiplexer not started. Call startMultiplexer() first.');
       return false;
     }
 
@@ -358,7 +398,7 @@ class UdpTransportService extends TransportService {
       _addressToPubkey['$remoteHost:$port'] = pubkeyHex;
 
       // Create UDX connection to the peer
-      udpSocket = _multiplexer!.createSocket(_udx!, remoteHost, port);
+      udpSocket = multiplexer.createSocket(_udx!, remoteHost, port);
       final socket = udpSocket;
       socketErrorsSub = udpSocket.on('error').listen((event) {
         final data = event.data;
@@ -503,9 +543,10 @@ class UdpTransportService extends TransportService {
   /// The application layer handles retries via ACKs.
   bool sendRawTo(
       String pubkeyHex, InternetAddress ip, int port, Uint8List data) {
-    if (_rawSocket == null) return false;
+    final socket = _rawSockets[ip.type];
+    if (socket == null) return false;
     try {
-      final sent = _rawSocket!.send(data, ip, port);
+      final sent = socket.send(data, ip, port);
       if (sent > 0) {
         // Track this as a raw peer so broadcast can include them
         _rawPeerAddresses[pubkeyHex] = AddressInfo(ip, port);
@@ -830,6 +871,32 @@ class UdpTransportService extends TransportService {
 
   // ===== Internal =====
 
+  Future<void> _bindFamily(InternetAddressType type) async {
+    final bindAddress = type == InternetAddressType.IPv6
+        ? InternetAddress.anyIPv6
+        : InternetAddress.anyIPv4;
+    try {
+      final socket = await RawDatagramSocket.bind(bindAddress, 0);
+      _rawSockets[type] = socket;
+      _localPorts[type] = socket.port;
+    } catch (e) {
+      debugPrint(
+        'Failed to bind '
+        '${type == InternetAddressType.IPv6 ? "IPv6" : "IPv4"} '
+        'UDP socket: $e',
+      );
+    }
+  }
+
+  void _refreshPreferredSocket() {
+    final preferredType = _rawSockets.containsKey(InternetAddressType.IPv6)
+        ? InternetAddressType.IPv6
+        : (_rawSockets.isNotEmpty ? _rawSockets.keys.first : null);
+    _activeAddressType = preferredType;
+    _rawSocket = preferredType != null ? _rawSockets[preferredType] : null;
+    _localPort = preferredType != null ? _localPorts[preferredType] : null;
+  }
+
   void _setState(TransportState newState) {
     if (_state != newState) {
       _state = newState;
@@ -841,10 +908,7 @@ class UdpTransportService extends TransportService {
   }
 
   bool canDialAddress(InternetAddress address) {
-    if (_activeAddressType == null) return false;
-    // IPv6-only transport. An IPv4 address means the peer has no Internet
-    // reachability from our perspective.
-    if (address.type != InternetAddressType.IPv6) return false;
+    if (!_rawSockets.containsKey(address.type)) return false;
     if (address.isLoopback) return true;
     return hasUsableRoute;
   }

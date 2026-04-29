@@ -26,8 +26,7 @@ import 'signaling_handler.dart';
 /// The architecture is federated: anyone can run a rendezvous server,
 /// and agents may use multiple servers for redundancy.
 ///
-/// The anchor is IPv6-only. Clients on IPv4-only networks are treated as
-/// having no Internet reachability.
+/// The anchor listens on IPv6 and IPv4 when the host supports both families.
 class AnchorServer {
   final int ipv6Port;
   final String nickname;
@@ -41,7 +40,7 @@ class AnchorServer {
   late SignalingHandler _signalingHandler;
   late SignalingCodec _codec;
 
-  _AnchorListener? _listener;
+  final List<_AnchorListener> _listeners = [];
 
   /// Active UDX connections per peer, keyed by pubkey hex.
   final Map<String, _PeerConnection> _peerConnections = {};
@@ -89,16 +88,24 @@ class AnchorServer {
     );
     _signalingHandler.sendSignaling = _sendSignaling;
 
-    _listener = await _bindIpv6Listener();
-    final listener = _listener!;
-    listener.multiplexer = UDXMultiplexer(listener.rawSocket);
-    listener.multiplexer!.onRawPacket = (data, address, port) =>
-        _handleRawPacket(listener, data, address, port);
-    listener.connectionsSub = listener.multiplexer!.connections.listen(
-      (socket) => _handleIncomingConnection(listener, socket),
-    );
-    _log('UDP socket bound on port ${listener.port} (IPv6)');
-    _log('UDX multiplexer started on port ${listener.port}');
+    _listeners
+      ..clear()
+      ..addAll(await _bindListeners());
+    if (_listeners.isEmpty) {
+      throw StateError('Failed to bind any UDP listener');
+    }
+    for (final listener in _listeners) {
+      listener.multiplexer = UDXMultiplexer(listener.rawSocket);
+      listener.multiplexer!.onRawPacket = (data, address, port) =>
+          _handleRawPacket(listener, data, address, port);
+      listener.connectionsSub = listener.multiplexer!.connections.listen(
+        (socket) => _handleIncomingConnection(listener, socket),
+      );
+      _log('UDP socket bound on port ${listener.port} '
+          '(${_familyLabel(listener.family)})');
+      _log('UDX multiplexer started on port ${listener.port} '
+          '(${_familyLabel(listener.family)})');
+    }
 
     // Periodic ANNOUNCE to all connected peers
     _announceTimer = Timer.periodic(
@@ -125,7 +132,10 @@ class AnchorServer {
     );
 
     _log('Rendezvous server ready');
-    _log('  IPv6 address: ${listener.publicAddress}');
+    for (final listener in _listeners) {
+      _log('  ${_familyLabel(listener.family)} address: '
+          '${listener.publicAddress}');
+    }
     _log('  Pubkey:   ${_identity.pubkeyHex}');
     _log('Waiting for connections...');
   }
@@ -134,8 +144,9 @@ class AnchorServer {
     _announceTimer?.cancel();
     _staleCleanupTimer?.cancel();
     _statsTimer?.cancel();
-    final listener = _listener;
-    await listener?.connectionsSub?.cancel();
+    for (final listener in _listeners) {
+      await listener.connectionsSub?.cancel();
+    }
 
     for (final conn in _peerConnections.values) {
       try {
@@ -144,30 +155,48 @@ class AnchorServer {
     }
     _peerConnections.clear();
 
-    if (listener != null) {
+    for (final listener in _listeners) {
       listener.rawSocket.close();
       listener.multiplexer = null;
     }
-    _listener = null;
+    _listeners.clear();
     _log('Rendezvous server stopped');
   }
 
   // ===== Public Address Discovery =====
 
-  Future<_AnchorListener> _bindIpv6Listener() async {
-    final RawDatagramSocket socket;
+  Future<List<_AnchorListener>> _bindListeners() async {
+    final listeners = <_AnchorListener>[];
+    final ipv6 = await _tryBindListener(InternetAddressType.IPv6);
+    if (ipv6 != null) listeners.add(ipv6);
+    final ipv4 = await _tryBindListener(InternetAddressType.IPv4);
+    if (ipv4 != null) listeners.add(ipv4);
+    return listeners;
+  }
+
+  Future<_AnchorListener?> _tryBindListener(InternetAddressType family) async {
+    final bindAddress = family == InternetAddressType.IPv6
+        ? InternetAddress.anyIPv6
+        : InternetAddress.anyIPv4;
     try {
-      socket = await RawDatagramSocket.bind(InternetAddress.anyIPv6, ipv6Port);
+      final socket = await RawDatagramSocket.bind(bindAddress, ipv6Port);
+      final publicAddress = family == InternetAddressType.IPv6
+          ? await _discoverPublicIpv6Address(ipv6Port)
+          : await _discoverPublicIpv4Address(ipv6Port);
+      return _AnchorListener(
+        family: family,
+        port: ipv6Port,
+        rawSocket: socket,
+        publicAddress: publicAddress ??
+            (family == InternetAddressType.IPv6
+                ? '[::]:$ipv6Port'
+                : '0.0.0.0:$ipv6Port'),
+      );
     } catch (e) {
-      throw StateError('Failed to bind IPv6 UDP socket on port $ipv6Port: $e');
+      _log('Failed to bind ${_familyLabel(family)} UDP socket on '
+          'port $ipv6Port: $e');
+      return null;
     }
-    final publicAddress = await _discoverPublicIpv6Address(ipv6Port);
-    return _AnchorListener(
-      family: InternetAddressType.IPv6,
-      port: ipv6Port,
-      rawSocket: socket,
-      publicAddress: publicAddress ?? '[::]:$ipv6Port',
-    );
   }
 
   Future<String?> _discoverPublicIpv6Address(int listenerPort) async {
@@ -241,6 +270,32 @@ class AnchorServer {
       }
     } catch (e) {
       _log('Failed to discover public IPv6 address via seeip: $e');
+    }
+
+    return null;
+  }
+
+  Future<String?> _discoverPublicIpv4Address(int listenerPort) async {
+    try {
+      final client = HttpClient();
+      try {
+        final request =
+            await client.getUrl(Uri.parse('https://ipv4.seeip.org'));
+        final response = await request.close();
+        final body =
+            await response.transform(const SystemEncoding().decoder).join();
+        final ip = body.trim();
+        final parsed = InternetAddress.tryParse(ip);
+        if (parsed != null && parsed.type == InternetAddressType.IPv4) {
+          final discovered = '${parsed.address}:$listenerPort';
+          _log('Discovered public IPv4 address via seeip.org: $discovered');
+          return discovered;
+        }
+      } finally {
+        client.close();
+      }
+    } catch (e) {
+      _log('Failed to discover public IPv4 address via seeip: $e');
     }
 
     return null;

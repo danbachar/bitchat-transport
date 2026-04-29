@@ -68,25 +68,45 @@ class AddrResponseMessage extends SignalingMessage {
   /// The public key that was queried (32 bytes).
   final Uint8List targetPubkey;
 
-  /// The peer's IP address, or null if not found.
-  final String? ip;
+  final List<SignalingAddressCandidate> candidates;
 
-  /// The peer's UDP port, or null if not found.
-  final int? port;
+  /// The first peer IP address, or null if not found.
+  String? get ip => candidates.isEmpty ? null : candidates.first.ip;
+
+  /// The first peer UDP port, or null if not found.
+  int? get port => candidates.isEmpty ? null : candidates.first.port;
 
   /// Whether the peer was found in the address table.
-  bool get found => ip != null && port != null;
+  bool get found => candidates.isNotEmpty;
 
   AddrResponseMessage({
     required this.targetPubkey,
-    this.ip,
-    this.port,
-  });
+    String? ip,
+    int? port,
+    List<SignalingAddressCandidate> candidates = const [],
+  }) : candidates = candidates.isNotEmpty
+            ? candidates
+            : (ip != null && port != null
+                ? [SignalingAddressCandidate(ip: ip, port: port)]
+                : const []);
 
   @override
   String toString() =>
       'AddrResponse(target: ${targetPubkey.sublist(0, 4).map((b) => b.toRadixString(16).padLeft(2, '0')).join()}..., '
       '${found ? "$ip:$port" : "not found"})';
+}
+
+class SignalingAddressCandidate {
+  final String ip;
+  final int port;
+
+  const SignalingAddressCandidate({
+    required this.ip,
+    required this.port,
+  });
+
+  @override
+  String toString() => '$ip:$port';
 }
 
 /// Agent requests a well-connected friend to coordinate a hole-punch.
@@ -176,7 +196,7 @@ class AddrReflectMessage extends SignalingMessage {
 ///
 /// ```
 /// ADDR_QUERY     : type(1) + targetPubkey(32)
-/// ADDR_RESPONSE  : type(1) + targetPubkey(32) + found(1) + [ipLen(2) + ipBytes + port(2)]
+/// ADDR_RESPONSE  : type(1) + targetPubkey(32) + candidateCount(2) + repeated(ipLen(2) + ipBytes + port(2))
 /// PUNCH_REQUEST  : type(1) + targetPubkey(32)
 /// PUNCH_INITIATE : type(1) + peerPubkey(32) + ipLen(2) + ipBytes + port(2)
 /// PUNCH_READY    : type(1) + peerPubkey(32)
@@ -209,12 +229,12 @@ class SignalingCodec {
     final buffer = BytesBuilder();
     buffer.addByte(SignalingType.addrResponse.value);
     buffer.add(msg.targetPubkey);
-    buffer.addByte(msg.found ? 1 : 0);
-    if (msg.found) {
-      final ipBytes = Uint8List.fromList(msg.ip!.codeUnits);
-      _writeUint16(buffer, ipBytes.length);
-      buffer.add(ipBytes);
-      _writeUint16(buffer, msg.port!);
+    _writeUint16(buffer, msg.candidates.length);
+    for (final candidate in msg.candidates) {
+      final candidateIpBytes = Uint8List.fromList(candidate.ip.codeUnits);
+      _writeUint16(buffer, candidateIpBytes.length);
+      buffer.add(candidateIpBytes);
+      _writeUint16(buffer, candidate.port);
     }
     return buffer.toBytes();
   }
@@ -287,27 +307,38 @@ class SignalingCodec {
   }
 
   AddrResponseMessage _decodeAddrResponse(Uint8List data) {
-    if (data.length < 33) {
+    if (data.length < 34) {
       throw const FormatException('AddrResponse payload too short');
     }
     final targetPubkey = Uint8List.fromList(data.sublist(0, 32));
-    final found = data[32] != 0;
-
-    if (!found) {
-      return AddrResponseMessage(targetPubkey: targetPubkey);
-    }
-
-    var offset = 33;
-    final ipLen = _readUint16(data, offset);
+    var offset = 32;
+    final candidateCount = _readUint16(data, offset);
     offset += 2;
-    final ip = String.fromCharCodes(data.sublist(offset, offset + ipLen));
-    offset += ipLen;
-    final port = _readUint16(data, offset);
+
+    final candidates = <SignalingAddressCandidate>[];
+    for (var i = 0; i < candidateCount; i++) {
+      if (offset + 2 > data.length) {
+        throw const FormatException('AddrResponse candidate length missing');
+      }
+      final candidateIpLen = _readUint16(data, offset);
+      offset += 2;
+      if (offset + candidateIpLen + 2 > data.length) {
+        throw const FormatException('AddrResponse candidate truncated');
+      }
+      final candidateIp = String.fromCharCodes(
+        data.sublist(offset, offset + candidateIpLen),
+      );
+      offset += candidateIpLen;
+      final candidatePort = _readUint16(data, offset);
+      offset += 2;
+      candidates.add(
+        SignalingAddressCandidate(ip: candidateIp, port: candidatePort),
+      );
+    }
 
     return AddrResponseMessage(
       targetPubkey: targetPubkey,
-      ip: ip,
-      port: port,
+      candidates: candidates,
     );
   }
 

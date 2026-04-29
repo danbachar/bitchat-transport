@@ -97,7 +97,6 @@ class StaleDiscoveredBlePeersRemovedAction extends PeerAction {
 /// Clear all discovered BLE peers
 class ClearDiscoveredBlePeersAction extends PeerAction {}
 
-
 // ===== Peer Identity Actions (after ANNOUNCE) =====
 
 /// An ANNOUNCE packet was received - add or update peer identity.
@@ -119,6 +118,7 @@ class PeerAnnounceReceivedAction extends PeerAction {
 
   final String? udpAddress;
   final String? linkLocalAddress;
+  final Set<String> udpAddressCandidates;
 
   PeerAnnounceReceivedAction({
     required this.publicKey,
@@ -130,6 +130,7 @@ class PeerAnnounceReceivedAction extends PeerAction {
     this.blePeripheralDeviceId,
     this.udpAddress,
     this.linkLocalAddress,
+    this.udpAddressCandidates = const {},
   });
 }
 

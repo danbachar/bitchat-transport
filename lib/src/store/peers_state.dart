@@ -124,19 +124,20 @@ class DiscoveredPeerState {
 
   @override
   int get hashCode => Object.hash(
-    transportId,
-    rssi,
-    isConnecting,
-    isConnected,
-    lastError,
-    serviceUuid,
-    consecutiveFailures,
-    nextRetryAfter,
-    isBlacklisted,
-  );
+        transportId,
+        rssi,
+        isConnecting,
+        isConnected,
+        lastError,
+        serviceUuid,
+        consecutiveFailures,
+        nextRetryAfter,
+        isBlacklisted,
+      );
 
   @override
-  String toString() => 'DiscoveredPeerState($transportId, rssi: $rssi, connected: $isConnected, failures: $consecutiveFailures)';
+  String toString() =>
+      'DiscoveredPeerState($transportId, rssi: $rssi, connected: $isConnected, failures: $consecutiveFailures)';
 }
 
 /// Immutable peer state for identified peers (after ANNOUNCE)
@@ -171,6 +172,9 @@ class PeerState {
   /// Only available from BLE-nearby peers. Tried before global address.
   final String? linkLocalAddress;
 
+  /// All UDP address candidates advertised by this peer.
+  final Set<String> udpAddressCandidates;
+
   /// Whether this peer is a friend (friendship established)
   final bool isFriend;
 
@@ -202,22 +206,26 @@ class PeerState {
     this.lastUdpSeen,
     this.udpAddress,
     this.linkLocalAddress,
+    this.udpAddressCandidates = const {},
     this.isFriend = false,
     this.lastDirectReachAt,
     this.hasLiveUdpConnection = false,
   });
 
   /// Hex representation of public key (for map keys)
-  String get pubkeyHex => publicKey.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  String get pubkeyHex =>
+      publicKey.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
   /// Display name (nickname or truncated pubkey)
-  String get displayName => nickname.isNotEmpty ? nickname : '${pubkeyHex.substring(0, 8)}...';
+  String get displayName =>
+      nickname.isNotEmpty ? nickname : '${pubkeyHex.substring(0, 8)}...';
 
   /// Whether this peer is currently connected
   bool get isConnected => connectionState == PeerConnectionState.connected;
 
   /// Whether this peer has any BLE connection (central or peripheral)
-  bool get hasBleConnection => bleCentralDeviceId != null || blePeripheralDeviceId != null;
+  bool get hasBleConnection =>
+      bleCentralDeviceId != null || blePeripheralDeviceId != null;
 
   /// Convenience getter: preferred BLE device ID for sending.
   /// Prefers central (we initiated) since sendToPeer tries central service first.
@@ -226,13 +234,21 @@ class PeerState {
   /// Whether this peer is potentially reachable via any transport.
   /// For UDP, a stored address is sufficient (we can attempt to connect).
   /// See [isLiveReachable] for actual live connection status.
-  bool get isReachable => hasBleConnection || udpAddress != null;
+  bool get isReachable =>
+      hasBleConnection || allUdpAddressCandidates.isNotEmpty;
+
+  /// UDP candidates in first-seen order, including legacy fields.
+  Set<String> get allUdpAddressCandidates => normalizeAddressStrings([
+        linkLocalAddress,
+        udpAddress,
+        ...udpAddressCandidates,
+      ]);
 
   /// Whether this peer's [udpAddress] is a publicly routable candidate.
   /// A candidate may not actually accept unsolicited inbound — see
   /// [isWellConnected] for the verified version.
   bool get hasPublicUdpAddress =>
-      udpAddress != null && isGloballyRoutableAddress(udpAddress!);
+      allUdpAddressCandidates.any(isGloballyRoutableAddress);
 
   /// Whether this peer is verified well-connected: claims a public UDP
   /// address AND we have proof that they accept unsolicited inbound at
@@ -241,8 +257,7 @@ class PeerState {
   ///
   /// Only verified well-connected peers should be used as signaling
   /// facilitators or trusted to skip hole-punching on outbound sends.
-  bool get isWellConnected =>
-      hasPublicUdpAddress && lastDirectReachAt != null;
+  bool get isWellConnected => hasPublicUdpAddress && lastDirectReachAt != null;
 
   /// Whether this peer has a live, active connection right now.
   /// Use this for UI "online" status — not for signaling/discovery.
@@ -252,7 +267,7 @@ class PeerState {
   /// BLE is preferred when available; falls back to UDP, then stored value.
   PeerTransport get activeTransport {
     if (hasBleConnection) return PeerTransport.bleDirect;
-    if (udpAddress != null) return PeerTransport.udp;
+    if (allUdpAddressCandidates.isNotEmpty) return PeerTransport.udp;
     return transport;
   }
 
@@ -277,6 +292,7 @@ class PeerState {
     DateTime? lastUdpSeen,
     String? udpAddress,
     String? linkLocalAddress,
+    Set<String>? udpAddressCandidates,
     bool? isFriend,
     DateTime? lastDirectReachAt,
     bool? hasLiveUdpConnection,
@@ -290,11 +306,13 @@ class PeerState {
       protocolVersion: protocolVersion ?? this.protocolVersion,
       lastSeen: lastSeen ?? this.lastSeen,
       bleCentralDeviceId: bleCentralDeviceId ?? this.bleCentralDeviceId,
-      blePeripheralDeviceId: blePeripheralDeviceId ?? this.blePeripheralDeviceId,
+      blePeripheralDeviceId:
+          blePeripheralDeviceId ?? this.blePeripheralDeviceId,
       lastBleSeen: lastBleSeen ?? this.lastBleSeen,
       lastUdpSeen: lastUdpSeen ?? this.lastUdpSeen,
       udpAddress: udpAddress ?? this.udpAddress,
       linkLocalAddress: linkLocalAddress ?? this.linkLocalAddress,
+      udpAddressCandidates: udpAddressCandidates ?? this.udpAddressCandidates,
       isFriend: isFriend ?? this.isFriend,
       lastDirectReachAt: lastDirectReachAt ?? this.lastDirectReachAt,
       hasLiveUdpConnection: hasLiveUdpConnection ?? this.hasLiveUdpConnection,
@@ -315,25 +333,27 @@ class PeerState {
           blePeripheralDeviceId == other.blePeripheralDeviceId &&
           udpAddress == other.udpAddress &&
           linkLocalAddress == other.linkLocalAddress &&
+          setEquals(udpAddressCandidates, other.udpAddressCandidates) &&
           isFriend == other.isFriend &&
           lastDirectReachAt == other.lastDirectReachAt &&
           hasLiveUdpConnection == other.hasLiveUdpConnection;
 
   @override
   int get hashCode => Object.hash(
-    pubkeyHex,
-    nickname,
-    connectionState,
-    transport,
-    rssi,
-    bleCentralDeviceId,
-    blePeripheralDeviceId,
-    udpAddress,
-    linkLocalAddress,
-    isFriend,
-    lastDirectReachAt,
-    hasLiveUdpConnection,
-  );
+        pubkeyHex,
+        nickname,
+        connectionState,
+        transport,
+        rssi,
+        bleCentralDeviceId,
+        blePeripheralDeviceId,
+        udpAddress,
+        linkLocalAddress,
+        Object.hashAll(udpAddressCandidates),
+        isFriend,
+        lastDirectReachAt,
+        hasLiveUdpConnection,
+      );
 }
 
 /// Complete peers state for Redux store
@@ -355,7 +375,8 @@ class PeersState {
   // ===== Getters =====
 
   /// All discovered BLE peers as list
-  List<DiscoveredPeerState> get discoveredBlePeersList => discoveredBlePeers.values.toList();
+  List<DiscoveredPeerState> get discoveredBlePeersList =>
+      discoveredBlePeers.values.toList();
 
   /// All identified peers as list
   List<PeerState> get peersList => peers.values.toList();
@@ -378,17 +399,18 @@ class PeersState {
       peers.values.where((p) => p.hasLiveUdpConnection).toList();
 
   /// All friends
-  List<PeerState> get friends =>
-      peers.values.where((p) => p.isFriend).toList();
+  List<PeerState> get friends => peers.values.where((p) => p.isFriend).toList();
 
   /// Online friends - friends with a live UDP connection (not nearby via BLE).
   /// Use this for the "Friends Online" section in UI.
-  List<PeerState> get onlineFriends =>
-      peers.values.where((p) => p.isFriend && p.isConnected && p.hasLiveUdpConnection).toList();
+  List<PeerState> get onlineFriends => peers.values
+      .where((p) => p.isFriend && p.isConnected && p.hasLiveUdpConnection)
+      .toList();
 
   /// Well-connected friends that can serve as signaling nodes
-  List<PeerState> get wellConnectedFriends =>
-      peers.values.where((p) => p.isFriend && p.isWellConnected && p.isReachable).toList();
+  List<PeerState> get wellConnectedFriends => peers.values
+      .where((p) => p.isFriend && p.isWellConnected && p.isReachable)
+      .toList();
 
   /// Count of connected peers
   int get connectedCount => connectedPeers.length;
@@ -448,7 +470,7 @@ class PeersState {
 
   @override
   int get hashCode => Object.hash(
-    discoveredBlePeers.length,
-    peers.length,
-  );
+        discoveredBlePeers.length,
+        peers.length,
+      );
 }

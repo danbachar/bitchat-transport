@@ -155,18 +155,25 @@ class SignalingHandler {
     // In the spec model, the querier should present a friendship attestation
     // for the target peer.
 
-    final entry = addressTable.lookup(targetHex, family: requesterFamily);
+    final familyEntry = requesterFamily != null
+        ? addressTable.lookup(targetHex, family: requesterFamily)
+        : null;
+    final entries = requesterFamily != null
+        ? (familyEntry != null ? [familyEntry] : <AddressEntry>[])
+        : addressTable.lookupAll(targetHex);
     final response = AddrResponseMessage(
       targetPubkey: msg.targetPubkey,
-      ip: entry?.ip,
-      port: entry?.port,
+      candidates: [
+        for (final entry in entries)
+          SignalingAddressCandidate(ip: entry.ip, port: entry.port),
+      ],
     );
     final responsePayload = codec.encode(response);
     sendSignaling?.call(senderPubkey, responsePayload);
 
     _log('Addr query for ${targetHex.substring(0, 8)}... from '
         '${requesterHex.substring(0, 8)}...: '
-        '${entry != null ? "${entry.ip}:${entry.port}" : "not found"}'
+        '${entries.isNotEmpty ? entries.map((entry) => "${entry.ip}:${entry.port}").join(", ") : "not found"}'
         '${requesterFamily != null ? " for ${_familyLabel(requesterFamily)} requester" : ""} '
         '(reply payload=${responsePayload.length}B)');
   }
