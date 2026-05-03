@@ -256,7 +256,7 @@ class MessageRouter {
         'Peer ${isNew ? "connected" : "updated"}: ${data.nickname} via ${transport.name}'
         '${data.udpAddress != null ? " addr=${data.udpAddress}" : ""}');
 
-    debugPrint('Peer announced!');
+    // debugPrint('Peer announced!');
 
     onPeerAnnounced?.call(data, transport, isNew: isNew, udpPeerId: udpPeerId);
   }

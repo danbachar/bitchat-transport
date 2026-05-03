@@ -765,7 +765,7 @@ class AnchorServer {
           'reconnect peer=${_shortHex(_pubkeyToHex(message.peerPubkey))}',
         AvailableMessage() =>
           'available peer=${_shortHex(_pubkeyToHex(message.peerPubkey))}',
-        RvListMessage() => 'rvList count=${message.rvPubkeys.length}',
+        RvListMessage() => 'rvList count=${message.entries.length}',
       };
     } catch (e) {
       return 'signaling-decode-failed payload=${signalingPayload.length}B error=$e';

@@ -488,32 +488,56 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _showPeerInfo() {
+    // Refresh from store so the dialog reflects the latest knownRvServers /
+    // udpAddress / connection state, not just the snapshot widget.peer was
+    // built with.
+    final peer = widget.store.state.peers.getPeerByPubkeyHex(_peerHex) ??
+        widget.peer;
+    final rvEntries = peer.knownRvServers.entries.toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
+
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text(widget.peer.displayName),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _buildInfoRow('Public Key', _peerHex),
-            const SizedBox(height: 8),
-            _buildInfoRow(
-                'Bluetooth',
-                widget.peer.hasBleConnection
-                    ? 'Connected (${widget.peer.bleCentralDeviceId != null && widget.peer.blePeripheralDeviceId != null ? 'central + peripheral' : widget.peer.bleCentralDeviceId != null ? 'central' : 'peripheral'})'
-                    : 'Not connected'),
-            const SizedBox(height: 8),
-            _buildInfoRow(
-                'Internet',
-                widget.peer.udpAddress != null
-                    ? widget.peer.udpAddress!
-                    : 'No address'),
-            if (_isFriend) ...[
+        title: Text(peer.displayName),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _buildInfoRow('Public Key', _peerHex),
               const SizedBox(height: 8),
-              _buildInfoRow('Friendship', 'Friends ✓'),
+              _buildInfoRow(
+                  'Bluetooth',
+                  peer.hasBleConnection
+                      ? 'Connected (${peer.bleCentralDeviceId != null && peer.blePeripheralDeviceId != null ? 'central + peripheral' : peer.bleCentralDeviceId != null ? 'central' : 'peripheral'})'
+                      : 'Not connected'),
+              const SizedBox(height: 8),
+              _buildInfoRow(
+                  'Internet',
+                  peer.udpAddress != null ? peer.udpAddress! : 'No address'),
+              if (_isFriend) ...[
+                const SizedBox(height: 8),
+                _buildInfoRow('Friendship', 'Friends ✓'),
+              ],
+              const SizedBox(height: 16),
+              Text(
+                'Rendezvous Servers',
+                style: Theme.of(context).textTheme.titleSmall,
+              ),
+              const SizedBox(height: 4),
+              if (rvEntries.isEmpty)
+                const Text(
+                  'None advertised by this peer yet.',
+                  style: TextStyle(color: Colors.grey, fontSize: 12),
+                )
+              else
+                ...rvEntries.map((entry) => _buildRvServerRow(
+                      address: entry.value,
+                      pubkeyHex: entry.key,
+                    )),
             ],
-          ],
+          ),
         ),
         actions: [
           TextButton(
@@ -528,6 +552,79 @@ class _ChatScreenState extends State<ChatScreen> {
               );
             },
             child: const Text('Copy Key'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRvServerRow({
+    required String address,
+    required String pubkeyHex,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const SizedBox(
+                width: 80,
+                child: Text('Address:',
+                    style: TextStyle(color: Colors.grey, fontSize: 12)),
+              ),
+              Expanded(
+                child: Text(
+                  address,
+                  style:
+                      const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.copy, size: 16),
+                tooltip: 'Copy address',
+                visualDensity: VisualDensity.compact,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+                onPressed: () {
+                  Clipboard.setData(ClipboardData(text: address));
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Address copied: $address')),
+                  );
+                },
+              ),
+            ],
+          ),
+          Row(
+            children: [
+              const SizedBox(
+                width: 80,
+                child: Text('Pubkey:',
+                    style: TextStyle(color: Colors.grey, fontSize: 12)),
+              ),
+              Expanded(
+                child: Text(
+                  pubkeyHex,
+                  style:
+                      const TextStyle(fontFamily: 'monospace', fontSize: 11),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.copy, size: 16),
+                tooltip: 'Copy pubkey',
+                visualDensity: VisualDensity.compact,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+                onPressed: () {
+                  Clipboard.setData(ClipboardData(text: pubkeyHex));
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Rendezvous pubkey copied')),
+                  );
+                },
+              ),
+            ],
           ),
         ],
       ),
