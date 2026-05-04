@@ -2,11 +2,11 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:redux/redux.dart';
-import 'package:bitchat_transport/src/signaling/signaling_service.dart';
-import 'package:bitchat_transport/src/signaling/signaling_codec.dart';
-import 'package:bitchat_transport/src/signaling/address_table.dart';
-import 'package:bitchat_transport/src/models/peer.dart';
-import 'package:bitchat_transport/src/store/store.dart';
+import 'package:grassroots_networking/src/signaling/signaling_service.dart';
+import 'package:grassroots_networking/src/signaling/signaling_codec.dart';
+import 'package:grassroots_networking/src/signaling/address_table.dart';
+import 'package:grassroots_networking/src/models/peer.dart';
+import 'package:grassroots_networking/src/store/store.dart';
 
 // ===== Helpers =====
 

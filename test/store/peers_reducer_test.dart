@@ -1,10 +1,10 @@
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:bitchat_transport/src/store/peers_state.dart';
-import 'package:bitchat_transport/src/store/peers_actions.dart';
-import 'package:bitchat_transport/src/store/peers_reducer.dart';
-import 'package:bitchat_transport/src/models/peer.dart';
+import 'package:grassroots_networking/src/store/peers_state.dart';
+import 'package:grassroots_networking/src/store/peers_actions.dart';
+import 'package:grassroots_networking/src/store/peers_reducer.dart';
+import 'package:grassroots_networking/src/models/peer.dart';
 
 /// Generate a deterministic 32-byte public key from a seed value.
 Uint8List _testPubkey(int seed) {
@@ -41,8 +41,6 @@ void main() {
       expect(peer.serviceUuid, 'uuid-abc');
       expect(peer.isConnecting, false);
       expect(peer.isConnected, false);
-      expect(peer.consecutiveFailures, 0);
-      expect(peer.nextRetryAfter, isNull);
     });
 
     test('updates existing peer RSSI and lastSeen', () {
@@ -179,7 +177,7 @@ void main() {
   // =========================================================================
 
   group('BleDeviceConnectedAction', () {
-    test('sets isConnected=true, isConnecting=false, resets backoff', () {
+    test('sets isConnected=true and isConnecting=false', () {
       final now = DateTime.now();
       final initial = PeersState(
         discoveredBlePeers: {
@@ -189,9 +187,6 @@ void main() {
             discoveredAt: now,
             lastSeen: now,
             isConnecting: true,
-            lastError: 'previous error',
-            consecutiveFailures: 3,
-            nextRetryAfter: now.add(const Duration(seconds: 20)),
           ),
         },
       );
@@ -202,20 +197,15 @@ void main() {
       final peer = result.discoveredBlePeers['device-1']!;
       expect(peer.isConnected, true);
       expect(peer.isConnecting, false);
-      expect(peer.lastError, isNull);
-      expect(peer.consecutiveFailures, 0);
-      expect(peer.nextRetryAfter, isNull);
     });
   });
 
   // =========================================================================
-  // BleDeviceConnectionFailedAction — with backoff
+  // BleDeviceConnectionFailedAction
   // =========================================================================
 
   group('BleDeviceConnectionFailedAction', () {
-    test(
-        'sets isConnecting=false, isConnected=false, sets lastError and backoff',
-        () {
+    test('sets isConnecting=false and isConnected=false', () {
       final now = DateTime.now();
       final initial = PeersState(
         discoveredBlePeers: {
@@ -228,118 +218,13 @@ void main() {
           ),
         },
       );
-      final action =
-          BleDeviceConnectionFailedAction('device-1', error: 'Timeout');
+      final action = BleDeviceConnectionFailedAction('device-1');
 
       final result = peersReducer(initial, action);
 
       final peer = result.discoveredBlePeers['device-1']!;
       expect(peer.isConnecting, false);
       expect(peer.isConnected, false);
-      expect(peer.lastError, 'Timeout');
-      expect(peer.consecutiveFailures, 1);
-      expect(peer.nextRetryAfter, isNotNull);
-    });
-
-    test('exponential backoff: 1st failure = ~5s', () {
-      final now = DateTime.now();
-      final initial = PeersState(
-        discoveredBlePeers: {
-          'device-1': DiscoveredPeerState(
-            transportId: 'device-1',
-            rssi: -60,
-            discoveredAt: now,
-            lastSeen: now,
-            isConnecting: true,
-            consecutiveFailures: 0,
-          ),
-        },
-      );
-      final action = BleDeviceConnectionFailedAction('device-1', error: 'fail');
-
-      final result = peersReducer(initial, action);
-      final peer = result.discoveredBlePeers['device-1']!;
-
-      expect(peer.consecutiveFailures, 1);
-      // Should be ~5 seconds from now
-      final delay = peer.nextRetryAfter!.difference(now);
-      expect(delay.inSeconds, greaterThanOrEqualTo(4));
-      expect(delay.inSeconds, lessThanOrEqualTo(6));
-    });
-
-    test('exponential backoff: 2nd failure = ~10s', () {
-      final now = DateTime.now();
-      final initial = PeersState(
-        discoveredBlePeers: {
-          'device-1': DiscoveredPeerState(
-            transportId: 'device-1',
-            rssi: -60,
-            discoveredAt: now,
-            lastSeen: now,
-            isConnecting: true,
-            consecutiveFailures: 1,
-          ),
-        },
-      );
-      final action = BleDeviceConnectionFailedAction('device-1', error: 'fail');
-
-      final result = peersReducer(initial, action);
-      final peer = result.discoveredBlePeers['device-1']!;
-
-      expect(peer.consecutiveFailures, 2);
-      final delay = peer.nextRetryAfter!.difference(now);
-      expect(delay.inSeconds, greaterThanOrEqualTo(9));
-      expect(delay.inSeconds, lessThanOrEqualTo(11));
-    });
-
-    test('exponential backoff: 3rd failure = ~20s', () {
-      final now = DateTime.now();
-      final initial = PeersState(
-        discoveredBlePeers: {
-          'device-1': DiscoveredPeerState(
-            transportId: 'device-1',
-            rssi: -60,
-            discoveredAt: now,
-            lastSeen: now,
-            isConnecting: true,
-            consecutiveFailures: 2,
-          ),
-        },
-      );
-      final action = BleDeviceConnectionFailedAction('device-1', error: 'fail');
-
-      final result = peersReducer(initial, action);
-      final peer = result.discoveredBlePeers['device-1']!;
-
-      expect(peer.consecutiveFailures, 3);
-      final delay = peer.nextRetryAfter!.difference(now);
-      expect(delay.inSeconds, greaterThanOrEqualTo(19));
-      expect(delay.inSeconds, lessThanOrEqualTo(21));
-    });
-
-    test('exponential backoff caps at 120s', () {
-      final now = DateTime.now();
-      final initial = PeersState(
-        discoveredBlePeers: {
-          'device-1': DiscoveredPeerState(
-            transportId: 'device-1',
-            rssi: -60,
-            discoveredAt: now,
-            lastSeen: now,
-            isConnecting: true,
-            consecutiveFailures: 10, // Would be 5 * 2^10 = 5120s without cap
-          ),
-        },
-      );
-      final action = BleDeviceConnectionFailedAction('device-1', error: 'fail');
-
-      final result = peersReducer(initial, action);
-      final peer = result.discoveredBlePeers['device-1']!;
-
-      expect(peer.consecutiveFailures, 11);
-      final delay = peer.nextRetryAfter!.difference(now);
-      expect(delay.inSeconds, lessThanOrEqualTo(121));
-      expect(delay.inSeconds, greaterThanOrEqualTo(119));
     });
   });
 
@@ -371,30 +256,6 @@ void main() {
       expect(peer.isConnected, false);
     });
 
-    test('preserves backoff state on disconnect', () {
-      final now = DateTime.now();
-      final retryAfter = now.add(const Duration(seconds: 30));
-      final initial = PeersState(
-        discoveredBlePeers: {
-          'device-1': DiscoveredPeerState(
-            transportId: 'device-1',
-            rssi: -60,
-            discoveredAt: now,
-            lastSeen: now,
-            isConnected: true,
-            consecutiveFailures: 2,
-            nextRetryAfter: retryAfter,
-          ),
-        },
-      );
-      final action = BleDeviceDisconnectedAction('device-1');
-
-      final result = peersReducer(initial, action);
-
-      final peer = result.discoveredBlePeers['device-1']!;
-      expect(peer.consecutiveFailures, 2);
-      expect(peer.nextRetryAfter, retryAfter);
-    });
   });
 
   // =========================================================================
@@ -1546,43 +1407,6 @@ void main() {
   // =========================================================================
   // DiscoveredPeerState backoff getters
   // =========================================================================
-
-  group('DiscoveredPeerState backoff', () {
-    test('isInBackoff is false when nextRetryAfter is null', () {
-      final now = DateTime.now();
-      final peer = DiscoveredPeerState(
-        transportId: 'device-1',
-        rssi: -60,
-        discoveredAt: now,
-        lastSeen: now,
-      );
-      expect(peer.isInBackoff, false);
-    });
-
-    test('isInBackoff is true when nextRetryAfter is in the future', () {
-      final now = DateTime.now();
-      final peer = DiscoveredPeerState(
-        transportId: 'device-1',
-        rssi: -60,
-        discoveredAt: now,
-        lastSeen: now,
-        nextRetryAfter: now.add(const Duration(seconds: 30)),
-      );
-      expect(peer.isInBackoff, true);
-    });
-
-    test('isInBackoff is false when nextRetryAfter is in the past', () {
-      final now = DateTime.now();
-      final peer = DiscoveredPeerState(
-        transportId: 'device-1',
-        rssi: -60,
-        discoveredAt: now,
-        lastSeen: now,
-        nextRetryAfter: now.subtract(const Duration(seconds: 1)),
-      );
-      expect(peer.isInBackoff, false);
-    });
-  });
 
   // =========================================================================
   // Unknown action
