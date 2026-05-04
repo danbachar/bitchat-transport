@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:redux/redux.dart';
 import 'package:uuid/uuid.dart';
 import 'ble/permission_handler.dart';
+import 'signaling/signaling_codec.dart';
 import 'signaling/signaling_service.dart';
 import 'transport/address_utils.dart';
 import 'transport/ble_transport_service.dart';
@@ -2673,33 +2674,33 @@ class GrassrootsNetwork {
   ///
   /// Throttled: each peer is attempted at most once per [_discoveryRetryInterval].
   void _discoverUnreachableFriends() {
-    debugPrint("Discovering unreachable friends");
+    // debugPrint("Discovering unreachable friends");
     if (!_udpAvailable) {
-      debugPrint("No UDP");
+      // debugPrint("No UDP");
       return; // Need UDP to establish the connection
     }
 
     final wellConnected = store.state.peers.wellConnectedFriends;
     final rendezvousCount = _configuredRendezvousServers().length;
     if (wellConnected.isEmpty && rendezvousCount == 0) {
-      debugPrint("No well connected friends and no RVs");
+      // debugPrint("No well connected friends and no RVs");
       return;
     }
 
     final now = DateTime.now();
     final friends = _peersState.friends;
 
-    var len = friends.length;
-    debugPrint("Have $len friends");
+    // var len = friends.length;
+    // debugPrint("Have $len friends");
 
     for (final friend in friends) {
       // Skip friends we can already reach
       if (_hasLiveBlePath(friend)) {
-        debugPrint("Have live BLE path to friend");
+        // debugPrint("Have live BLE path to friend");
         continue;
       }
       if (_udpService?.getPeerIdForPubkey(friend.publicKey) != null) {
-        debugPrint("Have peer Id for public key in udp service");
+        // debugPrint("Have peer Id for public key in udp service");
         continue;
       }
 
@@ -2707,7 +2708,7 @@ class GrassrootsNetwork {
       final lastAttempt = _lastDiscoveryAttempt[friend.pubkeyHex];
       if (lastAttempt != null &&
           now.difference(lastAttempt) < _discoveryRetryInterval) {
-        debugPrint("SKip because tried recently");
+        // debugPrint("Skip because tried recently");
         continue;
       }
 
@@ -2788,7 +2789,7 @@ class GrassrootsNetwork {
         (data, transport, {bool isNew = false, String? udpPeerId}) {
       final pubkeyHex =
           data.publicKey.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-      debugPrint('Announce inc');
+      // debugPrint('Announce inc');
       if (_isRendezvousPubkeyHex(pubkeyHex)) {
         _completeRendezvousResponseWaiters(pubkeyHex);
       }
@@ -2832,8 +2833,8 @@ class GrassrootsNetwork {
           }
         }
       } else {
-        debugPrint(
-            'Either we are not well connected, or peer has null udpAddress, this is expected');
+        // debugPrint(
+        //     'Either we are not well connected, or peer has null udpAddress, this is expected');
       }
 
       if (transport == PeerTransport.bleDirect) {
@@ -2990,6 +2991,25 @@ class GrassrootsNetwork {
       return false;
     };
     _signalingService.sendDirectSignaling = _sendDirectSignalingOverLiveBle;
+
+    // Address-aware send: target an RV at an explicit ip:port even if we
+    // haven't otherwise registered or connected to it. Used by AVAILABLE
+    // fan-out for RVs we learned about from a friend (RV_LIST).
+    _signalingService.sendSignalingToAddress = (
+      recipientPubkey,
+      address,
+      signalingPayload,
+    ) async {
+      final bytes = await _createSignedSignalingPacket(
+        recipientPubkey,
+        signalingPayload,
+      );
+      if (_udpService == null || !_udpAvailable) return false;
+      final pubkeyHex = recipientPubkey
+          .map((b) => b.toRadixString(16).padLeft(2, '0'))
+          .join();
+      return _sendViaUdp(pubkeyHex, address, bytes);
+    };
 
     // Hole-punch initiation: a well-connected friend told us to start punching
     _signalingService.onPunchInitiate =
@@ -3264,34 +3284,35 @@ class GrassrootsNetwork {
     final peer = _peersState.getPeerByPubkeyHex(pubkeyHex);
     if (peer == null || !peer.isFriend) return;
 
-    final rvPubkeys = _ownRvServerPubkeys();
-    if (rvPubkeys.isEmpty) return;
+    final rvServers = _ownRvServerEntries();
+    if (rvServers.isEmpty) return;
 
     debugPrint(
-      '[rv-list] Sending ${rvPubkeys.length} rendezvous server pubkey(s) to '
+      '[rv-list] Sending ${rvServers.length} rendezvous server entr(y/ies) to '
       '${peer.displayName}',
     );
-    unawaited(_signalingService.sendRvList(peer.publicKey, rvPubkeys));
+    unawaited(_signalingService.sendRvList(peer.publicKey, rvServers));
   }
 
   /// Broadcast our current RV list to every UDP-reachable friend. Called
   /// when the local rendezvous server settings change.
   void _broadcastRvListToFriends() {
-    final rvPubkeys = _ownRvServerPubkeys();
-    if (rvPubkeys.isEmpty || _udpService == null) return;
+    final rvServers = _ownRvServerEntries();
+    if (rvServers.isEmpty || _udpService == null) return;
     for (final friend in _peersState.friends) {
       if (_udpService!.getPeerIdForPubkey(friend.publicKey) == null) continue;
       debugPrint(
         '[rv-list] Re-broadcasting RV list to ${friend.displayName} '
         '(settings changed)',
       );
-      unawaited(_signalingService.sendRvList(friend.publicKey, rvPubkeys));
+      unawaited(_signalingService.sendRvList(friend.publicKey, rvServers));
     }
   }
 
-  List<Uint8List> _ownRvServerPubkeys() {
+  List<RvServerEntry> _ownRvServerEntries() {
     return [
-      for (final config in _configuredRendezvousServers()) config.pubkey,
+      for (final config in _configuredRendezvousServers())
+        RvServerEntry(pubkey: config.pubkey, address: config.address),
     ];
   }
 
@@ -3442,7 +3463,7 @@ class GrassrootsNetwork {
           )
         : await _createSignedAnnounce();
 
-    debugPrint('[ble-announce] payload size=${announce.length}');
+    // debugPrint('[ble-announce] payload size=${announce.length}');
     final sent = await _bleService!.sendToPeer(deviceId, announce);
     if (sent) {
       if (isFriend) {

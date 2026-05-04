@@ -165,6 +165,23 @@ class AvailableMessage extends SignalingMessage {
       'Available(peer: ${peerPubkey.sublist(0, 4).map((b) => b.toRadixString(16).padLeft(2, '0')).join()}...)';
 }
 
+/// One rendezvous server's identity: pubkey + reachable address.
+class RvServerEntry {
+  /// 32-byte Ed25519 public key of the rendezvous server.
+  final Uint8List pubkey;
+
+  /// "ip:port" address where the rendezvous server can be reached.
+  final String address;
+
+  const RvServerEntry({required this.pubkey, required this.address});
+
+  String get pubkeyHex =>
+      pubkey.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
+  @override
+  String toString() => 'RvServerEntry($address, ${pubkeyHex.substring(0, 8)}...)';
+}
+
 /// Agent informs a friend about its configured rendezvous servers.
 ///
 /// The friend stores this list keyed by the sender's pubkey so that, on
@@ -174,13 +191,13 @@ class RvListMessage extends SignalingMessage {
   @override
   SignalingType get type => SignalingType.rvList;
 
-  /// Public keys (each 32 bytes) of the sender's configured rendezvous servers.
-  final List<Uint8List> rvPubkeys;
+  /// Rendezvous server entries (pubkey + address pairs).
+  final List<RvServerEntry> entries;
 
-  RvListMessage({required this.rvPubkeys});
+  RvListMessage({required this.entries});
 
   @override
-  String toString() => 'RvList(count: ${rvPubkeys.length})';
+  String toString() => 'RvList(count: ${entries.length})';
 }
 
 // ===== Codec =====
@@ -195,7 +212,8 @@ class RvListMessage extends SignalingMessage {
 /// ADDR_REFLECT   : type(1) + ipLen(2) + ipBytes + port(2)
 /// RECONNECT      : type(1) + peerPubkey(32)
 /// AVAILABLE      : type(1) + peerPubkey(32)
-/// RV_LIST        : type(1) + count(2) + repeated(pubkey(32))
+/// RV_LIST        : type(1) + count(2) +
+///                  repeated(pubkey(32) + addrLen(2) + addrBytes)
 /// ```
 class SignalingCodec {
   const SignalingCodec();
@@ -258,9 +276,12 @@ class SignalingCodec {
   Uint8List _encodeRvList(RvListMessage msg) {
     final buffer = BytesBuilder();
     buffer.addByte(SignalingType.rvList.value);
-    _writeUint16(buffer, msg.rvPubkeys.length);
-    for (final pubkey in msg.rvPubkeys) {
-      buffer.add(pubkey);
+    _writeUint16(buffer, msg.entries.length);
+    for (final entry in msg.entries) {
+      buffer.add(entry.pubkey);
+      final addrBytes = Uint8List.fromList(entry.address.codeUnits);
+      _writeUint16(buffer, addrBytes.length);
+      buffer.add(addrBytes);
     }
     return buffer.toBytes();
   }
@@ -349,16 +370,25 @@ class SignalingCodec {
       throw const FormatException('RvList payload too short');
     }
     final count = _readUint16(data, 0);
-    final expected = 2 + count * 32;
-    if (data.length < expected) {
-      throw const FormatException('RvList payload truncated');
-    }
-    final pubkeys = <Uint8List>[];
+    var offset = 2;
+    final entries = <RvServerEntry>[];
     for (var i = 0; i < count; i++) {
-      final start = 2 + i * 32;
-      pubkeys.add(Uint8List.fromList(data.sublist(start, start + 32)));
+      if (offset + 34 > data.length) {
+        throw const FormatException('RvList entry truncated');
+      }
+      final pubkey = Uint8List.fromList(data.sublist(offset, offset + 32));
+      offset += 32;
+      final addrLen = _readUint16(data, offset);
+      offset += 2;
+      if (offset + addrLen > data.length) {
+        throw const FormatException('RvList address truncated');
+      }
+      final address =
+          String.fromCharCodes(data.sublist(offset, offset + addrLen));
+      offset += addrLen;
+      entries.add(RvServerEntry(pubkey: pubkey, address: address));
     }
-    return RvListMessage(rvPubkeys: pubkeys);
+    return RvListMessage(entries: entries);
   }
 
   // ===== Helpers =====

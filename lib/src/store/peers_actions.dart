@@ -235,15 +235,16 @@ class AssociateUdpAddressAction extends PeerAction {
   });
 }
 
-/// Update the set of rendezvous server pubkeys a peer reaches its peers
-/// through. Driven by the RV_LIST signaling message.
+/// Update the set of rendezvous servers a peer reaches its peers through.
+/// Map keys are lowercase pubkey hexes; values are "ip:port" addresses.
+/// Driven by the RV_LIST signaling message.
 class PeerRvServersUpdatedAction extends PeerAction {
   final Uint8List publicKey;
-  final Set<String> rvServerPubkeyHexes;
+  final Map<String, String> rvServers;
 
   PeerRvServersUpdatedAction({
     required this.publicKey,
-    required this.rvServerPubkeyHexes,
+    required this.rvServers,
   });
 }
 

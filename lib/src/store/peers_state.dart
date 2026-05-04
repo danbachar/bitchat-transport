@@ -169,10 +169,11 @@ class PeerState {
   /// the actual transport-level connection state right now.
   final bool hasLiveUdpConnection;
 
-  /// Pubkey hexes of rendezvous servers this peer uses, learned via the
-  /// RV_LIST signaling exchange. Used to target AVAILABLE fan-out at exactly
-  /// the servers the peer is reaching for reconnect (per spec §3.5).
-  final Set<String> knownRvServerPubkeys;
+  /// Rendezvous servers this peer uses, learned via the RV_LIST signaling
+  /// exchange. Keyed by lowercase pubkey hex; value is the "ip:port" address.
+  /// Used to target AVAILABLE fan-out at exactly the servers the peer is
+  /// reaching for reconnect (per spec §3.5).
+  final Map<String, String> knownRvServers;
 
   const PeerState({
     required this.publicKey,
@@ -192,7 +193,7 @@ class PeerState {
     this.isFriend = false,
     this.lastDirectReachAt,
     this.hasLiveUdpConnection = false,
-    this.knownRvServerPubkeys = const {},
+    this.knownRvServers = const {},
   });
 
   /// Hex representation of public key (for map keys)
@@ -286,7 +287,7 @@ class PeerState {
     bool? isFriend,
     DateTime? lastDirectReachAt,
     bool? hasLiveUdpConnection,
-    Set<String>? knownRvServerPubkeys,
+    Map<String, String>? knownRvServers,
   }) {
     return PeerState(
       publicKey: publicKey ?? this.publicKey,
@@ -307,7 +308,7 @@ class PeerState {
       isFriend: isFriend ?? this.isFriend,
       lastDirectReachAt: lastDirectReachAt ?? this.lastDirectReachAt,
       hasLiveUdpConnection: hasLiveUdpConnection ?? this.hasLiveUdpConnection,
-      knownRvServerPubkeys: knownRvServerPubkeys ?? this.knownRvServerPubkeys,
+      knownRvServers: knownRvServers ?? this.knownRvServers,
     );
   }
 
@@ -329,7 +330,7 @@ class PeerState {
           isFriend == other.isFriend &&
           lastDirectReachAt == other.lastDirectReachAt &&
           hasLiveUdpConnection == other.hasLiveUdpConnection &&
-          setEquals(knownRvServerPubkeys, other.knownRvServerPubkeys);
+          mapEquals(knownRvServers, other.knownRvServers);
 
   @override
   int get hashCode => Object.hash(
@@ -346,7 +347,8 @@ class PeerState {
         isFriend,
         lastDirectReachAt,
         hasLiveUdpConnection,
-        Object.hashAll(knownRvServerPubkeys),
+        Object.hashAll(knownRvServers.entries
+            .map((e) => Object.hash(e.key, e.value))),
       );
 }
 

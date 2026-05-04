@@ -494,14 +494,16 @@ PeersState peersReducer(PeersState state, dynamic action) {
     final pubkeyHex = _pubkeyToHex(action.publicKey);
     final existing = state.peers[pubkeyHex];
     if (existing == null) return state;
-    final normalized = action.rvServerPubkeyHexes
-        .map((hex) => hex.toLowerCase())
-        .where((hex) => hex.isNotEmpty)
-        .toSet();
-    if (setEquals(existing.knownRvServerPubkeys, normalized)) {
+    final normalized = <String, String>{};
+    for (final entry in action.rvServers.entries) {
+      final hex = entry.key.toLowerCase();
+      if (hex.isEmpty || entry.value.trim().isEmpty) continue;
+      normalized[hex] = entry.value;
+    }
+    if (mapEquals(existing.knownRvServers, normalized)) {
       return state;
     }
-    final updated = existing.copyWith(knownRvServerPubkeys: normalized);
+    final updated = existing.copyWith(knownRvServers: normalized);
     return state.copyWith(
       peers: Map.from(state.peers)..[pubkeyHex] = updated,
     );

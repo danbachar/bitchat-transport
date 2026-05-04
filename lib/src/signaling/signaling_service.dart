@@ -82,6 +82,16 @@ class SignalingService {
   Future<bool> Function(Uint8List recipientPubkey, Uint8List signalingPayload)?
       sendDirectSignaling;
 
+  /// Send a signaling payload to a specific UDP address — used when fanning
+  /// out RECONNECT/AVAILABLE to rendezvous servers we've learned about from
+  /// a friend (via RV_LIST) but haven't otherwise registered. The coordinator
+  /// resolves the address via [_sendViaUdp].
+  Future<bool> Function(
+    Uint8List recipientPubkey,
+    String address,
+    Uint8List signalingPayload,
+  )? sendSignalingToAddress;
+
   /// Fired when a rendezvous facilitator (or direct peer) tells us to start
   /// hole-punching. [readyRecipientPubkey] is where we should send PUNCH_READY
   /// after finishing our local punch — either the facilitator or the peer.
@@ -129,61 +139,84 @@ class SignalingService {
   /// the target is known to use.
   ///
   /// Spec §3.5: when B detects A went silent, B contacts *A's* known
-  /// rendezvous agents — not B's own. We learn the target's RV list via the
-  /// RV_LIST signaling exchange. If the target hasn't told us their list
-  /// yet, fall back to common well-connected friends as a friends-based
-  /// rendezvous mediator.
+  /// rendezvous agents — not B's own. We learn the target's RV list (pubkey
+  /// + address) via the RV_LIST signaling exchange. If the target hasn't
+  /// told us their list yet, fall back to common well-connected friends as
+  /// a friends-based rendezvous mediator.
   ///
   /// Returns the number of facilitators the message was sent to.
   Future<int> fanOutAvailable(Uint8List targetPubkey) async {
     final targetHex = _pubkeyToHex(targetPubkey);
     final targetPeer = store.state.peers.getPeerByPubkeyHex(targetHex);
 
-    final facilitators = <String, Uint8List>{};
+    final payload = codec.encode(AvailableMessage(peerPubkey: targetPubkey));
+    var sent = 0;
 
-    // Primary: target's known rendezvous servers (spec-compliant).
+    // Primary: target's known rendezvous servers (spec-compliant). Send via
+    // the address the friend told us — needed for RVs we don't ourselves
+    // have configured.
+    final rvHexes = <String>[];
     if (targetPeer != null) {
-      for (final hex in targetPeer.knownRvServerPubkeys) {
-        final normalized = hex.toLowerCase();
-        if (normalized.isEmpty || normalized == targetHex) continue;
+      for (final entry in targetPeer.knownRvServers.entries) {
+        final hex = entry.key.toLowerCase();
+        if (hex.isEmpty || hex == targetHex) continue;
+        rvHexes.add(hex);
+      }
+      rvHexes.sort();
+      for (final hex in rvHexes) {
+        final address = targetPeer.knownRvServers[hex]!;
+        Uint8List rvPubkey;
         try {
-          facilitators.putIfAbsent(normalized, () => _hexToBytes(normalized));
-        } catch (_) {}
+          rvPubkey = _hexToBytes(hex);
+        } catch (_) {
+          continue;
+        }
+        final ok = await sendSignalingToAddress?.call(
+              rvPubkey,
+              address,
+              payload,
+            ) ??
+            false;
+        if (ok) {
+          sent++;
+        } else {
+          debugPrint(
+            '[AVAILABLE] Could not reach RV ${hex.substring(0, 8)}... at '
+            '$address',
+          );
+        }
       }
     }
 
     // Fallback: well-connected friends (friends-based rendezvous mediators).
+    final wcFriends = <String, Uint8List>{};
     for (final friend in store.state.peers.wellConnectedFriends) {
       final friendHex = _pubkeyToHex(friend.publicKey);
       if (friendHex == targetHex) continue;
-      facilitators.putIfAbsent(friendHex, () => friend.publicKey);
+      wcFriends.putIfAbsent(friendHex, () => friend.publicKey);
     }
-
-    if (facilitators.isEmpty) {
-      debugPrint(
-        '[AVAILABLE] No facilitators known for ${targetHex.substring(0, 8)}... '
-        '(target has not advertised RV list yet, no common WC friends)',
-      );
-      return 0;
-    }
-
-    final payload = codec.encode(AvailableMessage(peerPubkey: targetPubkey));
-    final orderedHexes = facilitators.keys.toList()..sort();
-    debugPrint(
-      '[AVAILABLE] Fanning out for ${targetHex.substring(0, 8)}... to '
-      '${orderedHexes.length} facilitator(s) (target RVs + common WC friends)',
-    );
-
-    var sent = 0;
-    for (final hex in orderedHexes) {
-      final ok = await sendSignaling?.call(facilitators[hex]!, payload) ?? false;
+    final wcHexes = wcFriends.keys.toList()..sort();
+    for (final hex in wcHexes) {
+      final ok = await sendSignaling?.call(wcFriends[hex]!, payload) ?? false;
       if (ok) {
         sent++;
       } else {
         debugPrint(
-          '[AVAILABLE] Could not reach facilitator ${hex.substring(0, 8)}...',
+          '[AVAILABLE] Could not reach WC friend ${hex.substring(0, 8)}...',
         );
       }
+    }
+
+    if (sent == 0) {
+      debugPrint(
+        '[AVAILABLE] No facilitators reached for ${targetHex.substring(0, 8)}'
+        ' (RV count=${rvHexes.length}, WC friends=${wcHexes.length})',
+      );
+    } else {
+      debugPrint(
+        '[AVAILABLE] Sent for ${targetHex.substring(0, 8)} to '
+        '${rvHexes.length} target RV(s) + ${wcHexes.length} WC friend(s)',
+      );
     }
     return sent;
   }
@@ -226,9 +259,9 @@ class SignalingService {
   /// target AVAILABLE at exactly those servers when they detect us silent.
   Future<bool> sendRvList(
     Uint8List recipientPubkey,
-    List<Uint8List> ownRvPubkeys,
+    List<RvServerEntry> ownRvServers,
   ) async {
-    final msg = RvListMessage(rvPubkeys: ownRvPubkeys);
+    final msg = RvListMessage(entries: ownRvServers);
     return await sendSignaling?.call(recipientPubkey, codec.encode(msg)) ??
         false;
   }
@@ -365,18 +398,19 @@ class SignalingService {
   }
 
   void _handleRvList(Uint8List senderPubkey, RvListMessage msg) {
-    final hexes = <String>{};
-    for (final pubkey in msg.rvPubkeys) {
-      if (pubkey.length != 32) continue;
-      hexes.add(_pubkeyToHex(pubkey));
+    final servers = <String, String>{};
+    for (final entry in msg.entries) {
+      if (entry.pubkey.length != 32) continue;
+      if (entry.address.trim().isEmpty) continue;
+      servers[_pubkeyToHex(entry.pubkey)] = entry.address;
     }
     debugPrint(
       '[rv-list] ${_pubkeyToHex(senderPubkey).substring(0, 8)} advertises '
-      '${hexes.length} rendezvous server(s)',
+      '${servers.length} rendezvous server(s)',
     );
     store.dispatch(PeerRvServersUpdatedAction(
       publicKey: senderPubkey,
-      rvServerPubkeyHexes: hexes,
+      rvServers: servers,
     ));
   }
 
