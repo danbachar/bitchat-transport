@@ -1195,7 +1195,12 @@ void main() {
       expect(result.peers.containsKey(hex), false);
     });
 
-    test('marks stale friend peers as disconnected', () {
+    test('does NOT mutate connectionState or BLE IDs of stale friends', () {
+      // Strict-projection contract: timer-driven reducers may not flip
+      // connectionState or clear BLE device IDs. Those are exclusively
+      // driven by plugin events (BLE) and UDX events (UDP). The stale
+      // reducer's only job is bounding memory by removing non-friend
+      // peers we haven't heard from.
       final pubkey = _testPubkey(1);
       final hex = _pubkeyHex(pubkey);
       final now = DateTime.now();
@@ -1219,73 +1224,9 @@ void main() {
 
       expect(result.peers.containsKey(hex), true);
       final peer = result.peers[hex]!;
-      expect(peer.connectionState, PeerConnectionState.disconnected);
-      expect(peer.isFriend, true);
-      expect(peer.rssi, -100);
-      expect(peer.bleCentralDeviceId, isNull);
-      expect(peer.blePeripheralDeviceId, isNull);
-      expect(peer.bleDeviceId, isNull);
-      // udpAddress is preserved — it's the last known location for reconnection
-      expect(peer.udpAddress, '[2001:db8::1]:4001');
-    });
-
-    test('clears stale BLE IDs when lastBleSeen exceeds threshold', () {
-      final pubkey = _testPubkey(1);
-      final hex = _pubkeyHex(pubkey);
-      final now = DateTime.now();
-      final initial = PeersState(
-        peers: {
-          hex: PeerState(
-            publicKey: pubkey,
-            nickname: 'Alice',
-            connectionState: PeerConnectionState.connected,
-            lastSeen: now, // recently seen via UDP
-            bleCentralDeviceId: 'central-1',
-            blePeripheralDeviceId: 'peripheral-1',
-            lastBleSeen: now.subtract(const Duration(minutes: 5)), // stale BLE
-            udpAddress: '[2001:db8::1]:4001',
-          ),
-        },
-      );
-      final action = StalePeersRemovedAction(const Duration(minutes: 2));
-
-      final result = peersReducer(initial, action);
-
-      final peer = result.peers[hex]!;
-      // BLE IDs cleared because lastBleSeen is stale
-      expect(peer.bleCentralDeviceId, isNull);
-      expect(peer.blePeripheralDeviceId, isNull);
-      // But peer stays connected via UDP
       expect(peer.connectionState, PeerConnectionState.connected);
-      expect(peer.udpAddress, '[2001:db8::1]:4001');
-    });
-
-    test('clears BLE IDs with no lastBleSeen timestamp', () {
-      final pubkey = _testPubkey(1);
-      final hex = _pubkeyHex(pubkey);
-      final now = DateTime.now();
-      final initial = PeersState(
-        peers: {
-          hex: PeerState(
-            publicKey: pubkey,
-            nickname: 'Alice',
-            connectionState: PeerConnectionState.connected,
-            lastSeen: now,
-            bleCentralDeviceId: 'central-from-udp-announce',
-            udpAddress: '[2001:db8::1]:4001',
-            hasLiveUdpConnection: true,
-          ),
-        },
-      );
-      final action = StalePeersRemovedAction(const Duration(minutes: 2));
-
-      final result = peersReducer(initial, action);
-
-      final peer = result.peers[hex]!;
-      expect(peer.bleCentralDeviceId, isNull);
-      expect(peer.blePeripheralDeviceId, isNull);
-      expect(peer.connectionState, PeerConnectionState.connected);
-      expect(peer.hasLiveUdpConnection, isTrue);
+      expect(peer.bleCentralDeviceId, 'central-1');
+      expect(peer.blePeripheralDeviceId, 'peripheral-1');
       expect(peer.udpAddress, '[2001:db8::1]:4001');
     });
 
@@ -1315,7 +1256,11 @@ void main() {
       );
     });
 
-    test('skips already-disconnected peers', () {
+    test('removes stale non-friend peers regardless of connectionState', () {
+      // The reducer doesn't gate on connectionState — that field is
+      // plugin-/UDX-driven, not timer-driven. Non-friend stale peers are
+      // removed for memory pressure whether they read as connected or
+      // disconnected at the moment the timer fires.
       final pubkey = _testPubkey(1);
       final hex = _pubkeyHex(pubkey);
       final now = DateTime.now();
@@ -1334,9 +1279,7 @@ void main() {
 
       final result = peersReducer(initial, action);
 
-      // Disconnected peers are not considered for stale removal
-      // (reducer checks connectionState != connected first)
-      expect(result.peers.containsKey(hex), true);
+      expect(result.peers.containsKey(hex), false);
     });
   });
 
