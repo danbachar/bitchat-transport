@@ -480,7 +480,7 @@ void main() {
         sentMessages.add((recipient, payload));
         return true;
       };
-      service.onAddrReflected = (ip, port) {
+      service.onAddrReflected = (senderPubkey, ip, port) {
         lastReflectIp = Uint8List.fromList(ip.codeUnits);
       };
     });
@@ -595,7 +595,7 @@ void main() {
     test('fires onAddrReflected with reflected address', () {
       String? gotIp;
       int? gotPort;
-      service.onAddrReflected = (ip, port) {
+      service.onAddrReflected = (senderPubkey, ip, port) {
         gotIp = ip;
         gotPort = port;
       };
@@ -623,7 +623,7 @@ void main() {
       service2.sendSignaling = (recipient, payload) async => true;
 
       String? gotIp;
-      service2.onAddrReflected = (ip, port) => gotIp = ip;
+      service2.onAddrReflected = (senderPubkey, ip, port) => gotIp = ip;
 
       service2.processSignaling(
         anchorKey,

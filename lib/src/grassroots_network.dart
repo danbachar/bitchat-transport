@@ -1139,6 +1139,7 @@ class GrassrootsNetwork {
 
     // Friends rely on us to tell them which RV agents to contact when we
     // disappear. Re-broadcast whenever the list changes.
+    debugPrint("Broadcasting RV list to friends");
     _broadcastRvListToFriends();
   }
 
@@ -3034,7 +3035,23 @@ class GrassrootsNetwork {
     // NAT-translated address the friend observed — correct external port included.
     // The corrected address will be broadcast to all friends on the next
     // periodic ANNOUNCE cycle.
-    _signalingService.onAddrReflected = (ip, port) {
+    _signalingService.onAddrReflected = (senderPubkey, ip, port) {
+      // The GLP-spec response to a registration ANNOUNCE is an addrReflect.
+      // If the sender is a configured (or in-flight) rendezvous server,
+      // treat it as authoritative proof of the round-trip and unblock
+      // _verifyRendezvousServerResponds. The server's separate ANNOUNCE-back
+      // is informational — relying on it is fragile because that send path
+      // is fire-and-forget and can be dropped on stream tear-down.
+      final senderHex =
+          senderPubkey.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+      if (_isRendezvousPubkeyHex(senderHex)) {
+        debugPrint(
+          '[rendezvous] Server ${senderHex.substring(0, 8)}... acknowledged '
+          'via addrReflect',
+        );
+        _completeRendezvousResponseWaiters(senderHex);
+      }
+
       final reflectedIp = InternetAddress.tryParse(ip);
       if (reflectedIp == null) return;
 
