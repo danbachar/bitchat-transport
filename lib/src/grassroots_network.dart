@@ -3442,11 +3442,16 @@ class GrassrootsNetwork {
 
   /// Send ANNOUNCE directly to a specific BLE device ID.
   ///
-  /// Called immediately when a new BLE connection is established (either as
-  /// central or peripheral). Sends with address if the device maps to a known
-  /// friend, without address otherwise (privacy). This ensures the other side
-  /// learns our identity immediately — don't wait for the periodic broadcast
-  /// which may use stale device IDs.
+  /// Called from the periodic [_broadcastAnnounce] loop and from
+  /// [_sendFriendAnnounceToConnectedBlePaths] (which fires when we receive
+  /// an ANNOUNCE from a freshly-identified friend, to close the privacy
+  /// gap where the previous periodic broadcast had to omit our address
+  /// because we hadn't yet linked the device ID to a pubkey).
+  ///
+  /// Crucially, NOT called on BLE-connection-established events — the
+  /// connection-stream listener is bookkeeping only. ANNOUNCE traffic is
+  /// strictly cycle-driven; firing on stream establishment races the
+  /// periodic broadcast and the BLE-address-rotation handling.
   Future<bool> _sendAnnounceToDevice(String deviceId) async {
     if (_bleService == null || !_bleAvailable) return false;
 
