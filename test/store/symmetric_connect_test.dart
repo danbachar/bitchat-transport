@@ -222,8 +222,6 @@ void main() {
       final disc = state.discoveredBlePeers[pathId]!;
       expect(disc.isConnecting, false);
       expect(disc.isConnected, false);
-      // No backoff fields left to leak — verified by the type:
-      // the test would not compile if `disc.consecutiveFailures` existed.
     });
 
     test(
