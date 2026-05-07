@@ -522,17 +522,27 @@ class PeersState {
 
   @override
   int get hashCode => Object.hash(
-    discoveredBlePeers.length,
-    peers.length,
-    Object.hashAll(
-      (friendsOfFriends.entries.toList()
-            ..sort((a, b) => a.key.compareTo(b.key)))
-          .map(
-            (entry) => Object.hash(
-              entry.key,
-              Object.hashAll(entry.value.toList()..sort()),
-            ),
-          ),
+    _hashStringKeyedMap(discoveredBlePeers),
+    _hashStringKeyedMap(peers),
+    _hashStringSetMap(friendsOfFriends),
+  );
+}
+
+int _hashStringKeyedMap<T>(Map<String, T> map) {
+  return Object.hashAll(
+    (map.entries.toList()..sort((a, b) => a.key.compareTo(b.key))).map(
+      (entry) => Object.hash(entry.key, entry.value),
+    ),
+  );
+}
+
+int _hashStringSetMap(Map<String, Set<String>> map) {
+  return Object.hashAll(
+    (map.entries.toList()..sort((a, b) => a.key.compareTo(b.key))).map(
+      (entry) => Object.hash(
+        entry.key,
+        Object.hashAll(entry.value.toList()..sort()),
+      ),
     ),
   );
 }
