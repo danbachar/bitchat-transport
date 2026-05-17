@@ -463,11 +463,11 @@ class _GrassrootsHomeState extends State<GrassrootsHome>
       String messageId,
       Uint8List senderPubkey,
       MessageTransport transport) async {
-    // Find sender name
-    final peer = _peers.values
-        .where((p) => ChatMessage.pubkeyToHex(p.publicKey) == senderHex)
-        .firstOrNull;
-    final senderName = peer?.displayName ?? 'Unknown';
+    // Resolve against the full peer state (not _peers, which is BLE-nearby
+    // only) so UDP-only senders don't print as "Unknown".
+    final senderName =
+        appStore.state.peers.getPeerByPubkeyHex(senderHex)?.displayName ??
+            'Unknown';
     final transportName = transport == MessageTransport.udp ? 'UDX' : 'BLE';
 
     switch (block.type) {
@@ -476,7 +476,7 @@ class _GrassrootsHomeState extends State<GrassrootsHome>
         debugPrint(
             '💬 [$transportName] Message from $senderName: "${sayBlock.content}"');
         await _handleTextMessage(
-            senderHex, myHex, sayBlock.content, messageId, senderPubkey);
+            senderHex, myHex, sayBlock.content, messageId);
 
       case BlockType.friendshipOffer:
         debugPrint(
@@ -499,7 +499,7 @@ class _GrassrootsHomeState extends State<GrassrootsHome>
   }
 
   Future<void> _handleTextMessage(String senderHex, String myHex,
-      String content, String messageId, Uint8List senderPubkey) async {
+      String content, String messageId) async {
     // Save message to Redux store
     appStore.dispatch(SaveChatMessageAction(
       senderPubkeyHex: senderHex,
@@ -510,11 +510,11 @@ class _GrassrootsHomeState extends State<GrassrootsHome>
     ));
     // Read receipt sent when user opens the chat (see ChatScreen._sendReadReceipts)
 
-    // Find sender name
-    final peer = _peers.values
-        .where((p) => ChatMessage.pubkeyToHex(p.publicKey) == senderHex)
-        .firstOrNull;
-    final senderName = peer?.displayName ?? 'Unknown';
+    // Resolve against the full peer state (not _peers, which is BLE-nearby
+    // only) so UDP-only senders don't notify as "Unknown".
+    final senderName =
+        appStore.state.peers.getPeerByPubkeyHex(senderHex)?.displayName ??
+            'Unknown';
 
     // Show notification
     await _showMessageNotification(senderHex, senderName, content);
@@ -1163,9 +1163,9 @@ class _GrassrootsHomeState extends State<GrassrootsHome>
       if (messages.isEmpty) continue;
 
       final lastMessage = messages.last;
-      final peer = _peers.values
-          .where((p) => ChatMessage.pubkeyToHex(p.publicKey) == peerHex)
-          .firstOrNull;
+      // Resolve at render time against the full peer state so previews include
+      // UDP-only peers and flip to the real name once ANNOUNCE arrives.
+      final peer = appStore.state.peers.getPeerByPubkeyHex(peerHex);
 
       chats.add(_ChatPreview(
         peerHex: peerHex,
