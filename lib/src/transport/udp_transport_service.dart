@@ -310,11 +310,13 @@ class UdpTransportService extends TransportService {
       }
     }
 
-    // Cancel multiplexer subscriptions
-    for (final sub in _multiplexerConnectionsSubs.values) {
+    // Cancel multiplexer subscriptions. Snapshot to avoid concurrent
+    // modification if anything mutates the map across the await.
+    final subs = _multiplexerConnectionsSubs.values.toList();
+    _multiplexerConnectionsSubs.clear();
+    for (final sub in subs) {
       await sub.cancel();
     }
-    _multiplexerConnectionsSubs.clear();
 
     // Clear connection tracking maps
     _tempKeyToPubkey.clear();
@@ -567,8 +569,11 @@ class UdpTransportService extends TransportService {
 
   @override
   Future<void> broadcast(Uint8List data, {Set<String>? excludePeerIds}) async {
-    // Send via UDX connections
-    for (final entry in _peerConnections.entries) {
+    // Snapshot entries before iterating: awaiting sendToPeer below releases
+    // control to the event loop, and a peer's onDone handler can remove its
+    // entry from _peerConnections, invalidating the live iterator.
+    final udxEntries = _peerConnections.entries.toList();
+    for (final entry in udxEntries) {
       if (excludePeerIds != null && excludePeerIds.contains(entry.key)) {
         continue;
       }
